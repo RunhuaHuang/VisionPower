@@ -13,17 +13,53 @@ import { readFile, writeFile } from 'node:fs/promises'
 
 const ROOT = new URL('../', import.meta.url)
 
+// Parse an ES module source into (a) its import statements, decomposed into
+// { names, module } pairs, and (b) the module body with `export ` prefixes
+// stripped. Decomposing imports lets us merge the same specifier across the two
+// source files (e.g. both import `stat` from node:fs/promises) without producing
+// a duplicate-identifier SyntaxError in the generated skill script.
 function stripModuleSyntax(source) {
-  const importLines = []
+  const imports = []
   const bodyLines = []
   for (const line of source.split('\n')) {
-    if (/^import\s.+from\s.+$/.test(line.trim())) {
-      importLines.push(line.trim())
+    const trimmed = line.trim()
+    const namedMatch = trimmed.match(/^import\s+\{([^}]*)\}\s+from\s+['"]([^'"]+)['"]$/)
+    if (namedMatch) {
+      const names = namedMatch[1].split(',').map((n) => n.trim()).filter(Boolean)
+      imports.push({ names, module: namedMatch[2] })
+    } else if (/^import\s.+from\s.+$/.test(trimmed)) {
+      // Fall back to a verbatim line for any import shape we don't decompose.
+      imports.push({ raw: trimmed })
     } else {
       bodyLines.push(line.replace(/^export\s+/, ''))
     }
   }
-  return { importLines, body: bodyLines.join('\n').trim() }
+  return { imports, body: bodyLines.join('\n').trim() }
+}
+
+// Merge imports from multiple sources, combining named imports that share the
+// same module specifier while preserving first-seen order and de-duplicating
+// identical names. Falls back to raw import lines for undecomposed statements.
+function mergeImports(sources) {
+  const byModule = new Map()
+  const rawLines = []
+  for (const { imports } of sources) {
+    for (const entry of imports) {
+      if (entry.raw) {
+        if (!rawLines.includes(entry.raw)) rawLines.push(entry.raw)
+        continue
+      }
+      if (!byModule.has(entry.module)) byModule.set(entry.module, [])
+      const existing = byModule.get(entry.module)
+      for (const name of entry.names) {
+        if (!existing.includes(name)) existing.push(name)
+      }
+    }
+  }
+  const merged = [...byModule.entries()].map(([module, names]) => {
+    return `import { ${names.join(', ')} } from '${module}'`
+  })
+  return [...merged, ...rawLines]
 }
 
 const MAIN = `// ---- Skill entry point (self-contained; no install, no extra deps) ----
@@ -135,7 +171,7 @@ mainSkill()
 export async function buildSkillScript() {
   const config = stripModuleSyntax(await readFile(new URL('src/config.js', ROOT), 'utf8'))
   const core = stripModuleSyntax(await readFile(new URL('src/vision-core.js', ROOT), 'utf8'))
-  const imports = [...new Set([...config.importLines, ...core.importLines])].join('\n')
+  const imports = mergeImports([config, core]).join('\n')
 
   return `#!/usr/bin/env node
 

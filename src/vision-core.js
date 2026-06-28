@@ -1,5 +1,6 @@
 import { realpathSync } from 'node:fs'
 import { readFile, realpath, stat } from 'node:fs/promises'
+import { createHash } from 'node:crypto'
 import { isIP } from 'node:net'
 import { extname, isAbsolute, resolve, sep } from 'node:path'
 
@@ -376,6 +377,56 @@ async function fetchVisionCompletion(requestBody, config) {
   }
 }
 
+// In-process result cache. Lives only in memory (never persisted), and the key
+// is derived from the exact request body the provider receives — model, the
+// fully-resolved image payloads (bytes or URL), the prompt, and max_tokens.
+// Structurally, two different inputs can never collide, so a hit is always a
+// correct repeat of an earlier answer within the same session. A long-lived MCP
+// server uses it to skip a billed model call when the agent resends the same
+// image+question. A miss degrades gracefully to a normal provider call.
+const resultCache = new Map()
+
+function computeCacheKey(requestBody) {
+  const hash = createHash('sha256')
+  hash.update(`model=${requestBody.model}\n`)
+  hash.update(`max_tokens=${requestBody.max_tokens}\n`)
+  for (const part of requestBody.messages?.[0]?.content ?? []) {
+    if (part.type === 'text') {
+      hash.update(`text:${part.text}\n`)
+    } else if (part.type === 'image_url') {
+      // image_url.url holds either a public URL or a full data: URI (bytes),
+      // so this captures the actual image content, not just a reference.
+      hash.update(`image:${part.image_url?.url ?? ''}\n`)
+    }
+  }
+  return hash.digest('hex')
+}
+
+function readResultCache(key, config) {
+  if (!config.cache?.enabled) return undefined
+  const entry = resultCache.get(key)
+  if (!entry) return undefined
+  if (Date.now() > entry.expiresAt) {
+    resultCache.delete(key)
+    return undefined
+  }
+  // Refresh recency so a frequently-repeated request stays hot (LRU eviction).
+  resultCache.delete(key)
+  resultCache.set(key, entry)
+  debugLog(config, `cache hit (entries=${resultCache.size})`)
+  return entry.text
+}
+
+function writeResultCache(key, text, config) {
+  if (!config.cache?.enabled) return
+  resultCache.set(key, { text, expiresAt: Date.now() + config.cache.ttlMs })
+  // Evict oldest entries once over capacity (Map preserves insertion order).
+  while (resultCache.size > config.cache.maxEntries) {
+    const oldestKey = resultCache.keys().next().value
+    resultCache.delete(oldestKey)
+  }
+}
+
 export async function describeImage(params, config) {
   const images = normalizeImageInputs(params, config)
   if (!config.apiKey) {
@@ -408,6 +459,10 @@ export async function describeImage(params, config) {
     max_tokens: config.maxTokens,
   }
 
+  const cacheKey = computeCacheKey(requestBody)
+  const cached = readResultCache(cacheKey, config)
+  if (cached !== undefined) return cached
+
   const startedAt = Date.now()
   debugLog(config, `requesting model=${config.model} images=${images.length}`)
   const bodyText = await fetchVisionCompletion(requestBody, config)
@@ -427,6 +482,7 @@ export async function describeImage(params, config) {
     throw new Error('Vision model returned no text content')
   }
 
+  writeResultCache(cacheKey, responseContent, config)
   debugLog(config, `completed in ${Date.now() - startedAt}ms`)
   return responseContent
 }

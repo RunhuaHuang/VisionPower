@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { buildSkillScript } from './build-skill.mjs'
@@ -21,6 +21,9 @@ function testConfig(overrides = {}) {
     maxImages: 8,
     maxRetries: 2,
     debug: false,
+    // Disable the process-wide result cache by default so each test exercises a
+    // real provider call. Cache behavior has its own dedicated tests below.
+    cache: { enabled: false, maxEntries: 0, ttlMs: 1000 },
     ...overrides,
   }
 }
@@ -188,6 +191,37 @@ try {
     },
   )
 
+  // --- In-memory result cache: identical input is served without a second call ---
+  const cacheConfig = testConfig({
+    cache: { enabled: true, maxEntries: 8, ttlMs: 5_000 },
+    // Distinct model so this never collides with another test's cache key.
+    model: 'cache-test-model',
+  })
+  await withMockFetch(async (calls) => {
+    const base64 = gifBytes.toString('base64')
+    const first = await describeImage({ image_base64: base64, prompt: 'describe' }, cacheConfig)
+    const second = await describeImage({ image_base64: base64, prompt: 'describe' }, cacheConfig)
+    assert.equal(first, 'ok')
+    assert.equal(second, 'ok')
+    // Same image+prompt+model+maxTokens → exactly one provider call, the second is cached.
+    assert.equal(calls.length, 1)
+  })
+
+  // A different prompt (or model) must NOT hit the cache — it bills a new call.
+  await withMockFetch(async (calls) => {
+    const base64 = gifBytes.toString('base64')
+    await describeImage({ image_base64: base64, prompt: 'one' }, cacheConfig)
+    await describeImage({ image_base64: base64, prompt: 'two' }, cacheConfig)
+    assert.equal(calls.length, 2)
+  })
+
+  // A different image (same prompt) must NOT hit the cache.
+  await withMockFetch(async (calls) => {
+    await describeImage({ image_base64: gifBytes.toString('base64'), prompt: 'same' }, cacheConfig)
+    await describeImage({ image_base64: pngBytes.toString('base64'), prompt: 'same' }, cacheConfig)
+    assert.equal(calls.length, 2)
+  })
+
   // --- The generated skill script stays in sync with the core ---
   const generatedSkill = await buildSkillScript()
   const committedSkill = readFileSync(new URL('../VisionPower-Skill/describe_image.mjs', import.meta.url), 'utf8')
@@ -290,6 +324,23 @@ try {
   assert.equal(fromFile.model, 'file-model')
   assert.equal(fromFile.baseUrl, 'https://file.example.com/v1')
   assert.equal(fromFile.maxImages, 3)
+  assert.deepEqual(fromFile.cache, { enabled: true, maxEntries: 32, ttlMs: 30 * 60 * 1000 }) // cache defaults to on
+
+  // Cache config file keys + env overrides.
+  const cacheFileConfigPath = join(tempDir, 'vp-cache.json')
+  writeFileSync(cacheFileConfigPath, JSON.stringify({
+    apiKey: 'file-key',
+    cache: { maxEntries: 5, ttlMs: 12_000 },
+  }))
+  const cacheFile = loadVisionConfig({ VISIONPOWER_CONFIG: cacheFileConfigPath })
+  assert.deepEqual(cacheFile.cache, { enabled: true, maxEntries: 5, ttlMs: 12_000 })
+
+  const cacheDisabled = loadVisionConfig({ VISIONPOWER_CONFIG: absentConfig, VISIONPOWER_API_KEY: 'k', VISIONPOWER_CACHE: 'false' })
+  assert.equal(cacheDisabled.cache.enabled, false)
+  const cacheEntries = cfg({ VISIONPOWER_API_KEY: 'k', VISIONPOWER_CACHE_MAX_ENTRIES: '7', VISIONPOWER_CACHE_TTL_MS: '9000' })
+  assert.deepEqual(cacheEntries.cache, { enabled: true, maxEntries: 7, ttlMs: 9000 })
+  // maxEntries of zero disables the cache (store nothing).
+  assert.equal(cfg({ VISIONPOWER_API_KEY: 'k', VISIONPOWER_CACHE_MAX_ENTRIES: '0' }).cache.enabled, false)
 
   const envBeatsFile = loadVisionConfig({ VISIONPOWER_CONFIG: fileConfigPath, VISIONPOWER_API_KEY: 'env-key' })
   assert.equal(envBeatsFile.apiKey, 'env-key')   // env wins
@@ -337,6 +388,31 @@ try {
   assert.equal(failedState.configVerified, false)
   assert.match(failedState.needsSetupAt, /^\d{4}-\d{2}-\d{2}T/)
   assert.equal(failedState.reason, 'Bearer [REDACTED] and apiKey: [REDACTED_API_KEY] are not configured')
+
+  // Writing state again cleans up orphaned temp files (older than 1h) from a
+  // prior crashed write, but leaves recent ones and unrelated files alone.
+  {
+    const cleanupDir = mkdtempSync(join(tmpdir(), 'visionpower-cleanup-'))
+    const cleanupStatePath = join(cleanupDir, 'skill-state.json')
+    const staleTemp = `${cleanupStatePath}.1111.1000.tmp`     // old orphan temp
+    const freshTemp = `${cleanupStatePath}.2222.2000.tmp`     // recent orphan temp
+    const unrelated = join(cleanupDir, 'unrelated.tmp')       // not our pattern
+    writeFileSync(staleTemp, 'orphan')
+    writeFileSync(freshTemp, 'orphan')
+    writeFileSync(unrelated, 'keep')
+    const twoHoursAgo = (Date.now() / 1000) - 2 * 60 * 60
+    const tenMinutesAgo = (Date.now() / 1000) - 10 * 60
+    utimesSync(staleTemp, twoHoursAgo, twoHoursAgo)
+    utimesSync(freshTemp, tenMinutesAgo, tenMinutesAgo)
+    utimesSync(unrelated, twoHoursAgo, twoHoursAgo)
+
+    await markSkillConfigVerified(testConfig(), { VISIONPOWER_SKILL_STATE: cleanupStatePath })
+
+    assert.equal(existsSync(staleTemp), false, 'stale orphan temp should be removed')
+    assert.equal(existsSync(freshTemp), true, 'recent orphan temp should be kept')
+    assert.equal(existsSync(unrelated), true, 'unrelated files must not be touched')
+    rmSync(cleanupDir, { recursive: true, force: true })
+  }
 
   if (process.platform !== 'win32') {
     const symlinkTarget = join(tempDir, 'symlink-target.json')

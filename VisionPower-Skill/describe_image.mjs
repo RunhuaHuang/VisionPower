@@ -4,14 +4,11 @@
 // Source of truth: src/config.js + src/vision-core.js.
 // Regenerate with: npm run build:skill
 
-import { readFileSync } from 'node:fs'
-import { chmod, mkdir, rename, unlink, writeFile } from 'node:fs/promises'
-import { homedir } from 'node:os'
-import { dirname, join } from 'node:path'
-import { realpathSync } from 'node:fs'
-import { readFile, realpath, stat } from 'node:fs/promises'
+import { readFileSync, realpathSync } from 'node:fs'
+import { readdir, chmod, mkdir, rename, stat, unlink, writeFile, readFile, realpath } from 'node:fs/promises'
+import { basename, dirname, join, extname, isAbsolute, resolve, sep } from 'node:path'
+import { createHash } from 'node:crypto'
 import { isIP } from 'node:net'
-import { extname, isAbsolute, resolve, sep } from 'node:path'
 
 const DEFAULT_VISION_BASE_URL = 'https://dashscope.aliyuncs.com/compatible-mode/v1'
 const DEFAULT_VISION_MODEL = 'qwen3-vl-flash'
@@ -20,6 +17,8 @@ const DEFAULT_REQUEST_TIMEOUT_MS = 60_000
 const DEFAULT_MAX_TOKENS = 2048
 const DEFAULT_MAX_IMAGES = 8
 const DEFAULT_MAX_RETRIES = 2
+const DEFAULT_CACHE_MAX_ENTRIES = 32
+const DEFAULT_CACHE_TTL_MS = 30 * 60 * 1000
 
 const VISION_MODEL_PRESETS = [
   { model: 'qwen3-vl-flash', label: 'Qwen3-VL Flash', baseUrl: DEFAULT_VISION_BASE_URL },
@@ -104,6 +103,36 @@ function getSkillStateFilePath(env = process.env) {
   return env.VISIONPOWER_SKILL_STATE?.trim() || join(homedir(), '.visionpower', 'skill-state.json')
 }
 
+// Best-effort sweep of orphaned temp files left by a prior write that was killed
+// before it could rename. Only touches files matching this exact state file's
+// temp pattern (statePath.<pid>.<ts>.tmp) and only if older than the threshold,
+// so it never touches unrelated user files.
+async function cleanupStaleStateTempFiles(statePath, maxAgeMs) {
+  const dir = dirname(statePath)
+  const base = basename(statePath)
+  const prefix = `${base}.`
+  const suffix = '.tmp'
+  const now = Date.now()
+  let entries
+  try {
+    entries = await readdir(dir)
+  } catch {
+    return
+  }
+  await Promise.all(entries.map(async (entry) => {
+    if (!entry.startsWith(prefix) || !entry.endsWith(suffix)) return
+    const tempPath = join(dir, entry)
+    try {
+      const fileStat = await stat(tempPath)
+      if (now - fileStat.mtimeMs > maxAgeMs) {
+        await unlink(tempPath)
+      }
+    } catch {
+      // A concurrent writer may have renamed/removed it; ignore.
+    }
+  }))
+}
+
 async function writeSkillStateFile(state, env) {
   const statePath = getSkillStateFilePath(env)
   await mkdir(dirname(statePath), { recursive: true, mode: 0o700 })
@@ -113,6 +142,8 @@ async function writeSkillStateFile(state, env) {
     await writeFile(tempPath, content, { mode: 0o600, flag: 'wx' })
     await chmod(tempPath, 0o600)
     await rename(tempPath, statePath)
+    // A fresh successful write is a safe moment to reap leftover temp files.
+    await cleanupStaleStateTempFiles(statePath, 60 * 60 * 1000)
   } catch (error) {
     await unlink(tempPath).catch(() => {})
     throw error
@@ -250,7 +281,30 @@ function loadVisionConfig(env = process.env) {
     maxImages: parsePositiveInteger(readEnvValue(env, ['VISIONPOWER_MAX_IMAGES']), integerFromFile(file.maxImages, 'maxImages') ?? DEFAULT_MAX_IMAGES),
     maxRetries: parseNonNegativeInteger(readEnvValue(env, ['VISIONPOWER_MAX_RETRIES']), integerFromFile(file.maxRetries, 'maxRetries', { allowZero: true }) ?? DEFAULT_MAX_RETRIES),
     debug: debugEnv.value ? parseBoolean(debugEnv) : (booleanFromFile(file.debug, 'debug') ?? false),
+    cache: resolveCacheConfig(env, file),
   }
+}
+
+// In-memory result cache config. The cache is purely process-local (never
+// persisted), keyed by image bytes + prompt + model + maxTokens, so it can only
+// ever return a hit for byte-identical inputs. It exists so a long-lived MCP
+// server process does not bill a second model call for a repeated request in
+// the same session. Env VISIONPOWER_CACHE=false disables it entirely.
+function resolveCacheConfig(env, file) {
+  const cacheEnv = readEnvValue(env, ['VISIONPOWER_CACHE'])
+  let enabled = cacheEnv.value ? parseBoolean(cacheEnv) : (booleanFromFile(file.cache?.enabled, 'cache.enabled') ?? true)
+
+  // maxEntries allows zero: a capacity of zero means "store nothing", which is
+  // equivalent to disabling the cache (so 0 is a valid way to turn it off).
+  const maxEntriesFile = integerFromFile(file.cache?.maxEntries, 'cache.maxEntries', { allowZero: true })
+  const maxEntries = parseNonNegativeInteger(readEnvValue(env, ['VISIONPOWER_CACHE_MAX_ENTRIES']), maxEntriesFile ?? DEFAULT_CACHE_MAX_ENTRIES)
+
+  const ttlMsFile = integerFromFile(file.cache?.ttlMs, 'cache.ttlMs', { allowZero: false })
+  const ttlMs = parsePositiveInteger(readEnvValue(env, ['VISIONPOWER_CACHE_TTL_MS']), ttlMsFile ?? DEFAULT_CACHE_TTL_MS)
+
+  if (maxEntries <= 0) enabled = false
+
+  return { enabled, maxEntries, ttlMs }
 }
 
 function normalizeBaseUrl(value, name) {
@@ -650,6 +704,56 @@ async function fetchVisionCompletion(requestBody, config) {
   }
 }
 
+// In-process result cache. Lives only in memory (never persisted), and the key
+// is derived from the exact request body the provider receives — model, the
+// fully-resolved image payloads (bytes or URL), the prompt, and max_tokens.
+// Structurally, two different inputs can never collide, so a hit is always a
+// correct repeat of an earlier answer within the same session. A long-lived MCP
+// server uses it to skip a billed model call when the agent resends the same
+// image+question. A miss degrades gracefully to a normal provider call.
+const resultCache = new Map()
+
+function computeCacheKey(requestBody) {
+  const hash = createHash('sha256')
+  hash.update(`model=${requestBody.model}\n`)
+  hash.update(`max_tokens=${requestBody.max_tokens}\n`)
+  for (const part of requestBody.messages?.[0]?.content ?? []) {
+    if (part.type === 'text') {
+      hash.update(`text:${part.text}\n`)
+    } else if (part.type === 'image_url') {
+      // image_url.url holds either a public URL or a full data: URI (bytes),
+      // so this captures the actual image content, not just a reference.
+      hash.update(`image:${part.image_url?.url ?? ''}\n`)
+    }
+  }
+  return hash.digest('hex')
+}
+
+function readResultCache(key, config) {
+  if (!config.cache?.enabled) return undefined
+  const entry = resultCache.get(key)
+  if (!entry) return undefined
+  if (Date.now() > entry.expiresAt) {
+    resultCache.delete(key)
+    return undefined
+  }
+  // Refresh recency so a frequently-repeated request stays hot (LRU eviction).
+  resultCache.delete(key)
+  resultCache.set(key, entry)
+  debugLog(config, `cache hit (entries=${resultCache.size})`)
+  return entry.text
+}
+
+function writeResultCache(key, text, config) {
+  if (!config.cache?.enabled) return
+  resultCache.set(key, { text, expiresAt: Date.now() + config.cache.ttlMs })
+  // Evict oldest entries once over capacity (Map preserves insertion order).
+  while (resultCache.size > config.cache.maxEntries) {
+    const oldestKey = resultCache.keys().next().value
+    resultCache.delete(oldestKey)
+  }
+}
+
 async function describeImage(params, config) {
   const images = normalizeImageInputs(params, config)
   if (!config.apiKey) {
@@ -682,6 +786,10 @@ async function describeImage(params, config) {
     max_tokens: config.maxTokens,
   }
 
+  const cacheKey = computeCacheKey(requestBody)
+  const cached = readResultCache(cacheKey, config)
+  if (cached !== undefined) return cached
+
   const startedAt = Date.now()
   debugLog(config, `requesting model=${config.model} images=${images.length}`)
   const bodyText = await fetchVisionCompletion(requestBody, config)
@@ -701,6 +809,7 @@ async function describeImage(params, config) {
     throw new Error('Vision model returned no text content')
   }
 
+  writeResultCache(cacheKey, responseContent, config)
   debugLog(config, `completed in ${Date.now() - startedAt}ms`)
   return responseContent
 }

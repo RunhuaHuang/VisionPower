@@ -364,6 +364,9 @@ echo '<JSON 请求>' | node <skill>/describe_image.mjs # 或从 stdin 传入
 | `VISIONPOWER_MAX_IMAGES` | | `8` | 单次调用最多分析的图片数量。 |
 | `VISIONPOWER_MAX_RETRIES` | | `2` | 上游 429/5xx 或网络错误时的自动重试次数（指数退避 + 抖动）。 |
 | `VISIONPOWER_DEBUG` | | `false` | 设为 `true` 时向 stderr 输出请求模型、图片数与耗时等调试信息。 |
+| `VISIONPOWER_CACHE` | | `true` | 是否启用**进程内结果缓存**：同一会话内相同的「图片+问题」直接返回上次结果，不再调用模型。设为 `false` 关闭。 |
+| `VISIONPOWER_CACHE_MAX_ENTRIES` | | `32` | 结果缓存最多保留的条数；设为 `0` 等同关闭缓存。 |
+| `VISIONPOWER_CACHE_TTL_MS` | | `1800000` (30 分钟) | 单条缓存的存活时间（毫秒），过期后下次相同请求会重新调用模型。 |
 | `VISIONPOWER_SKILL_STATE` | | `~/.visionpower/skill-state.json` | 仅 Skill 脚本使用：记录配置是否已成功验证，避免后续重复预检。 |
 
 > **命名**：主前缀是 `VISIONPOWER_*`。API Key 还可回退读取 `OPENAI_API_KEY`。

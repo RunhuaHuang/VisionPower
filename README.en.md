@@ -369,6 +369,9 @@ Both forms share the same configuration. Precedence: **env var > config file > d
 | `VISIONPOWER_MAX_IMAGES` | | `8` | Max images per call. |
 | `VISIONPOWER_MAX_RETRIES` | | `2` | Automatic retries on upstream 429/5xx or network errors (exponential backoff + jitter). |
 | `VISIONPOWER_DEBUG` | | `false` | When `true`, logs the request model, image count, and timing to stderr. |
+| `VISIONPOWER_CACHE` | | `true` | Enable the **in-process result cache**: an identical image+prompt in the same session returns the previous answer without calling the model again. Set to `false` to disable. |
+| `VISIONPOWER_CACHE_MAX_ENTRIES` | | `32` | Max entries kept in the result cache; `0` disables it. |
+| `VISIONPOWER_CACHE_TTL_MS` | | `1800000` (30 min) | Per-entry cache lifetime in ms; after it elapses, a repeated request calls the model again. |
 | `VISIONPOWER_SKILL_STATE` | | `~/.visionpower/skill-state.json` | Skill script only: records whether setup has been verified so later calls can skip repeated preflight checks. |
 
 > **Naming**: the primary prefix is `VISIONPOWER_*`. The API key also falls back to `OPENAI_API_KEY`.

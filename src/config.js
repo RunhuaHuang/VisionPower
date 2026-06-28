@@ -1,7 +1,6 @@
 import { readFileSync } from 'node:fs'
-import { chmod, mkdir, rename, unlink, writeFile } from 'node:fs/promises'
-import { homedir } from 'node:os'
-import { dirname, join } from 'node:path'
+import { readdir, chmod, mkdir, rename, stat, unlink, writeFile } from 'node:fs/promises'
+import { basename, dirname, join } from 'node:path'
 
 export const DEFAULT_VISION_BASE_URL = 'https://dashscope.aliyuncs.com/compatible-mode/v1'
 export const DEFAULT_VISION_MODEL = 'qwen3-vl-flash'
@@ -10,6 +9,8 @@ export const DEFAULT_REQUEST_TIMEOUT_MS = 60_000
 export const DEFAULT_MAX_TOKENS = 2048
 export const DEFAULT_MAX_IMAGES = 8
 export const DEFAULT_MAX_RETRIES = 2
+export const DEFAULT_CACHE_MAX_ENTRIES = 32
+export const DEFAULT_CACHE_TTL_MS = 30 * 60 * 1000
 
 export const VISION_MODEL_PRESETS = [
   { model: 'qwen3-vl-flash', label: 'Qwen3-VL Flash', baseUrl: DEFAULT_VISION_BASE_URL },
@@ -94,6 +95,36 @@ export function getSkillStateFilePath(env = process.env) {
   return env.VISIONPOWER_SKILL_STATE?.trim() || join(homedir(), '.visionpower', 'skill-state.json')
 }
 
+// Best-effort sweep of orphaned temp files left by a prior write that was killed
+// before it could rename. Only touches files matching this exact state file's
+// temp pattern (statePath.<pid>.<ts>.tmp) and only if older than the threshold,
+// so it never touches unrelated user files.
+async function cleanupStaleStateTempFiles(statePath, maxAgeMs) {
+  const dir = dirname(statePath)
+  const base = basename(statePath)
+  const prefix = `${base}.`
+  const suffix = '.tmp'
+  const now = Date.now()
+  let entries
+  try {
+    entries = await readdir(dir)
+  } catch {
+    return
+  }
+  await Promise.all(entries.map(async (entry) => {
+    if (!entry.startsWith(prefix) || !entry.endsWith(suffix)) return
+    const tempPath = join(dir, entry)
+    try {
+      const fileStat = await stat(tempPath)
+      if (now - fileStat.mtimeMs > maxAgeMs) {
+        await unlink(tempPath)
+      }
+    } catch {
+      // A concurrent writer may have renamed/removed it; ignore.
+    }
+  }))
+}
+
 async function writeSkillStateFile(state, env) {
   const statePath = getSkillStateFilePath(env)
   await mkdir(dirname(statePath), { recursive: true, mode: 0o700 })
@@ -103,6 +134,8 @@ async function writeSkillStateFile(state, env) {
     await writeFile(tempPath, content, { mode: 0o600, flag: 'wx' })
     await chmod(tempPath, 0o600)
     await rename(tempPath, statePath)
+    // A fresh successful write is a safe moment to reap leftover temp files.
+    await cleanupStaleStateTempFiles(statePath, 60 * 60 * 1000)
   } catch (error) {
     await unlink(tempPath).catch(() => {})
     throw error
@@ -240,7 +273,30 @@ export function loadVisionConfig(env = process.env) {
     maxImages: parsePositiveInteger(readEnvValue(env, ['VISIONPOWER_MAX_IMAGES']), integerFromFile(file.maxImages, 'maxImages') ?? DEFAULT_MAX_IMAGES),
     maxRetries: parseNonNegativeInteger(readEnvValue(env, ['VISIONPOWER_MAX_RETRIES']), integerFromFile(file.maxRetries, 'maxRetries', { allowZero: true }) ?? DEFAULT_MAX_RETRIES),
     debug: debugEnv.value ? parseBoolean(debugEnv) : (booleanFromFile(file.debug, 'debug') ?? false),
+    cache: resolveCacheConfig(env, file),
   }
+}
+
+// In-memory result cache config. The cache is purely process-local (never
+// persisted), keyed by image bytes + prompt + model + maxTokens, so it can only
+// ever return a hit for byte-identical inputs. It exists so a long-lived MCP
+// server process does not bill a second model call for a repeated request in
+// the same session. Env VISIONPOWER_CACHE=false disables it entirely.
+function resolveCacheConfig(env, file) {
+  const cacheEnv = readEnvValue(env, ['VISIONPOWER_CACHE'])
+  let enabled = cacheEnv.value ? parseBoolean(cacheEnv) : (booleanFromFile(file.cache?.enabled, 'cache.enabled') ?? true)
+
+  // maxEntries allows zero: a capacity of zero means "store nothing", which is
+  // equivalent to disabling the cache (so 0 is a valid way to turn it off).
+  const maxEntriesFile = integerFromFile(file.cache?.maxEntries, 'cache.maxEntries', { allowZero: true })
+  const maxEntries = parseNonNegativeInteger(readEnvValue(env, ['VISIONPOWER_CACHE_MAX_ENTRIES']), maxEntriesFile ?? DEFAULT_CACHE_MAX_ENTRIES)
+
+  const ttlMsFile = integerFromFile(file.cache?.ttlMs, 'cache.ttlMs', { allowZero: false })
+  const ttlMs = parsePositiveInteger(readEnvValue(env, ['VISIONPOWER_CACHE_TTL_MS']), ttlMsFile ?? DEFAULT_CACHE_TTL_MS)
+
+  if (maxEntries <= 0) enabled = false
+
+  return { enabled, maxEntries, ttlMs }
 }
 
 function normalizeBaseUrl(value, name) {
