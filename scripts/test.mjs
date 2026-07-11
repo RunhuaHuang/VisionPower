@@ -3,7 +3,7 @@ import { existsSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, u
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { buildSkillScript } from './build-skill.mjs'
-import { loadVisionConfig, markSkillConfigNeedsSetup, markSkillConfigVerified } from '../src/config.js'
+import { getConfigFilePath, getSkillStateFilePath, loadVisionConfig, markSkillConfigNeedsSetup, markSkillConfigVerified } from '../src/config.js'
 import { describeImage } from '../src/vision-core.js'
 
 const pngBytes = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])
@@ -424,6 +424,26 @@ try {
     const replacedState = JSON.parse(readFileSync(symlinkStatePath, 'utf8'))
     assert.equal(replacedState.configVerified, true)
   }
+
+  // --- 默认路径分支必须真正执行到 ---
+  // 回归保护：曾经因为所有测试都注入 VISIONPOWER_CONFIG，导致 `|| join(homedir(), ...)`
+  // 右侧分支从未被触发，homedir 未导入的 bug 测不出来。这里显式不传环境变量，
+  // 强制走 homedir() 默认路径——若 homedir 的 import 被删除，下面会立即抛错。
+  const defaultConfigPath = getConfigFilePath({})
+  assert.match(
+    defaultConfigPath,
+    /[\\/]\.visionpower[\\/]config\.json$/,
+    '默认配置路径应落在 ~/.visionpower/config.json',
+  )
+  const defaultStatePath = getSkillStateFilePath({})
+  assert.match(
+    defaultStatePath,
+    /[\\/]\.visionpower[\\/]skill-state\.json$/,
+    '默认 skill-state 路径应落在 ~/.visionpower/skill-state.json',
+  )
+  // 环境变量仍应优先于默认路径
+  assert.equal(getConfigFilePath({ VISIONPOWER_CONFIG: '/x/y.json' }), '/x/y.json')
+  assert.equal(getSkillStateFilePath({ VISIONPOWER_SKILL_STATE: '/s/t.json' }), '/s/t.json')
 
   console.log('Unit tests passed.')
 } finally {

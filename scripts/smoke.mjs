@@ -18,7 +18,7 @@ const transport = new StdioClientTransport({
 
 const client = new Client({
   name: 'visionpower-smoke-test',
-  version: '1.3.0',
+  version: '1.3.1',
 })
 
 try {

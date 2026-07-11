@@ -1,0 +1,39 @@
+name: CI
+
+# Runs the static gate, unit tests, and smoke test on every push and pull
+# request to main. This is the last line of defense against bugs that slip
+# past local checks — e.g. a used-but-unimported symbol (`homedir is not
+# defined`) that `node --check` cannot catch and that unit tests only miss
+# if a code branch is never exercised.
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Lint (static check — catches undefined references)
+        run: npm run lint
+
+      - name: Unit tests
+        run: npm test
+
+      - name: Smoke test (MCP server + skill script end-to-end)
+        run: npm run smoke

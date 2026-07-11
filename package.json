@@ -1,6 +1,6 @@
 {
   "name": "visionpower",
-  "version": "1.3.0",
+  "version": "1.3.1",
   "description": "VisionPower: a portable image understanding MCP server for Codex, Claude Desktop, Cursor, and other agents.",
   "type": "module",
   "bin": {
@@ -16,6 +16,7 @@
   "scripts": {
     "start": "node src/index.js",
     "build:skill": "node scripts/build-skill.mjs --write",
+    "lint": "eslint .",
     "smoke": "node scripts/smoke.mjs",
     "test": "node scripts/test.mjs"
   },
@@ -38,5 +39,9 @@
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.29.0",
     "zod": "^4.0.0"
+  },
+  "devDependencies": {
+    "eslint": "^9.39.5",
+    "globals": "^14.0.0"
   }
 }

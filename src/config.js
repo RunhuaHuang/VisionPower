@@ -1,6 +1,7 @@
 import { readFileSync } from 'node:fs'
 import { readdir, chmod, mkdir, rename, stat, unlink, writeFile } from 'node:fs/promises'
 import { basename, dirname, join } from 'node:path'
+import { homedir } from 'node:os'
 
 export const DEFAULT_VISION_BASE_URL = 'https://dashscope.aliyuncs.com/compatible-mode/v1'
 export const DEFAULT_VISION_MODEL = 'qwen3-vl-flash'

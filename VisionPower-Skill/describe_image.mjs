@@ -7,6 +7,7 @@
 import { readFileSync, realpathSync } from 'node:fs'
 import { readdir, chmod, mkdir, rename, stat, unlink, writeFile, readFile, realpath } from 'node:fs/promises'
 import { basename, dirname, join, extname, isAbsolute, resolve, sep } from 'node:path'
+import { homedir } from 'node:os'
 import { createHash } from 'node:crypto'
 import { isIP } from 'node:net'
 
