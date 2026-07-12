@@ -117,6 +117,15 @@ command = "npx"
 args = ["-y", "--package", "visionpower@latest", "visionpower"]
 ```
 
+* **Form-based clients** (e.g. Cline, Cherry Studio, and other UIs with separate fields), fill in each field as follows:
+
+| Field | Value |
+| --- | --- |
+| Name | `visionpower` |
+| Type | `stdio` |
+| Command | `npx -y --package visionpower@latest visionpower` |
+| Env | *(leave empty)* |
+
 > **Note**: The host reads config **at startup**, so you must **restart** the host application after configuration changes.
 
 ---

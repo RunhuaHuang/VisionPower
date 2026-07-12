@@ -117,6 +117,15 @@ command = "npx"
 args = ["-y", "--package", "visionpower@latest", "visionpower"]
 ```
 
+* **分字段填写的客户端**（如 Cline、Cherry Studio 等表单式 UI），逐项填入即可：
+
+| 字段 | 填写内容 |
+| --- | --- |
+| 名称 (Name) | `visionpower` |
+| 传输方式 (Type) | `stdio` |
+| 命令 (Command) | `npx -y --package visionpower@latest visionpower` |
+| 环境变量 (Env) | （留空） |
+
 > **注意**：宿主配置会在宿主**启动时**读取，配置完毕后请**重启宿主**生效。
 
 ---

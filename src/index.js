@@ -35,7 +35,7 @@ server.registerTool(
   'describe_image',
   {
     title: 'Describe Image',
-    description: 'Analyze one or more images with an OpenAI-compatible vision model. Supports local image_path, image_url, image_base64, or ordered images[].',
+    description: 'See and understand images — screenshots, photos, diagrams, charts. Extract text (OCR), describe scenes, compare images, and answer questions about what is shown. Use whenever an image is provided via image_path, image_url, image_base64, or images[].',
     inputSchema: toolInputSchemaShape,
   },
   async (args) => {
