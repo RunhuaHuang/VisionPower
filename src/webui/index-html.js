@@ -112,6 +112,7 @@ header{display:flex;justify-content:space-between;align-items:center;border-bott
 .logo-icon{width:20px;height:20px;background:var(--signal);border-radius:var(--radius);box-shadow:0 0 8px var(--signal)}
 .logo-title{font-size:var(--fs-display-lg);font-weight:700;letter-spacing:-0.03em;font-family:var(--font-mono)}
 .logo-subtitle{font-size:var(--fs-mono-xs);color:var(--text-muted);font-family:var(--font-mono);letter-spacing:0.1em;text-transform:uppercase}
+.version-badge{display:inline-block;font-family:var(--font-mono);font-size:var(--fs-mono-xs);font-weight:700;letter-spacing:.05em;color:var(--signal);background:rgba(196,245,66,.1);border:1px solid var(--signal-dim);padding:2px 8px;border-radius:var(--radius);white-space:nowrap}
 
 .tabs{display:flex;gap:var(--space-xs);background:var(--surface-3);padding:2px;border-radius:var(--radius);border:1px solid var(--line)}
 .tab-btn{background:transparent;border:0;color:var(--text-secondary);font-family:var(--font-mono);font-size:var(--fs-mono-md);padding:var(--space-sm) var(--space-md);border-radius:var(--radius);cursor:pointer;transition:all .15s}
@@ -168,7 +169,10 @@ code-block{display:block;background:var(--code-bg);color:var(--code-text);font-f
     <div class="logo">
       <div class="logo-icon"></div>
       <div>
-        <h1 class="logo-title">VISIONPOWER</h1>
+        <div style="display:flex;align-items:center;gap:var(--space-sm)">
+          <h1 class="logo-title">VISIONPOWER</h1>
+          <span class="version-badge">v__VISIONPOWER_VERSION__</span>
+        </div>
         <div class="logo-subtitle" x-text="i18n[lang].subtitle"></div>
       </div>
     </div>

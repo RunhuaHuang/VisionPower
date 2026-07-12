@@ -15,6 +15,13 @@ import { describeImage, testModelConnection } from '../vision-core.js'
 const require = createRequire(import.meta.url)
 let alpineScriptCache = null
 
+// Read the version once at module load and stamp it into the HTML template.
+// The placeholder in index-html.js keeps the version single-sourced from
+// package.json, so every release shows its real version in the WebUI header
+// without a second edit.
+const { version: webuiVersion } = require('../../package.json')
+const indexHtml = WEBUI_HTML.replaceAll('__VISIONPOWER_VERSION__', webuiVersion)
+
 const HTML_CSP = [
   "default-src 'none'",
   "script-src 'self' 'unsafe-inline' 'unsafe-eval'",
@@ -393,7 +400,7 @@ export function startWebuiServer(port) {
         if (url === '/' || url === '/index.html') {
           setHtmlSecurityHeaders(res)
           res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' })
-          res.end(WEBUI_HTML)
+          res.end(indexHtml)
           return
         }
 

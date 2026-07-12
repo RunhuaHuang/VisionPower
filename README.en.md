@@ -88,6 +88,7 @@ Run the following command in your terminal:
 ```bash
 npx -y --package visionpower@latest visionpower --webui
 ```
+> 💡 This is **the only command you need to remember**: use it for first-time setup, reopening the WebUI later to change your config, and updating to a new release. The `@latest` tag automatically pulls the newest version from npm.
 
 **② Configure and Test**
 1. Once running, open `http://127.0.0.1:17900` in your browser.

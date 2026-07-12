@@ -88,6 +88,7 @@ VisionPower 让 Codex、Claude Desktop、Cursor、Cline、Cherry Studio 等 Agen
 ```bash
 npx -y --package visionpower@latest visionpower --webui
 ```
+> 💡 这是**唯一需要记住的命令**：首次配置、后续召唤 WebUI 修改配置、以及更新到新版本，都用这一条命令即可。命令中的 `@latest` 会自动从 npm 拉取最新版本。
 
 **② 进行配置与测试**
 1. 终端输出成功后，在浏览器打开 `http://127.0.0.1:17900`。
