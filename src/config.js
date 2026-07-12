@@ -301,7 +301,7 @@ function resolveCacheConfig(env, file) {
   return { enabled, maxEntries, ttlMs }
 }
 
-function normalizeBaseUrl(value, name) {
+export function normalizeBaseUrl(value, name) {
   let url
   try {
     url = new URL(value)
@@ -340,5 +340,123 @@ export function saveVisionConfig(config, env = process.env) {
     try { unlinkSync(tmp) } catch { /* best-effort cleanup */ }
     throw error
   }
+}
+
+// Fields the WebUI is allowed to write into config.json. Unknown / prototype-
+// polluting keys sent by the client are silently dropped. Kept here (next to
+// the validators below) so the server and the validation pass always agree.
+export const ALLOWED_CONFIG_KEYS = new Set([
+  'apiKey', 'model', 'baseUrl', 'allowedDirs',
+  'maxImageBytes', 'timeoutMs', 'maxTokens', 'maxImages', 'maxRetries',
+  'debug', 'cache',
+])
+
+// Validates and normalizes a config object coming from the WebUI before it is
+// persisted. This mirrors the same rules loadVisionConfig() enforces on read,
+// so a value that passes here will also load cleanly later — preventing the
+// "save succeeds, then every config read throws" foot-gun (e.g. cache.ttlMs=0,
+// maxRetries=-1, or a malformed baseUrl). Throws Error on any invalid field.
+export function normalizeConfigObject(input) {
+  if (input === null || typeof input !== 'object' || Array.isArray(input)) {
+    throw new Error('config must be a JSON object')
+  }
+
+  // Drop unknown keys first (prototype-pollution guard).
+  const cleaned = {}
+  for (const [key, value] of Object.entries(input)) {
+    if (ALLOWED_CONFIG_KEYS.has(key)) cleaned[key] = value
+  }
+
+  // baseUrl: normalize exactly like loadVisionConfig does.
+  if (typeof cleaned.baseUrl === 'string' && cleaned.baseUrl.trim()) {
+    cleaned.baseUrl = normalizeBaseUrl(cleaned.baseUrl.trim(), 'baseUrl')
+  } else if (cleaned.baseUrl !== undefined) {
+    throw new Error('baseUrl must be a non-empty string')
+  }
+
+  // String fields: apiKey and model. loadVisionConfig reads these via
+  // stringFromFile, which throws on null or non-string values. Reject such
+  // values here too — otherwise saving {apiKey: null} succeeds but every
+  // subsequent config read throws. apiKey may legitimately be empty (the user
+  // is clearing it); model must not be empty.
+  for (const key of ['apiKey', 'model']) {
+    if (cleaned[key] !== undefined && cleaned[key] !== null) {
+      if (typeof cleaned[key] !== 'string') {
+        throw new Error(`config field "${key}" must be a string`)
+      }
+      const trimmed = cleaned[key].trim()
+      if (key === 'model' && !trimmed) {
+        throw new Error('config field "model" must not be empty')
+      }
+      cleaned[key] = trimmed
+    } else if (cleaned[key] === null) {
+      // null is never persisted for these — drop it so it can't reach the file.
+      delete cleaned[key]
+    }
+  }
+
+  // allowedDirs: accept array or comma-separated string -> normalized array.
+  if (cleaned.allowedDirs !== undefined) {
+    const list = Array.isArray(cleaned.allowedDirs)
+      ? cleaned.allowedDirs
+      : typeof cleaned.allowedDirs === 'string' ? cleaned.allowedDirs.split(',') : null
+    if (!list) throw new Error('allowedDirs must be an array or comma-separated string')
+    cleaned.allowedDirs = list.map((item) => String(item).trim()).filter(Boolean)
+  }
+
+  // Numeric fields: reuse the same file loaders so the rules stay in sync.
+  const numericFields = [
+    { key: 'maxImageBytes', label: 'maxImageBytes', allowZero: false },
+    { key: 'timeoutMs', label: 'timeoutMs', allowZero: false },
+    { key: 'maxTokens', label: 'maxTokens', allowZero: false },
+    { key: 'maxImages', label: 'maxImages', allowZero: false },
+    { key: 'maxRetries', label: 'maxRetries', allowZero: true },
+  ]
+  for (const { key, label, allowZero } of numericFields) {
+    if (cleaned[key] !== undefined && cleaned[key] !== null) {
+      const validated = integerFromFile(cleaned[key], label, { allowZero })
+      if (validated === undefined) {
+        throw new Error(`config field "${label}" must be a ${allowZero ? 'non-negative' : 'positive'} integer`)
+      }
+      cleaned[key] = validated
+    }
+  }
+
+  // Booleans.
+  for (const key of ['debug']) {
+    if (cleaned[key] !== undefined && cleaned[key] !== null) {
+      const value = booleanFromFile(cleaned[key], key)
+      if (value === undefined) throw new Error(`config field "${key}" must be a boolean`)
+      cleaned[key] = value
+    }
+  }
+
+  // cache: validate nested structure using the same loaders as loadVisionConfig.
+  if (cleaned.cache !== undefined && cleaned.cache !== null) {
+    const rawCache = typeof cleaned.cache === 'object' && !Array.isArray(cleaned.cache) ? cleaned.cache : null
+    if (!rawCache) throw new Error('config field "cache" must be an object')
+
+    const out = {}
+    if (rawCache.enabled !== undefined && rawCache.enabled !== null) {
+      const enabled = booleanFromFile(rawCache.enabled, 'cache.enabled')
+      if (enabled === undefined) throw new Error('config field "cache.enabled" must be a boolean')
+      out.enabled = enabled
+    }
+    if (rawCache.maxEntries !== undefined && rawCache.maxEntries !== null) {
+      const maxEntries = integerFromFile(rawCache.maxEntries, 'cache.maxEntries', { allowZero: true })
+      if (maxEntries === undefined) throw new Error('config field "cache.maxEntries" must be a non-negative integer')
+      out.maxEntries = maxEntries
+    }
+    if (rawCache.ttlMs !== undefined && rawCache.ttlMs !== null) {
+      // ttlMs uses allowZero:false on purpose: 0 ttl means "instantly expire",
+      // which makes the cache useless and is almost never what a user intends.
+      const ttlMs = integerFromFile(rawCache.ttlMs, 'cache.ttlMs', { allowZero: false })
+      if (ttlMs === undefined) throw new Error('config field "cache.ttlMs" must be a positive integer')
+      out.ttlMs = ttlMs
+    }
+    cleaned.cache = out
+  }
+
+  return cleaned
 }
 

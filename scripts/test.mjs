@@ -3,7 +3,7 @@ import { existsSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, u
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { buildSkillScript } from './build-skill.mjs'
-import { getConfigFilePath, getSkillStateFilePath, loadVisionConfig, markSkillConfigNeedsSetup, markSkillConfigVerified } from '../src/config.js'
+import { getConfigFilePath, getSkillStateFilePath, loadVisionConfig, markSkillConfigNeedsSetup, markSkillConfigVerified, normalizeConfigObject, saveVisionConfig } from '../src/config.js'
 import { describeImage } from '../src/vision-core.js'
 
 const pngBytes = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])
@@ -69,6 +69,15 @@ async function withSequencedFetch(responses, fn) {
 
 async function assertRejectsMessage(fn, pattern) {
   await assert.rejects(fn, (error) => {
+    assert.match(error.message, pattern)
+    return true
+  })
+}
+
+// Synchronous counterpart of assertRejectsMessage: for validators that throw
+// immediately (e.g. normalizeConfigObject) rather than returning a rejected promise.
+function assertThrowsMessage(fn, pattern) {
+  assert.throws(fn, (error) => {
     assert.match(error.message, pattern)
     return true
   })
@@ -444,6 +453,104 @@ try {
   // 环境变量仍应优先于默认路径
   assert.equal(getConfigFilePath({ VISIONPOWER_CONFIG: '/x/y.json' }), '/x/y.json')
   assert.equal(getSkillStateFilePath({ VISIONPOWER_SKILL_STATE: '/s/t.json' }), '/s/t.json')
+
+  // --- normalizeConfigObject: WebUI config validation ---
+  // (Regression for the v2.0.0 bug where PUT /api/config wrote values that
+  // made every subsequent loadVisionConfig() throw — e.g. cache.ttlMs=0,
+  // maxRetries=-1, or an un-normalized baseUrl.)
+
+  // Unknown keys are dropped (prototype-pollution guard), known fields validated.
+  const clean = normalizeConfigObject({
+    apiKey: 'sk-test',
+    model: 'qwen3-vl-flash',
+    baseUrl: 'https://api.example.com/v1/',
+    maxImageBytes: 1024,
+    timeoutMs: 1000,
+    maxTokens: 128,
+    maxImages: 4,
+    maxRetries: 1,
+    debug: true,
+    cache: { enabled: true, maxEntries: 10, ttlMs: 5000 },
+    allowedDirs: '/a, /b',
+    __proto__: { x: 1 },          // must be dropped
+    constructor: 'evil',           // must be dropped
+  })
+  assert.equal(clean.apiKey, 'sk-test')
+  assert.equal(clean.baseUrl, 'https://api.example.com/v1') // trailing slash stripped
+  assert.deepEqual(clean.allowedDirs, ['/a', '/b'])
+  assert.equal(clean.maxRetries, 1)
+  assert.deepEqual(clean.cache, { enabled: true, maxEntries: 10, ttlMs: 5000 })
+  assert.equal(clean.__proto__?.x, undefined)
+  assert.equal(clean.constructor, Object.prototype.constructor) // not the string
+
+  // baseUrl with /chat/completions suffix is rejected (mirrors loadVisionConfig).
+  assertThrowsMessage(
+    () => normalizeConfigObject({ baseUrl: 'https://api.example.com/v1/chat/completions' }),
+    /should not include/,
+  )
+
+  // baseUrl with a non-http scheme is rejected.
+  assertThrowsMessage(
+    () => normalizeConfigObject({ baseUrl: 'file:///tmp' }),
+    /baseUrl must use http or https/,
+  )
+
+  // The three "poison value" regressions that broke loadVisionConfig on read:
+  assertThrowsMessage(
+    () => normalizeConfigObject({ cache: { ttlMs: 0 } }),
+    /cache.ttlMs.*positive integer/,
+  )
+  assertThrowsMessage(
+    () => normalizeConfigObject({ maxRetries: -1 }),
+    /maxRetries.*non-negative integer/,
+  )
+  assertThrowsMessage(
+    () => normalizeConfigObject({ maxImages: 0 }),
+    /maxImages.*positive integer/,
+  )
+
+  // allowedDirs accepts an array too.
+  assert.deepEqual(normalizeConfigObject({ allowedDirs: ['/x', '/y'] }).allowedDirs, ['/x', '/y'])
+
+  // apiKey/model: non-string and null values must be rejected/dropped, not
+  // persisted — otherwise loadVisionConfig's stringFromFile throws on read.
+  assertThrowsMessage(
+    () => normalizeConfigObject({ apiKey: 123 }),
+    /apiKey.*string/,
+  )
+  assertThrowsMessage(
+    () => normalizeConfigObject({ model: 456 }),
+    /model.*string/,
+  )
+  assertThrowsMessage(
+    () => normalizeConfigObject({ model: '   ' }),
+    /model.*empty/,
+  )
+  // null is dropped (not persisted), so a subsequent load is unaffected.
+  assert.equal(normalizeConfigObject({ apiKey: null }).apiKey, undefined)
+  assert.equal(normalizeConfigObject({ model: null }).model, undefined)
+  // empty apiKey is allowed (user is clearing the key); it trims to ''.
+  assert.equal(normalizeConfigObject({ apiKey: '  ' }).apiKey, '')
+
+  // Full round-trip: a validated object survives save -> load.
+  {
+    const rt = join(tempDir, 'rt-config.json')
+    const validated = normalizeConfigObject({
+      apiKey: 'rt-key',
+      model: 'qwen3-vl-plus',
+      baseUrl: 'https://api.example.com/v1',
+      maxImages: 5,
+      cache: { enabled: false, maxEntries: 0, ttlMs: 60_000 },
+    })
+    saveVisionConfig(validated, { VISIONPOWER_CONFIG: rt })
+    const loaded = loadVisionConfig({ VISIONPOWER_CONFIG: rt })
+    assert.equal(loaded.apiKey, 'rt-key')
+    assert.equal(loaded.model, 'qwen3-vl-plus')
+    assert.equal(loaded.maxImages, 5)
+    // maxEntries:0 disables the cache on read (matches the documented behavior).
+    assert.equal(loaded.cache.enabled, false)
+    assert.equal(loaded.cache.maxEntries, 0)
+  }
 
   console.log('Unit tests passed.')
 } finally {

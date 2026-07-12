@@ -6,20 +6,14 @@ import {
   loadVisionConfig,
   saveVisionConfig,
   getConfigFilePath,
+  normalizeBaseUrl,
+  normalizeConfigObject,
   VISION_MODEL_PRESETS,
 } from '../config.js'
 import { describeImage, testModelConnection } from '../vision-core.js'
 
 const require = createRequire(import.meta.url)
 let alpineScriptCache = null
-
-// Fields the WebUI is allowed to write into config.json.
-// Unknown / prototype-polluting keys sent by the client are silently dropped.
-const ALLOWED_CONFIG_KEYS = new Set([
-  'apiKey', 'model', 'baseUrl', 'allowedDirs',
-  'maxImageBytes', 'timeoutMs', 'maxTokens', 'maxImages', 'maxRetries',
-  'debug', 'cache',
-])
 
 const HTML_CSP = [
   "default-src 'none'",
@@ -188,20 +182,23 @@ async function handleApi(method, url, req, res) {
     try {
       const body = await readJsonBody(req)
       const current = loadRawConfig()
-      
-      // Only keep known, explicitly allowed config keys — drop anything else
-      // to prevent prototype pollution or unknown field injection.
-      const cleaned = Object.fromEntries(
-        Object.entries(body).filter(([k]) => ALLOWED_CONFIG_KEYS.has(k))
-      )
 
-      // Preserve key if frontend sent back the masked placeholder
-      if (cleaned.apiKey && cleaned.apiKey.includes('****')) {
-        cleaned.apiKey = current.apiKey || ''
+      // Validate + normalize using the same rules loadVisionConfig enforces on
+      // read. This drops unknown keys (prototype-pollution guard) and rejects
+      // poison values (e.g. cache.ttlMs=0) before they can be persisted — a
+      // bad value here would make every subsequent config read throw.
+      const cleaned = normalizeConfigObject(body)
+
+      // Preserve the real key when the frontend sends back the masked form. We
+      // compare against maskApiKey()'s exact output rather than a substring
+      // test, so a real key that happens to contain '*' is never misread.
+      const currentMasked = current.apiKey ? maskApiKey(current.apiKey) : ''
+      if (typeof cleaned.apiKey === 'string' && currentMasked && cleaned.apiKey === currentMasked) {
+        cleaned.apiKey = current.apiKey
       }
-      
+
       saveVisionConfig(cleaned)
-      
+
       const masked = { ...cleaned }
       if (cleaned.apiKey) {
         masked.apiKey = maskApiKey(cleaned.apiKey)
@@ -272,9 +269,14 @@ async function handleApi(method, url, req, res) {
         ...current,
         requestTimeoutMs: current.requestTimeoutMs || 60000,
       }
-      
+
+      // Keep the saved key when the frontend sends back the masked form. Use
+      // an exact comparison against maskApiKey()'s output (matching PUT
+      // /api/config) rather than a substring test, so a real key that happens
+      // to contain '*' is never mistaken for the mask.
+      const currentMasked = current.apiKey ? maskApiKey(current.apiKey) : ''
       if (typeof body.apiKey === 'string' && body.apiKey) {
-        if (!body.apiKey.includes('****')) {
+        if (!(currentMasked && body.apiKey === currentMasked)) {
           tempConfig.apiKey = body.apiKey
         }
       }
@@ -287,6 +289,17 @@ async function handleApi(method, url, req, res) {
 
       if (!tempConfig.apiKey) {
         sendJson(res, 400, { error: 'API key is required for testing' })
+        return true
+      }
+
+      // Normalize baseUrl the same way loadVisionConfig does, so the connection
+      // test sees the same URL the saved config would actually use. Without
+      // this, a trailing slash or a /chat/completions suffix would make the
+      // test fail even though the real server would work fine.
+      try {
+        tempConfig.baseUrl = normalizeBaseUrl(tempConfig.baseUrl, 'baseUrl')
+      } catch (err) {
+        sendJson(res, 400, { error: err.message })
         return true
       }
 

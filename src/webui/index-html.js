@@ -242,29 +242,29 @@ code-block{display:block;background:var(--code-bg);color:var(--code-text);font-f
           </div>
           <div class="form-group">
             <label class="label" x-text="i18n[lang].maxImageBytesLabel"></label>
-            <input type="number" x-model.number="config.maxImageBytes" />
+            <input type="number" min="1" x-model.number="config.maxImageBytes" />
           </div>
         </div>
 
         <div class="grid-2">
           <div class="form-group">
             <label class="label" x-text="i18n[lang].timeoutLabel"></label>
-            <input type="number" x-model.number="config.timeoutMs" />
+            <input type="number" min="1" x-model.number="config.timeoutMs" />
           </div>
           <div class="form-group">
             <label class="label" x-text="i18n[lang].maxTokensLabel"></label>
-            <input type="number" x-model.number="config.maxTokens" />
+            <input type="number" min="1" x-model.number="config.maxTokens" />
           </div>
         </div>
 
         <div class="grid-2">
           <div class="form-group">
             <label class="label" x-text="i18n[lang].maxImagesLabel"></label>
-            <input type="number" x-model.number="config.maxImages" />
+            <input type="number" min="1" x-model.number="config.maxImages" />
           </div>
           <div class="form-group">
             <label class="label" x-text="i18n[lang].maxRetriesLabel"></label>
-            <input type="number" x-model.number="config.maxRetries" />
+            <input type="number" min="0" x-model.number="config.maxRetries" />
           </div>
         </div>
 
@@ -287,11 +287,11 @@ code-block{display:block;background:var(--code-bg);color:var(--code-text);font-f
         <div class="grid-2" x-show="config.cache.enabled" style="margin-top:var(--space-md)">
           <div class="form-group">
             <label class="label" x-text="i18n[lang].cacheMaxLabel"></label>
-            <input type="number" x-model.number="config.cache.maxEntries" />
+            <input type="number" min="0" x-model.number="config.cache.maxEntries" />
           </div>
           <div class="form-group">
             <label class="label" x-text="i18n[lang].cacheTtlLabel"></label>
-            <input type="number" x-model.number="config.cache.ttlMs" />
+            <input type="number" min="1" x-model.number="config.cache.ttlMs" />
           </div>
         </div>
       </div>
