@@ -232,11 +232,11 @@ try {
   )
 
   // Keep the MCP server's advertised version in lockstep with package.json.
-  const packageJson = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8'))
+  // The version must not be hardcoded — src/index.js must read it from package.json.
   const serverSource = readFileSync(new URL('../src/index.js', import.meta.url), 'utf8')
   assert.ok(
-    serverSource.includes(`version: '${packageJson.version}'`),
-    'src/index.js server version must match package.json',
+    serverSource.includes(`require('../package.json')`) && serverSource.includes('version,'),
+    'src/index.js must read version from package.json (not hardcode it)',
   )
 
   // Env-only resolution must not be affected by a real config file on the test

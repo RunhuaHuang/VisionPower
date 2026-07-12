@@ -69,89 +69,88 @@ VisionPower 让 Codex、Claude Desktop、Cursor、Cline、Cherry Studio 等 Agen
 
 ---
 
-## 作为 MCP 使用
+## 作为 MCP 使用 (强烈推荐)
 
-### 最快路径：交给 Agent 自己装
+> [!IMPORTANT]
+> **强烈推荐以 MCP 形式使用本服务**。相比于 Skill，MCP 在各主流 AI 工具（如 Claude Desktop, Cursor, Cline 等）中的接入更规范、加载更稳定，且可通过以下最简 JSON 配置文件一键启用。
 
-复制下面这段话发给你的 Agent（替换成你的 API Key）：
+### 准备工作
+- Node.js 18+
+- 支持视觉模型的 API Key（如阿里云百炼 Key、OpenAI API Key 等）。
 
-```text
-请帮我安装并配置 VisionPower MCP。
+### 配置方式一：通过 WebUI 可视化控制台进行配置
 
-视觉模型 API Key：填写你的 API Key（会以明文写入配置，注意文件安全）
-模型：qwen3-vl-flash
-Base URL：https://dashscope.aliyuncs.com/compatible-mode/v1
 
-【安装】先实测 npm 源连通性：
-- 官方源稳定 → npx -y --package visionpower@latest visionpower
-- 不稳定/中国大陆网络 → npx -y --registry=https://registry.npmmirror.com --package visionpower@latest visionpower
-- 仅当 npx 连续失败，才 npm install -g visionpower@latest 并把 command 配成 visionpower
+您可以通过内置的本地 WebUI 控制台轻松完成所有配置（模型、API Key、Endpoint、缓存等），并且可以在控制台里通过 **Playground 试用台**直接测试图像分析效果，以及在 **Patch Bay** 中一键复制代码片段。
 
-【写配置——重点】
-不要套用通用模板。先在本 Agent 的配置目录里找一个【已经存在且正在运行的 MCP server 配置】
-作为格式模板，严格照搬它的【文件位置 + 字段结构】来新增 visionpower。
-若存在多个候选文件，以“已有 MCP server 在用”的那个为准，不要写到 provider 模型配置里。
-
-【验证】分两步确认：
-1. 进程级：用写入的 command+env 拉起进程做 MCP 握手，确认 tools/list 返回 describe_image；
-2. 告知用户：配置在宿主启动时读取，需重启该 Agent 工具才会在会话中生效。
-```
-
-**准备工作**：Node.js 18+，以及一个支持视觉模型的 OpenAI-compatible API Key（阿里云百炼 Key 申请：<https://bailian.console.aliyun.com/?tab=model#/api-key>）。
-
-### 手动安装
-
-适用于 Claude Desktop、Cursor、Cline、Cherry Studio 等用 JSON/TOML 配置 MCP 的工具。这些宿主**不会替你下载、也不会自动测连接**——先在终端确认能拉到包、API Key 能通，再贴配置，最少返工。
-
-**① 先在终端下载并自检**
-
-跑一次下面的命令，它会拉取 VisionPower 并尝试 MCP 握手；握手成功就说明你的网络、包、Key 都没问题：
-
+**① 启动 WebUI 配置控制台**
+在终端运行以下命令：
 ```bash
-# 官方源
-npx -y --package visionpower@latest visionpower
-# 中国大陆 / 弱网
-npx -y --registry=https://registry.npmmirror.com --package visionpower@latest visionpower
+npx -y --package visionpower@latest visionpower --webui
 ```
 
-> 进程正常挂起不报错（看到 `Running VisionPower MCP server` 之类输出）即说明通了，`Ctrl+C` 退出。包已缓存到本地，后续宿主启动会更快。
-> 偶尔失败？弱网或长期使用可改全局安装：`npm install -g visionpower@latest`（国内加 `--registry=https://registry.npmmirror.com`）。
+**② 进行配置与测试**
+1. 终端输出成功后，在浏览器打开 `http://127.0.0.1:17900`。
+2. 在 **CONFIG** 选项卡中选择您的模型预设、粘贴您的 API Key，然后保存（Commit Config）。
+3. 在 **PLAYGROUND** 选项卡中上传一张图片，输入 prompt，测试接口是否连通。
 
-**② 写进宿主配置**
+**③ 写入宿主配置（直接复制下方内容）**
+配置成功后，您的宿主配置文件（如 Claude Desktop 或 Cursor）只需**最简化配置**即可运行，不再需要写繁琐的 `env` 环境变量。请直接复制以下 JSON 配置：
 
 ```json
 {
   "mcpServers": {
     "visionpower": {
       "command": "npx",
-      "args": ["-y", "--package", "visionpower@latest", "visionpower"],
-      "env": {
-        "VISIONPOWER_API_KEY": "填写你的 API Key",
-        "VISIONPOWER_MODEL": "qwen3-vl-flash",
-        "VISIONPOWER_BASE_URL": "https://dashscope.aliyuncs.com/compatible-mode/v1"
-      }
+      "args": ["-y", "--package", "visionpower@latest", "visionpower"]
     }
   }
 }
 ```
 
-> 国内镜像把 `args` 换成 `["-y", "--registry=https://registry.npmmirror.com", "--package", "visionpower@latest", "visionpower"]`。
-
-**③ Codex 用 TOML**（不是 JSON），写入 `~/.codex/config.toml`：
-
+* **Codex (TOML)**, 写入 `~/.codex/config.toml`:
 ```toml
 [mcp_servers."visionpower"]
 type = "stdio"
 command = "npx"
 args = ["-y", "--package", "visionpower@latest", "visionpower"]
-
-[mcp_servers."visionpower".env]
-VISIONPOWER_API_KEY = "填写你的 API Key"
-VISIONPOWER_MODEL = "qwen3-vl-flash"
-VISIONPOWER_BASE_URL = "https://dashscope.aliyuncs.com/compatible-mode/v1"
 ```
 
-> 配置在宿主**启动时**读取，写完需**重启**该工具才会在会话中生效。
+> **注意**：宿主配置会在宿主**启动时**读取，配置完毕后请**重启宿主**生效。
+
+---
+
+### 配置方式二：交给 Agent 自动配置与安装
+
+如果您当前正在与具有文件读写能力的 AI 助手（如 Claude Code, Cursor, Cline 等）对话，可以直接将以下这段提示词复制发送给它，它会自动帮您生成本地配置文件并在客户端中注册该 MCP 服务：
+
+```text
+请帮我配置并注册 VisionPower MCP 服务。
+
+视觉模型 API Key：[在此填写您的 API Key]
+默认模型：qwen3-vl-flash
+
+【执行步骤】
+1. 检查运行环境：执行 `node --version`，确认版本 >= 18。如果未安装或版本过低，告知我先安装 Node.js 18+（https://nodejs.org），然后停止后续步骤等待我确认。
+
+2. 冒烟测试：执行以下命令，确认 npx 能正常拉取并运行 VisionPower：
+   npx -y --package visionpower@latest visionpower --version
+   如命令报错，告知我错误信息并停止后续步骤。
+
+3. 写入本地配置文件：在 `~/.visionpower/config.json` 中写入以下内容（注意不要在终端或对话中明文完整输出我的 Key）：
+   {
+     "apiKey": "[在此填写您的 API Key]",
+     "model": "qwen3-vl-flash"
+   }
+
+4. 注册 MCP 服务：在我当前宿主（如 Claude Desktop 或 Cursor）的 MCP 配置文件中添加以下配置。请先寻找已有的 mcpServers 配置文件作为格式模板，严格照搬其结构：
+   "visionpower": {
+     "command": "npx",
+     "args": ["-y", "--package", "visionpower@latest", "visionpower"]
+   }
+
+5. 完成后告知我已写入的所有配置文件路径，并提示我重启宿主工具以使服务生效。
+```
 
 ---
 

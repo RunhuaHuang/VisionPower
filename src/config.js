@@ -1,4 +1,4 @@
-import { readFileSync } from 'node:fs'
+import { readFileSync, writeFileSync, mkdirSync, renameSync, unlinkSync } from 'node:fs'
 import { readdir, chmod, mkdir, rename, stat, unlink, writeFile } from 'node:fs/promises'
 import { basename, dirname, join } from 'node:path'
 import { homedir } from 'node:os'
@@ -17,6 +17,7 @@ export const VISION_MODEL_PRESETS = [
   { model: 'qwen3-vl-flash', label: 'Qwen3-VL Flash', baseUrl: DEFAULT_VISION_BASE_URL },
   { model: 'qwen3-vl-plus', label: 'Qwen3-VL Plus', baseUrl: DEFAULT_VISION_BASE_URL },
   { model: 'qwen3.6-flash', label: 'Qwen3.6 Flash', baseUrl: DEFAULT_VISION_BASE_URL },
+  { model: 'minimax-m3', label: 'MiniMax-M3', baseUrl: 'https://api.minimax.chat/v1' },
   { model: 'gpt-4o', label: 'GPT-4o', baseUrl: 'https://api.openai.com/v1' },
   { model: 'gpt-4o-mini', label: 'GPT-4o mini', baseUrl: 'https://api.openai.com/v1' },
 ]
@@ -323,3 +324,21 @@ function normalizeBaseUrl(value, name) {
 
   return url.toString().replace(/\/+$/, '')
 }
+
+export function saveVisionConfig(config, env = process.env) {
+  const configPath = getConfigFilePath(env)
+  const dir = dirname(configPath)
+  // Ensure directory exists with restrictive permissions (0o700 = owner rwx only)
+  mkdirSync(dir, { recursive: true, mode: 0o700 })
+  // Atomic write: write to a temp file, then rename to final path.
+  // This prevents a partially-written config.json if the process is killed mid-write.
+  const tmp = `${configPath}.${process.pid}.${Date.now()}.tmp`
+  try {
+    writeFileSync(tmp, JSON.stringify(config, null, 2) + '\n', { encoding: 'utf8', mode: 0o600 })
+    renameSync(tmp, configPath)
+  } catch (error) {
+    try { unlinkSync(tmp) } catch { /* best-effort cleanup */ }
+    throw error
+  }
+}
+

@@ -317,14 +317,19 @@ function normalizeImageInputs(params, config) {
 
 function extractTextContent(data) {
   const content = data?.choices?.[0]?.message?.content
-  if (typeof content === 'string') return content
-  if (Array.isArray(content)) {
-    return content
+  let text = ''
+  if (typeof content === 'string') {
+    text = content
+  } else if (Array.isArray(content)) {
+    text = content
       .map((part) => typeof part?.text === 'string' ? part.text : '')
       .filter(Boolean)
       .join('\n')
   }
-  return ''
+  
+  // Strip any <think>...</think> reasoning blocks to keep tool output clean
+  // and save host agent context input tokens.
+  return text.replace(/<think>[\s\S]*?<\/think>\n?/gi, '')
 }
 
 async function fetchVisionCompletion(requestBody, config) {
@@ -485,4 +490,32 @@ export async function describeImage(params, config) {
   writeResultCache(cacheKey, responseContent, config)
   debugLog(config, `completed in ${Date.now() - startedAt}ms`)
   return responseContent
+}
+
+export async function testModelConnection(config) {
+  if (!config.apiKey) {
+    throw new Error('API key is not configured.')
+  }
+  const requestBody = {
+    model: config.model,
+    messages: [
+      { role: 'user', content: 'hi' }
+    ],
+    max_tokens: 15
+  }
+  const bodyText = await fetchVisionCompletion(requestBody, config)
+  let data
+  try {
+    data = JSON.parse(bodyText)
+  } catch {
+    throw new Error('Model returned a non-JSON response')
+  }
+  if (data?.error?.message) {
+    throw new Error(`API error: ${data.error.message}`)
+  }
+  const content = extractTextContent(data)
+  if (!content) {
+    throw new Error('Model returned no text content')
+  }
+  return content
 }

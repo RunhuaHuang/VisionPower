@@ -4,7 +4,7 @@
 // Source of truth: src/config.js + src/vision-core.js.
 // Regenerate with: npm run build:skill
 
-import { readFileSync, realpathSync } from 'node:fs'
+import { readFileSync, writeFileSync, mkdirSync, renameSync, unlinkSync, realpathSync } from 'node:fs'
 import { readdir, chmod, mkdir, rename, stat, unlink, writeFile, readFile, realpath } from 'node:fs/promises'
 import { basename, dirname, join, extname, isAbsolute, resolve, sep } from 'node:path'
 import { homedir } from 'node:os'
@@ -25,6 +25,7 @@ const VISION_MODEL_PRESETS = [
   { model: 'qwen3-vl-flash', label: 'Qwen3-VL Flash', baseUrl: DEFAULT_VISION_BASE_URL },
   { model: 'qwen3-vl-plus', label: 'Qwen3-VL Plus', baseUrl: DEFAULT_VISION_BASE_URL },
   { model: 'qwen3.6-flash', label: 'Qwen3.6 Flash', baseUrl: DEFAULT_VISION_BASE_URL },
+  { model: 'minimax-m3', label: 'MiniMax-M3', baseUrl: 'https://api.minimax.chat/v1' },
   { model: 'gpt-4o', label: 'GPT-4o', baseUrl: 'https://api.openai.com/v1' },
   { model: 'gpt-4o-mini', label: 'GPT-4o mini', baseUrl: 'https://api.openai.com/v1' },
 ]
@@ -330,6 +331,23 @@ function normalizeBaseUrl(value, name) {
   url.hash = ''
 
   return url.toString().replace(/\/+$/, '')
+}
+
+function saveVisionConfig(config, env = process.env) {
+  const configPath = getConfigFilePath(env)
+  const dir = dirname(configPath)
+  // Ensure directory exists with restrictive permissions (0o700 = owner rwx only)
+  mkdirSync(dir, { recursive: true, mode: 0o700 })
+  // Atomic write: write to a temp file, then rename to final path.
+  // This prevents a partially-written config.json if the process is killed mid-write.
+  const tmp = `${configPath}.${process.pid}.${Date.now()}.tmp`
+  try {
+    writeFileSync(tmp, JSON.stringify(config, null, 2) + '\n', { encoding: 'utf8', mode: 0o600 })
+    renameSync(tmp, configPath)
+  } catch (error) {
+    try { unlinkSync(tmp) } catch { /* best-effort cleanup */ }
+    throw error
+  }
 }
 
 const VISION_RETRYABLE_STATUS = new Set([429, 500, 502, 503, 504])
@@ -645,14 +663,19 @@ function normalizeImageInputs(params, config) {
 
 function extractTextContent(data) {
   const content = data?.choices?.[0]?.message?.content
-  if (typeof content === 'string') return content
-  if (Array.isArray(content)) {
-    return content
+  let text = ''
+  if (typeof content === 'string') {
+    text = content
+  } else if (Array.isArray(content)) {
+    text = content
       .map((part) => typeof part?.text === 'string' ? part.text : '')
       .filter(Boolean)
       .join('\n')
   }
-  return ''
+  
+  // Strip any <think>...</think> reasoning blocks to keep tool output clean
+  // and save host agent context input tokens.
+  return text.replace(/<think>[\s\S]*?<\/think>\n?/gi, '')
 }
 
 async function fetchVisionCompletion(requestBody, config) {
@@ -813,6 +836,34 @@ async function describeImage(params, config) {
   writeResultCache(cacheKey, responseContent, config)
   debugLog(config, `completed in ${Date.now() - startedAt}ms`)
   return responseContent
+}
+
+async function testModelConnection(config) {
+  if (!config.apiKey) {
+    throw new Error('API key is not configured.')
+  }
+  const requestBody = {
+    model: config.model,
+    messages: [
+      { role: 'user', content: 'hi' }
+    ],
+    max_tokens: 15
+  }
+  const bodyText = await fetchVisionCompletion(requestBody, config)
+  let data
+  try {
+    data = JSON.parse(bodyText)
+  } catch {
+    throw new Error('Model returned a non-JSON response')
+  }
+  if (data?.error?.message) {
+    throw new Error(`API error: ${data.error.message}`)
+  }
+  const content = extractTextContent(data)
+  if (!content) {
+    throw new Error('Model returned no text content')
+  }
+  return content
 }
 
 // ---- Skill entry point (self-contained; no install, no extra deps) ----

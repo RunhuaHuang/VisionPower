@@ -70,91 +70,87 @@ The two forms are **functionally equivalent** — they differ only in how the ag
 
 ---
 
-## Use as an MCP server
+## Use as an MCP server (Strongly Recommended)
 
-### Fastest path: let your agent install it
+> [!IMPORTANT]
+> **We strongly recommend running this server as an MCP server**. Compared to the Skill format, MCP is more standardized, stable, and loads flawlessly across all major agent hosts (like Claude Desktop, Cursor, and Cline). You can activate it with a single copy-paste using the configuration block below.
 
-Copy the prompt below and send it to your agent (swap in your API key):
+### Requirements
+- Node.js 18+
+- An API Key for a vision-capable OpenAI-compatible model (e.g. Alibaba Cloud Model Studio, OpenAI API, etc.).
 
-```text
-Please install and configure VisionPower MCP for me.
+### Option 1: Configure via the WebUI Console
 
-Vision model API key: your-api-key (it will be written to the config in plaintext; keep the config file secure)
-Model: qwen3-vl-flash
-Base URL: https://dashscope.aliyuncs.com/compatible-mode/v1
+You can easily configure everything (model, API key, base URL, caching, allowed directories, etc.) using the built-in local WebUI configuration console, test image analysis directly using the **Playground**, and copy routing snippets from the **Patch Bay**.
 
-[Install] First test npm registry connectivity:
-- Official registry is stable → npx -y --package visionpower@latest visionpower
-- Unstable / mainland China network → npx -y --registry=https://registry.npmmirror.com --package visionpower@latest visionpower
-- Only if npx fails repeatedly, run npm install -g visionpower@latest and set command to visionpower
-
-[Write config — important]
-Do not apply a generic template. First find an existing MCP server config that is already present
-and running in this agent's config directory. Use it as the format template, and strictly follow
-its file location and field structure when adding visionpower.
-If multiple candidate config files exist, use the one that already has an MCP server in use; do not
-write this into provider/model configuration.
-
-[Verify] Confirm in two steps:
-1. Process level: start the process with the written command+env, perform an MCP handshake, and confirm tools/list returns describe_image;
-2. Tell the user: the host reads config at startup, so this agent tool must be restarted before the tool appears in the session.
-```
-
-**Requirements**: Node.js 18+ and a vision-capable OpenAI-compatible API key (Alibaba Cloud Model Studio key: <https://bailian.console.aliyun.com/?tab=model#/api-key>).
-
-### Manual install
-
-For tools that configure MCP servers with JSON/TOML, such as Claude Desktop, Cursor, Cline, and Cherry Studio. These hosts **will neither download the package nor auto-test the connection for you** — verify in a terminal first that the package pulls and the API key works, then add the config, to avoid round-trips.
-
-**① Download and self-check in a terminal first**
-
-Run the command below once. It pulls VisionPower and attempts an MCP handshake; a successful handshake means your network, the package, and the key are all fine:
-
+**① Start the WebUI configuration console**
+Run the following command in your terminal:
 ```bash
-# Official registry
-npx -y --package visionpower@latest visionpower
-# Mainland China / unreliable networks
-npx -y --registry=https://registry.npmmirror.com --package visionpower@latest visionpower
+npx -y --package visionpower@latest visionpower --webui
 ```
 
-> If the process stays up without errors (you'll see something like `Running VisionPower MCP server`), you're good — `Ctrl+C` to exit. The package is now cached locally, so later host starts are faster.
-> Keeps failing? On unreliable networks or for long-term use, switch to a global install: `npm install -g visionpower@latest` (add `--registry=https://registry.npmmirror.com` in China).
+**② Configure and Test**
+1. Once running, open `http://127.0.0.1:17900` in your browser.
+2. Select your model preset, paste your API Key in the **CONFIG** tab, and click **Commit Config**.
+3. Upload an image in the **PLAYGROUND** tab and test if it works.
 
-**② Add it to your host config**
+**③ Add to your Host Config (Copy the snippet below)**
+Once configured, you only need the **simplest configuration** in your MCP client (such as Claude Desktop or Cursor). There is no need for a complex `env` block. Please copy and paste this block directly:
 
 ```json
 {
   "mcpServers": {
     "visionpower": {
       "command": "npx",
-      "args": ["-y", "--package", "visionpower@latest", "visionpower"],
-      "env": {
-        "VISIONPOWER_API_KEY": "your-api-key",
-        "VISIONPOWER_MODEL": "qwen3-vl-flash",
-        "VISIONPOWER_BASE_URL": "https://dashscope.aliyuncs.com/compatible-mode/v1"
-      }
+      "args": ["-y", "--package", "visionpower@latest", "visionpower"]
     }
   }
 }
 ```
 
-> For the China mirror, change `args` to `["-y", "--registry=https://registry.npmmirror.com", "--package", "visionpower@latest", "visionpower"]`.
-
-**③ Codex uses TOML** (not JSON). Add this to `~/.codex/config.toml`:
-
+* **Codex (TOML)**, add this to `~/.codex/config.toml`:
 ```toml
 [mcp_servers."visionpower"]
 type = "stdio"
 command = "npx"
 args = ["-y", "--package", "visionpower@latest", "visionpower"]
-
-[mcp_servers."visionpower".env]
-VISIONPOWER_API_KEY = "your-api-key"
-VISIONPOWER_MODEL = "qwen3-vl-flash"
-VISIONPOWER_BASE_URL = "https://dashscope.aliyuncs.com/compatible-mode/v1"
 ```
 
-> The host reads config **at startup**, so you must **restart** the tool after saving before it takes effect in the session.
+> **Note**: The host reads config **at startup**, so you must **restart** the host application after configuration changes.
+
+---
+
+### Option 2: Let Your Agent Install & Configure It
+
+If you are chatting with an AI assistant that has file-writing capabilities (such as Claude Code, Cursor, or Cline), you can simply copy and send the prompt below to it. It will automatically write your local configuration file and register the MCP server:
+
+```text
+Please help me configure and register the VisionPower MCP service.
+
+Vision Model API Key: [Paste your API key here]
+Default Model: qwen3-vl-flash
+
+[Steps]
+1. Check the environment: run `node --version` and confirm the version is >= 18. If Node.js is not installed or the version is too old, tell me to install Node.js 18+ first (https://nodejs.org) and stop here until I confirm.
+
+2. Smoke test: run the following command to confirm npx can pull and execute VisionPower:
+   npx -y --package visionpower@latest visionpower --version
+   If it errors, show me the error and stop here.
+
+3. Write the local config file: create `~/.visionpower/config.json` with the following content (do not print my full API key in plaintext in the chat output):
+   {
+     "apiKey": "[Paste your API key here]",
+     "model": "qwen3-vl-flash"
+   }
+
+4. Register the MCP server: find my current host's MCP config file (e.g. for Claude Desktop or Cursor), use its existing mcpServers structure as a template, and add the visionpower entry:
+   "visionpower": {
+     "command": "npx",
+     "args": ["-y", "--package", "visionpower@latest", "visionpower"]
+   }
+
+5. Once done, show me the paths of all files you modified and remind me to restart the host application for the changes to take effect.
+```
 
 ---
 
