@@ -327,9 +327,9 @@ function extractTextContent(data) {
       .join('\n')
   }
   
-  // Strip any <think>...</think> reasoning blocks to keep tool output clean
-  // and save host agent context input tokens.
-  return text.replace(/<think>[\s\S]*?<\/think>\n?/gi, '')
+  // Strip any <think>...</think> reasoning blocks (including unclosed trailing think blocks)
+  // to keep tool output clean and save host agent context input tokens.
+  return text.replace(/<think>[\s\S]*?(?:<\/think>|$)\n?/gi, '')
 }
 
 async function fetchVisionCompletion(requestBody, config) {
