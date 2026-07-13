@@ -2,6 +2,7 @@ import { spawn } from 'node:child_process'
 import { mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { pathToFileURL } from 'node:url'
 import { Client } from '@modelcontextprotocol/sdk/client/index.js'
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js'
 
@@ -81,7 +82,7 @@ globalThis.fetch = async () => new Response(
   const skillSuccess = await new Promise((resolve, reject) => {
     const child = spawn(process.execPath, [
       '--import',
-      mockFetchPath,
+      pathToFileURL(mockFetchPath).href,
       'VisionPower-Skill/describe_image.mjs',
       '--image-base64',
       Buffer.from('GIF89a', 'ascii').toString('base64'),
