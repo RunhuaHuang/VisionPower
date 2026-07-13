@@ -310,9 +310,10 @@ try {
   // --- The generated skill script stays in sync with the core ---
   const generatedSkill = await buildSkillScript()
   const committedSkill = readFileSync(new URL('../VisionPower-Skill/describe_image.mjs', import.meta.url), 'utf8')
+  assert.ok(!generatedSkill.includes('\r'), 'generated Skill must use LF line endings on every platform')
   assert.equal(
     generatedSkill,
-    committedSkill,
+    committedSkill.replace(/\r\n?/g, '\n'),
     'VisionPower-Skill/describe_image.mjs is out of date; run `npm run build:skill`',
   )
 

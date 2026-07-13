@@ -19,6 +19,9 @@ const ROOT = new URL('../', import.meta.url)
 // source files (e.g. both import `stat` from node:fs/promises) without producing
 // a duplicate-identifier SyntaxError in the generated skill script.
 function stripModuleSyntax(source) {
+  // Keep the generated artifact byte-identical on Windows and POSIX hosts.
+  // Git may check source files out as CRLF depending on local configuration.
+  source = source.replace(/\r\n?/g, '\n')
   const imports = []
   const bodyLines = []
   for (const line of source.split('\n')) {
