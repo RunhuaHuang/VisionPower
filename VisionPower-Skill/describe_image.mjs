@@ -15,6 +15,7 @@ const DEFAULT_VISION_BASE_URL = 'https://dashscope.aliyuncs.com/compatible-mode/
 const DEFAULT_VISION_MODEL = 'qwen3-vl-flash'
 const DEFAULT_MAX_IMAGE_BYTES = 20 * 1024 * 1024
 const DEFAULT_REQUEST_TIMEOUT_MS = 60_000
+const MAX_REQUEST_TIMEOUT_MS = 2_147_483_647
 const DEFAULT_MAX_TOKENS = 2048
 const DEFAULT_MAX_IMAGES = 8
 const DEFAULT_MAX_RETRIES = 2
@@ -243,7 +244,10 @@ function allowedDirsFromFile(value) {
   if (!list) {
     throw new Error('config file "allowedDirs" must be an array or comma-separated string')
   }
-  return list.map((item) => String(item).trim()).filter(Boolean)
+  if (list.some((item) => typeof item !== 'string')) {
+    throw new Error('config file "allowedDirs" entries must be strings')
+  }
+  return list.map((item) => item.trim()).filter(Boolean)
 }
 
 function loadVisionConfig(env = process.env) {
@@ -269,6 +273,13 @@ function loadVisionConfig(env = process.env) {
 
   const allowedDirsEnv = readEnvValue(env, ['VISIONPOWER_ALLOWED_DIRS'])
   const debugEnv = readEnvValue(env, ['VISIONPOWER_DEBUG'])
+  const timeoutEnv = readEnvValue(env, ['VISIONPOWER_TIMEOUT_MS'])
+  const timeoutFile = integerFromFile(file.timeoutMs, 'timeoutMs')
+  const requestTimeoutMs = parsePositiveInteger(timeoutEnv, timeoutFile ?? DEFAULT_REQUEST_TIMEOUT_MS)
+  if (requestTimeoutMs > MAX_REQUEST_TIMEOUT_MS) {
+    const source = timeoutEnv.value ? timeoutEnv.name : 'config file "timeoutMs"'
+    throw new Error(`${source} must not exceed ${MAX_REQUEST_TIMEOUT_MS}`)
+  }
 
   return {
     apiKey,
@@ -278,7 +289,7 @@ function loadVisionConfig(env = process.env) {
       ? parseAllowedDirs(allowedDirsEnv)
       : (allowedDirsFromFile(file.allowedDirs) ?? []),
     maxImageBytes: parsePositiveInteger(readEnvValue(env, ['VISIONPOWER_MAX_IMAGE_BYTES']), integerFromFile(file.maxImageBytes, 'maxImageBytes') ?? DEFAULT_MAX_IMAGE_BYTES),
-    requestTimeoutMs: parsePositiveInteger(readEnvValue(env, ['VISIONPOWER_TIMEOUT_MS']), integerFromFile(file.timeoutMs, 'timeoutMs') ?? DEFAULT_REQUEST_TIMEOUT_MS),
+    requestTimeoutMs,
     maxTokens: parsePositiveInteger(readEnvValue(env, ['VISIONPOWER_MAX_TOKENS']), integerFromFile(file.maxTokens, 'maxTokens') ?? DEFAULT_MAX_TOKENS),
     maxImages: parsePositiveInteger(readEnvValue(env, ['VISIONPOWER_MAX_IMAGES']), integerFromFile(file.maxImages, 'maxImages') ?? DEFAULT_MAX_IMAGES),
     maxRetries: parseNonNegativeInteger(readEnvValue(env, ['VISIONPOWER_MAX_RETRIES']), integerFromFile(file.maxRetries, 'maxRetries', { allowZero: true }) ?? DEFAULT_MAX_RETRIES),
@@ -293,6 +304,10 @@ function loadVisionConfig(env = process.env) {
 // server process does not bill a second model call for a repeated request in
 // the same session. Env VISIONPOWER_CACHE=false disables it entirely.
 function resolveCacheConfig(env, file) {
+  if (file.cache !== undefined && file.cache !== null
+    && (typeof file.cache !== 'object' || Array.isArray(file.cache))) {
+    throw new Error('config file "cache" must be an object')
+  }
   const cacheEnv = readEnvValue(env, ['VISIONPOWER_CACHE'])
   let enabled = cacheEnv.value ? parseBoolean(cacheEnv) : (booleanFromFile(file.cache?.enabled, 'cache.enabled') ?? true)
 
@@ -319,6 +334,9 @@ function normalizeBaseUrl(value, name) {
 
   if (url.protocol !== 'http:' && url.protocol !== 'https:') {
     throw new Error(`${name} must use http or https`)
+  }
+  if (url.username || url.password) {
+    throw new Error(`${name} must not include credentials`)
   }
 
   const pathname = url.pathname.replace(/\/+$/, '')
@@ -409,7 +427,10 @@ function normalizeConfigObject(input) {
       ? cleaned.allowedDirs
       : typeof cleaned.allowedDirs === 'string' ? cleaned.allowedDirs.split(',') : null
     if (!list) throw new Error('allowedDirs must be an array or comma-separated string')
-    cleaned.allowedDirs = list.map((item) => String(item).trim()).filter(Boolean)
+    if (list.some((item) => typeof item !== 'string')) {
+      throw new Error('allowedDirs entries must be strings')
+    }
+    cleaned.allowedDirs = list.map((item) => item.trim()).filter(Boolean)
   }
 
   // Numeric fields: reuse the same file loaders so the rules stay in sync.
@@ -427,6 +448,9 @@ function normalizeConfigObject(input) {
         throw new Error(`config field "${label}" must be a ${allowZero ? 'non-negative' : 'positive'} integer`)
       }
       cleaned[key] = validated
+      if (key === 'timeoutMs' && validated > MAX_REQUEST_TIMEOUT_MS) {
+        throw new Error(`config field "timeoutMs" must not exceed ${MAX_REQUEST_TIMEOUT_MS}`)
+      }
     }
   }
 
@@ -469,6 +493,10 @@ function normalizeConfigObject(input) {
 }
 
 const VISION_RETRYABLE_STATUS = new Set([429, 500, 502, 503, 504])
+const MAX_PROMPT_CHARS = 20_000
+const SUPPORTED_IMAGE_MIME_TYPES = new Set([
+  'image/jpeg', 'image/png', 'image/webp', 'image/gif', 'image/bmp',
+])
 
 function debugLog(config, message) {
   if (config.debug) {
@@ -603,13 +631,19 @@ async function readLocalImageAsBase64(imagePath, config) {
 }
 
 function isPrivateIpv4Address(ipAddress) {
-  const [a, b] = ipAddress.split('.').map((part) => Number.parseInt(part, 10))
+  const [a, b, c] = ipAddress.split('.').map((part) => Number.parseInt(part, 10))
   return a === 0
     || a === 10
     || a === 127
+    || a >= 224
+    || (a === 100 && b >= 64 && b <= 127)
     || (a === 169 && b === 254)
     || (a === 172 && b >= 16 && b <= 31)
+    || (a === 192 && b === 0 && (c === 0 || c === 2))
     || (a === 192 && b === 168)
+    || (a === 198 && (b === 18 || b === 19))
+    || (a === 198 && b === 51 && c === 100)
+    || (a === 203 && b === 0 && c === 113)
 }
 
 function ipv4FromMappedIpv6(ipAddress) {
@@ -716,6 +750,41 @@ function normalizeBase64Image(imageBase64, imageMimeType, config) {
 
 function countImageSources(params) {
   return ['image_path', 'image_url', 'image_base64'].filter((key) => Boolean(params[key])).length
+}
+
+function validateImageSourceFields(input, label) {
+  if (input === null || typeof input !== 'object' || Array.isArray(input)) {
+    throw new Error(`${label} must be a JSON object`)
+  }
+  for (const key of ['image_path', 'image_url', 'image_base64']) {
+    if (input[key] !== undefined && (typeof input[key] !== 'string' || !input[key].trim())) {
+      throw new Error(`${label}.${key} must be a non-empty string`)
+    }
+  }
+  if (input.image_mime_type !== undefined
+    && (typeof input.image_mime_type !== 'string' || !SUPPORTED_IMAGE_MIME_TYPES.has(input.image_mime_type))) {
+    throw new Error(`${label}.image_mime_type must be a supported image MIME type`)
+  }
+}
+
+function validateDescribeImageParams(params) {
+  validateImageSourceFields(params, 'request')
+
+  if (params.images !== undefined) {
+    if (!Array.isArray(params.images) || params.images.length === 0) {
+      throw new Error('images must be a non-empty array')
+    }
+    params.images.forEach((image, index) => validateImageSourceFields(image, `images[${index}]`))
+  }
+
+  if (params.prompt !== undefined) {
+    if (typeof params.prompt !== 'string') {
+      throw new Error('prompt must be a string')
+    }
+    if (params.prompt.trim().length > MAX_PROMPT_CHARS) {
+      throw new Error(`prompt must not exceed ${MAX_PROMPT_CHARS} characters`)
+    }
+  }
 }
 
 function assertExactlyOneImageSource(params) {
@@ -855,24 +924,31 @@ async function fetchVisionCompletion(requestBody, config) {
 // image+question. A miss degrades gracefully to a normal provider call.
 const resultCache = new Map()
 
-function computeCacheKey(requestBody) {
+function computeCacheKey(requestBody, config) {
   const hash = createHash('sha256')
+  // Scope cached answers to the exact provider endpoint and credential. The
+  // same model ID can exist behind different gateways/accounts with different
+  // behavior or data boundaries, so sharing across either is incorrect.
+  hash.update(`base_url=${config.baseUrl}\n`)
+  hash.update(`api_key=${config.apiKey}\n`)
   hash.update(`model=${requestBody.model}\n`)
   hash.update(`max_tokens=${requestBody.max_tokens}\n`)
   for (const part of requestBody.messages?.[0]?.content ?? []) {
     if (part.type === 'text') {
       hash.update(`text:${part.text}\n`)
     } else if (part.type === 'image_url') {
-      // image_url.url holds either a public URL or a full data: URI (bytes),
-      // so this captures the actual image content, not just a reference.
-      hash.update(`image:${part.image_url?.url ?? ''}\n`)
+      const imageUrl = part.image_url?.url ?? ''
+      // A public URL is a mutable reference: its bytes may change while the
+      // URL remains identical. Only byte-backed data URIs are safe to cache.
+      if (!imageUrl.startsWith('data:')) return null
+      hash.update(`image:${imageUrl}\n`)
     }
   }
   return hash.digest('hex')
 }
 
 function readResultCache(key, config) {
-  if (!config.cache?.enabled) return undefined
+  if (!config.cache?.enabled || !key) return undefined
   const entry = resultCache.get(key)
   if (!entry) return undefined
   if (Date.now() > entry.expiresAt) {
@@ -887,7 +963,7 @@ function readResultCache(key, config) {
 }
 
 function writeResultCache(key, text, config) {
-  if (!config.cache?.enabled) return
+  if (!config.cache?.enabled || !key) return
   resultCache.set(key, { text, expiresAt: Date.now() + config.cache.ttlMs })
   // Evict oldest entries once over capacity (Map preserves insertion order).
   while (resultCache.size > config.cache.maxEntries) {
@@ -897,6 +973,7 @@ function writeResultCache(key, text, config) {
 }
 
 async function describeImage(params, config) {
+  validateDescribeImageParams(params)
   const images = normalizeImageInputs(params, config)
   if (!config.apiKey) {
     throw new Error('API key is not configured. Set VISIONPOWER_API_KEY, OPENAI_API_KEY, or apiKey in ~/.visionpower/config.json')
@@ -928,7 +1005,7 @@ async function describeImage(params, config) {
     max_tokens: config.maxTokens,
   }
 
-  const cacheKey = computeCacheKey(requestBody)
+  const cacheKey = computeCacheKey(requestBody, config)
   const cached = readResultCache(cacheKey, config)
   if (cached !== undefined) return cached
 

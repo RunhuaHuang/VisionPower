@@ -156,7 +156,7 @@ Matching `VISIONPOWER_*` environment variables override the file.
 | `baseUrl` | `VISIONPOWER_BASE_URL` | DashScope `/compatible-mode/v1` | OpenAI-compatible base URL |
 | `maxImages` | `VISIONPOWER_MAX_IMAGES` | `8` | Max images per call |
 | `timeoutMs` | `VISIONPOWER_TIMEOUT_MS` | `60000` | Upstream timeout (ms) |
-| `cache.enabled` | `VISIONPOWER_CACHE` | `true` | In-process result cache (same image+prompt in a session skips a model call) |
+| `cache.enabled` | `VISIONPOWER_CACHE` | `true` | In-process result cache for byte-identical local/Base64 images; public URLs are not cached |
 | — | `VISIONPOWER_CACHE_MAX_ENTRIES` | `32` | Result cache capacity (0 disables) |
 | — | `VISIONPOWER_CACHE_TTL_MS` | `1800000` | Result cache entry lifetime (ms) |
 | — | `VISIONPOWER_SKILL_STATE` | `~/.visionpower/skill-state.json` | Verified setup marker path |

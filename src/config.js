@@ -7,6 +7,7 @@ export const DEFAULT_VISION_BASE_URL = 'https://dashscope.aliyuncs.com/compatibl
 export const DEFAULT_VISION_MODEL = 'qwen3-vl-flash'
 export const DEFAULT_MAX_IMAGE_BYTES = 20 * 1024 * 1024
 export const DEFAULT_REQUEST_TIMEOUT_MS = 60_000
+export const MAX_REQUEST_TIMEOUT_MS = 2_147_483_647
 export const DEFAULT_MAX_TOKENS = 2048
 export const DEFAULT_MAX_IMAGES = 8
 export const DEFAULT_MAX_RETRIES = 2
@@ -235,7 +236,10 @@ function allowedDirsFromFile(value) {
   if (!list) {
     throw new Error('config file "allowedDirs" must be an array or comma-separated string')
   }
-  return list.map((item) => String(item).trim()).filter(Boolean)
+  if (list.some((item) => typeof item !== 'string')) {
+    throw new Error('config file "allowedDirs" entries must be strings')
+  }
+  return list.map((item) => item.trim()).filter(Boolean)
 }
 
 export function loadVisionConfig(env = process.env) {
@@ -261,6 +265,13 @@ export function loadVisionConfig(env = process.env) {
 
   const allowedDirsEnv = readEnvValue(env, ['VISIONPOWER_ALLOWED_DIRS'])
   const debugEnv = readEnvValue(env, ['VISIONPOWER_DEBUG'])
+  const timeoutEnv = readEnvValue(env, ['VISIONPOWER_TIMEOUT_MS'])
+  const timeoutFile = integerFromFile(file.timeoutMs, 'timeoutMs')
+  const requestTimeoutMs = parsePositiveInteger(timeoutEnv, timeoutFile ?? DEFAULT_REQUEST_TIMEOUT_MS)
+  if (requestTimeoutMs > MAX_REQUEST_TIMEOUT_MS) {
+    const source = timeoutEnv.value ? timeoutEnv.name : 'config file "timeoutMs"'
+    throw new Error(`${source} must not exceed ${MAX_REQUEST_TIMEOUT_MS}`)
+  }
 
   return {
     apiKey,
@@ -270,7 +281,7 @@ export function loadVisionConfig(env = process.env) {
       ? parseAllowedDirs(allowedDirsEnv)
       : (allowedDirsFromFile(file.allowedDirs) ?? []),
     maxImageBytes: parsePositiveInteger(readEnvValue(env, ['VISIONPOWER_MAX_IMAGE_BYTES']), integerFromFile(file.maxImageBytes, 'maxImageBytes') ?? DEFAULT_MAX_IMAGE_BYTES),
-    requestTimeoutMs: parsePositiveInteger(readEnvValue(env, ['VISIONPOWER_TIMEOUT_MS']), integerFromFile(file.timeoutMs, 'timeoutMs') ?? DEFAULT_REQUEST_TIMEOUT_MS),
+    requestTimeoutMs,
     maxTokens: parsePositiveInteger(readEnvValue(env, ['VISIONPOWER_MAX_TOKENS']), integerFromFile(file.maxTokens, 'maxTokens') ?? DEFAULT_MAX_TOKENS),
     maxImages: parsePositiveInteger(readEnvValue(env, ['VISIONPOWER_MAX_IMAGES']), integerFromFile(file.maxImages, 'maxImages') ?? DEFAULT_MAX_IMAGES),
     maxRetries: parseNonNegativeInteger(readEnvValue(env, ['VISIONPOWER_MAX_RETRIES']), integerFromFile(file.maxRetries, 'maxRetries', { allowZero: true }) ?? DEFAULT_MAX_RETRIES),
@@ -285,6 +296,10 @@ export function loadVisionConfig(env = process.env) {
 // server process does not bill a second model call for a repeated request in
 // the same session. Env VISIONPOWER_CACHE=false disables it entirely.
 function resolveCacheConfig(env, file) {
+  if (file.cache !== undefined && file.cache !== null
+    && (typeof file.cache !== 'object' || Array.isArray(file.cache))) {
+    throw new Error('config file "cache" must be an object')
+  }
   const cacheEnv = readEnvValue(env, ['VISIONPOWER_CACHE'])
   let enabled = cacheEnv.value ? parseBoolean(cacheEnv) : (booleanFromFile(file.cache?.enabled, 'cache.enabled') ?? true)
 
@@ -311,6 +326,9 @@ export function normalizeBaseUrl(value, name) {
 
   if (url.protocol !== 'http:' && url.protocol !== 'https:') {
     throw new Error(`${name} must use http or https`)
+  }
+  if (url.username || url.password) {
+    throw new Error(`${name} must not include credentials`)
   }
 
   const pathname = url.pathname.replace(/\/+$/, '')
@@ -401,7 +419,10 @@ export function normalizeConfigObject(input) {
       ? cleaned.allowedDirs
       : typeof cleaned.allowedDirs === 'string' ? cleaned.allowedDirs.split(',') : null
     if (!list) throw new Error('allowedDirs must be an array or comma-separated string')
-    cleaned.allowedDirs = list.map((item) => String(item).trim()).filter(Boolean)
+    if (list.some((item) => typeof item !== 'string')) {
+      throw new Error('allowedDirs entries must be strings')
+    }
+    cleaned.allowedDirs = list.map((item) => item.trim()).filter(Boolean)
   }
 
   // Numeric fields: reuse the same file loaders so the rules stay in sync.
@@ -419,6 +440,9 @@ export function normalizeConfigObject(input) {
         throw new Error(`config field "${label}" must be a ${allowZero ? 'non-negative' : 'positive'} integer`)
       }
       cleaned[key] = validated
+      if (key === 'timeoutMs' && validated > MAX_REQUEST_TIMEOUT_MS) {
+        throw new Error(`config field "timeoutMs" must not exceed ${MAX_REQUEST_TIMEOUT_MS}`)
+      }
     }
   }
 
@@ -459,4 +483,3 @@ export function normalizeConfigObject(input) {
 
   return cleaned
 }
-

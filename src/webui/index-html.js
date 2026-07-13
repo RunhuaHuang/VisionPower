@@ -4,6 +4,7 @@ export const WEBUI_HTML = `<!DOCTYPE html>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
 <title>VisionPower · Image Understanding Console</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='12' fill='%230c0d0a'/%3E%3Cpath d='M13 17h9l10 29 10-29h9L37 54H27z' fill='%23c4f542'/%3E%3C/svg%3E" />
 <script defer src="/assets/alpine.min.js"></script>
 <script>
 (function(){
@@ -108,6 +109,7 @@ select{appearance:none;background-image:url("data:image/svg+xml;utf8,<svg xmlns=
 [data-theme="light"] select{background-image:url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12'><path fill='%2386867a' d='M2 4l4 4 4-4'/></svg>")}
 
 header{display:flex;justify-content:space-between;align-items:center;border-bottom:1px solid var(--line);padding-bottom:var(--space-md);margin-bottom:var(--space-lg)}
+.header-actions,.header-toggles{display:flex;gap:var(--space-sm);align-items:center}
 .logo{display:flex;align-items:center;gap:var(--space-sm)}
 .logo-icon{width:20px;height:20px;background:var(--signal);border-radius:var(--radius);box-shadow:0 0 8px var(--signal)}
 .logo-title{font-size:var(--fs-display-lg);font-weight:700;letter-spacing:-0.03em;font-family:var(--font-mono)}
@@ -157,9 +159,21 @@ code-block{display:block;background:var(--code-bg);color:var(--code-text);font-f
 .copy-btn:hover{color:var(--text-primary);border-color:var(--line-bright)}
 
 .toggle-group{display:flex;align-items:center;justify-content:space-between;padding:var(--space-sm) 0;border-bottom:1px solid var(--line)}
+.config-actions{margin-top:var(--space-lg);display:flex;justify-content:space-between;align-items:center;gap:var(--space-md)}
+.config-actions-buttons{display:flex;gap:var(--space-sm);flex-shrink:0}
 
 @media (max-width: 768px) {
   .grid-2, .playground-split { grid-template-columns: 1fr; }
+  .wrap { padding:var(--space-md) var(--space-sm) var(--space-lg); }
+  header { align-items:stretch;flex-direction:column;gap:var(--space-md); }
+  .header-actions { align-items:stretch;flex-direction:column; }
+  .header-toggles { justify-content:flex-end; }
+  .tabs { width:100%; }
+  .tab-btn { flex:1;padding:var(--space-sm);font-size:var(--fs-mono-xs);white-space:nowrap; }
+  .card { padding:var(--space-md); }
+  .config-actions { align-items:stretch;flex-direction:column; }
+  .config-actions .mono { overflow-wrap:anywhere; }
+  .config-actions-buttons { display:grid;grid-template-columns:1fr 1fr;width:100%; }
 }
 </style>
 </head>
@@ -176,14 +190,16 @@ code-block{display:block;background:var(--code-bg);color:var(--code-text);font-f
         <div class="logo-subtitle" x-text="i18n[lang].subtitle"></div>
       </div>
     </div>
-    <div style="display:flex;gap:var(--space-sm);align-items:center">
+    <div class="header-actions">
       <div class="tabs">
         <button class="tab-btn" :class="activeTab === 'config' && 'active'" @click="activeTab = 'config'" x-text="lang === 'zh' ? '配置 CONFIG' : 'CONFIG'"></button>
         <button class="tab-btn" :class="activeTab === 'playground' && 'active'" @click="activeTab = 'playground'" x-text="lang === 'zh' ? '测试 PLAYGROUND' : 'PLAYGROUND'"></button>
         <button class="tab-btn" :class="activeTab === 'guide' && 'active'" @click="activeTab = 'guide'" x-text="lang === 'zh' ? '集成 PATCH BAY' : 'PATCH BAY'"></button>
       </div>
-      <button class="theme-toggle" @click="toggleLang()" x-text="lang === 'zh' ? 'ENGLISH' : '中文'"></button>
-      <button class="theme-toggle" @click="toggleTheme()" x-text="theme === 'dark' ? 'LIGHT' : 'DARK'"></button>
+      <div class="header-toggles">
+        <button class="theme-toggle" @click="toggleLang()" x-text="lang === 'zh' ? 'ENGLISH' : '中文'"></button>
+        <button class="theme-toggle" @click="toggleTheme()" x-text="theme === 'dark' ? 'LIGHT' : 'DARK'"></button>
+      </div>
     </div>
   </header>
 
@@ -223,17 +239,17 @@ code-block{display:block;background:var(--code-bg);color:var(--code-text);font-f
       <div class="form-group">
         <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:var(--space-xs)">
           <label class="label" style="margin-bottom:0" x-text="i18n[lang].apiKeyLabel"></label>
-          <a :href="apiKeyLink" target="_blank" class="mono" style="font-size:var(--fs-mono-xs);color:var(--signal);text-decoration:none;border-bottom:1px dashed var(--signal);cursor:pointer;opacity:0.85;transition:opacity .15s" @mouseenter="$el.style.opacity = '1'" @mouseleave="$el.style.opacity = '0.85'" x-text="apiKeyLinkText"></a>
+          <a :href="apiKeyLink" target="_blank" rel="noopener noreferrer" class="mono" style="font-size:var(--fs-mono-xs);color:var(--signal);text-decoration:none;border-bottom:1px dashed var(--signal);cursor:pointer;opacity:0.85;transition:opacity .15s" @mouseenter="$el.style.opacity = '1'" @mouseleave="$el.style.opacity = '0.85'" x-text="apiKeyLinkText"></a>
         </div>
         <div style="position:relative">
-          <input :type="showKey ? 'text' : 'password'" x-model="config.apiKey" :placeholder="config.apiKey ? i18n[lang].apiKeyPlaceholder : i18n[lang].apiKeyEmptyPlaceholder" />
+          <input :type="showKey ? 'text' : 'password'" x-model="config.apiKey" :placeholder="(config.apiKey || config.apiKeyConfigured) ? i18n[lang].apiKeyPlaceholder : i18n[lang].apiKeyEmptyPlaceholder" />
           <button type="button" @click="showKey = !showKey" style="position:absolute;right:10px;top:50%;transform:translateY(-50%);background:transparent;border:0;color:var(--text-muted);font-family:var(--font-mono);font-size:var(--fs-mono-xs);cursor:pointer;" x-text="showKey ? 'HIDE' : 'SHOW'"></button>
         </div>
       </div>
 
       <div class="form-group">
         <label class="label" x-text="i18n[lang].baseUrlLabel"></label>
-        <input type="text" x-model="config.baseUrl" @input="onBaseUrlChange()" :readonly="config.presetId !== 'custom'" :style="config.presetId !== 'custom' ? 'opacity:0.6;cursor:not-allowed' : ''" />
+        <input type="text" x-model="config.baseUrl" :readonly="config.presetId !== 'custom'" :style="config.presetId !== 'custom' ? 'opacity:0.6;cursor:not-allowed' : ''" />
       </div>
 
       <div style="border-top:1px solid var(--line);margin-top:var(--space-lg);padding-top:var(--space-md)">
@@ -300,9 +316,9 @@ code-block{display:block;background:var(--code-bg);color:var(--code-text);font-f
         </div>
       </div>
 
-      <div style="margin-top:var(--space-lg);display:flex;justify-content:space-between;align-items:center">
+      <div class="config-actions">
         <span class="mono" style="font-size:var(--fs-mono-xs);color:var(--text-muted)" x-text="i18n[lang].configPathLabel + status.configPath"></span>
-        <div style="display:flex;gap:var(--space-sm)">
+        <div class="config-actions-buttons">
           <button class="btn" style="background:var(--surface-3);color:var(--text-primary);border:1px solid var(--line)" @click="testConnection()" :disabled="testingConnection || saving">
             <span x-text="testingConnection ? i18n[lang].testingConnBtn : i18n[lang].testConnBtn"></span>
           </button>
@@ -395,9 +411,21 @@ code-block{display:block;background:var(--code-bg);color:var(--code-text);font-f
 </div>
 
 <script>
+function readLocalPreference(key, fallback) {
+  try { return localStorage.getItem(key) || fallback; } catch { return fallback; }
+}
+
+function writeLocalPreference(key, value) {
+  try { localStorage.setItem(key, value); } catch {}
+}
+
+function removeLocalPreference(key) {
+  try { localStorage.removeItem(key); } catch {}
+}
+
 function consoleApp() {
   return {
-    lang: localStorage.getItem('vp-lang') || 'zh',
+    lang: readLocalPreference('vp-lang', 'zh'),
     activeTab: 'config',
     theme: 'dark',
     alert: { msg: '', type: 'success' },
@@ -410,6 +438,7 @@ function consoleApp() {
       model: 'qwen3-vl-flash',
       baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
       apiKey: '',
+      apiKeyConfigured: false,
       allowedDirs: '',
       maxImageBytes: 20971520,
       timeoutMs: 60000,
@@ -558,7 +587,10 @@ function consoleApp() {
 
     async init() {
       // Load current theme
-      this.theme = localStorage.getItem('vp-theme') || 'dark';
+      this.theme = readLocalPreference('vp-theme', 'dark');
+      // v2.0.0-v2.0.2 stored provider keys in localStorage. Remove that legacy
+      // copy: credentials belong only in the mode-600 config file or env vars.
+      removeLocalPreference('vp-keys-by-url');
       document.documentElement.setAttribute('data-theme', this.theme);
       
       // Presets must be loaded first so that loadConfig() can correctly
@@ -572,12 +604,12 @@ function consoleApp() {
     toggleTheme() {
       this.theme = this.theme === 'dark' ? 'light' : 'dark';
       document.documentElement.setAttribute('data-theme', this.theme);
-      localStorage.setItem('vp-theme', this.theme);
+      writeLocalPreference('vp-theme', this.theme);
     },
 
     toggleLang() {
       this.lang = this.lang === 'zh' ? 'en' : 'zh';
-      localStorage.setItem('vp-lang', this.lang);
+      writeLocalPreference('vp-lang', this.lang);
       // Fetch export guide code snippet again because target notes are localized
       this.fetchExport();
     },
@@ -606,6 +638,7 @@ function consoleApp() {
           model: storedModel,
           baseUrl: data.baseUrl || '',
           apiKey: data.apiKey || '',
+          apiKeyConfigured: !!data.apiKeyConfigured,
           allowedDirs: dirsStr,
           maxImageBytes: data.maxImageBytes !== undefined ? data.maxImageBytes : 20971520,
           timeoutMs: data.timeoutMs !== undefined ? data.timeoutMs : 60000,
@@ -650,40 +683,15 @@ function consoleApp() {
       if (this.config.presetId !== 'custom') {
         const selected = this.presets.find(p => p.model === this.config.presetId);
         if (selected) {
+          const providerChanged = this.config.baseUrl !== selected.baseUrl;
           this.config.model = selected.model;
           this.config.baseUrl = selected.baseUrl;
-          this.onBaseUrlChange();
+          if (providerChanged) {
+            this.config.apiKey = '';
+            this.config.apiKeyConfigured = false;
+          }
         }
       }
-    },
-
-    onBaseUrlChange() {
-      const url = this.config.baseUrl;
-      const rememberedKey = this.getKeyFromMemory(url);
-      if (rememberedKey) {
-        this.config.apiKey = rememberedKey;
-      } else {
-        this.config.apiKey = '';
-      }
-    },
-
-    getKeyFromMemory(url) {
-      if (!url) return '';
-      try {
-        const mapping = JSON.parse(localStorage.getItem('vp-keys-by-url') || '{}');
-        return mapping[url] || '';
-      } catch {
-        return '';
-      }
-    },
-
-    saveKeyToMemory(url, key) {
-      if (!url || !key || key.includes('****')) return;
-      try {
-        const mapping = JSON.parse(localStorage.getItem('vp-keys-by-url') || '{}');
-        mapping[url] = key;
-        localStorage.setItem('vp-keys-by-url', JSON.stringify(mapping));
-      } catch {}
     },
 
     showAlert(msg, type = 'success') {
@@ -698,16 +706,13 @@ function consoleApp() {
       try {
         // Exclude the UI-only presetId field — it is not a valid config key
         // and must never be persisted to config.json.
-        const { presetId, ...configFields } = this.config;
+        const { presetId, apiKeyConfigured, ...configFields } = this.config;
         const payload = { ...configFields };
         
         // Convert comma separated string to array
         payload.allowedDirs = this.config.allowedDirs
           ? this.config.allowedDirs.split(',').map(s => s.trim()).filter(Boolean)
           : [];
-
-        // Save key to local browser storage memory mapping if it is unmasked
-        this.saveKeyToMemory(payload.baseUrl, payload.apiKey);
 
         const res = await fetch('/api/config', {
           method: 'PUT',

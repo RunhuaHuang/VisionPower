@@ -14,6 +14,8 @@ import { describeImage, testModelConnection } from '../vision-core.js'
 
 const require = createRequire(import.meta.url)
 let alpineScriptCache = null
+const SMALL_JSON_BODY_LIMIT = 1024 * 1024
+const JSON_BODY_OVERHEAD = 1024 * 1024
 
 // Read the version once at module load and stamp it into the HTML template.
 // The placeholder in index-html.js keeps the version single-sourced from
@@ -34,17 +36,26 @@ const HTML_CSP = [
   "frame-ancestors 'none'",
 ].join('; ')
 
-function readJsonBody(req) {
+function readJsonBody(req, maxBytes = SMALL_JSON_BODY_LIMIT) {
   return new Promise((resolveReq, reject) => {
     const chunks = []
+    let receivedBytes = 0
+    let tooLarge = false
     req.on('data', (c) => {
-      chunks.push(c)
-      if (chunks.reduce((a, c) => a + c.length, 0) > 10 * 1024 * 1024) {
-        reject(new Error('Request body too large (>10MB)'))
-        req.destroy()
+      if (tooLarge) return
+      receivedBytes += c.length
+      if (receivedBytes > maxBytes) {
+        tooLarge = true
+        chunks.length = 0
+        const error = new Error(`Request body too large (max ${maxBytes} bytes)`)
+        error.statusCode = 413
+        reject(error)
+        return
       }
+      chunks.push(c)
     })
     req.on('end', () => {
+      if (tooLarge) return
       try {
         const raw = Buffer.concat(chunks).toString('utf-8')
         resolveReq(raw ? JSON.parse(raw) : {})
@@ -172,15 +183,36 @@ function loadRawConfig() {
   }
 }
 
+function rawApiKey(config) {
+  for (const key of ['apiKey', 'VISIONPOWER_API_KEY', 'OPENAI_API_KEY']) {
+    if (typeof config[key] === 'string' && config[key].trim()) return config[key].trim()
+  }
+  return ''
+}
+
+function getWebuiConfig() {
+  const effective = loadVisionConfig()
+  const raw = loadRawConfig()
+  const savedApiKey = rawApiKey(raw)
+  return {
+    ...effective,
+    requestTimeoutMs: undefined,
+    timeoutMs: effective.requestTimeoutMs,
+    apiKey: savedApiKey ? maskApiKey(savedApiKey) : '',
+    apiKeyConfigured: Boolean(effective.apiKey),
+  }
+}
+
+function maxPlaygroundBodyBytes(config) {
+  // Base64 expands bytes by roughly 4/3. Leave bounded room for JSON syntax,
+  // prompt text, and MIME metadata so the HTTP layer honors maxImageBytes.
+  return Math.ceil(config.maxImageBytes / 3) * 4 + JSON_BODY_OVERHEAD
+}
+
 async function handleApi(method, url, req, res) {
   // GET /api/config
   if (method === 'GET' && url === '/api/config') {
-    const config = loadRawConfig()
-    const masked = { ...config }
-    if (config.apiKey) {
-      masked.apiKey = maskApiKey(config.apiKey)
-    }
-    sendJson(res, 200, masked)
+    sendJson(res, 200, getWebuiConfig())
     return true
   }
 
@@ -199,9 +231,10 @@ async function handleApi(method, url, req, res) {
       // Preserve the real key when the frontend sends back the masked form. We
       // compare against maskApiKey()'s exact output rather than a substring
       // test, so a real key that happens to contain '*' is never misread.
-      const currentMasked = current.apiKey ? maskApiKey(current.apiKey) : ''
+      const savedApiKey = rawApiKey(current)
+      const currentMasked = savedApiKey ? maskApiKey(savedApiKey) : ''
       if (typeof cleaned.apiKey === 'string' && currentMasked && cleaned.apiKey === currentMasked) {
-        cleaned.apiKey = current.apiKey
+        cleaned.apiKey = savedApiKey
       }
 
       saveVisionConfig(cleaned)
@@ -212,7 +245,7 @@ async function handleApi(method, url, req, res) {
       }
       sendJson(res, 200, { ok: true, config: masked })
     } catch (err) {
-      sendJson(res, 400, { error: err.message })
+      sendJson(res, err.statusCode || 400, { error: err.message })
     }
     return true
   }
@@ -225,10 +258,9 @@ async function handleApi(method, url, req, res) {
 
   // GET /api/status
   if (method === 'GET' && url === '/api/status') {
-    const raw = loadRawConfig()
-    const ready = !!(raw.apiKey || process.env.VISIONPOWER_API_KEY)
+    const config = loadVisionConfig()
     sendJson(res, 200, {
-      ready,
+      ready: Boolean(config.apiKey),
       configPath: getConfigFilePath(),
     })
     return true
@@ -237,8 +269,8 @@ async function handleApi(method, url, req, res) {
   // POST /api/test
   if (method === 'POST' && url === '/api/test') {
     try {
-      const body = await readJsonBody(req)
       const config = loadVisionConfig()
+      const body = await readJsonBody(req, maxPlaygroundBodyBytes(config))
       
       // Playground only accepts URL and base64 inputs — image_path is explicitly
       // blocked here because the playground runs in a browser context and must
@@ -261,7 +293,7 @@ async function handleApi(method, url, req, res) {
       const result = await describeImage(params, config)
       sendJson(res, 200, { result })
     } catch (err) {
-      sendJson(res, 400, { error: err.message })
+      sendJson(res, err.statusCode || 400, { error: err.message })
     }
     return true
   }
@@ -282,8 +314,10 @@ async function handleApi(method, url, req, res) {
       // /api/config) rather than a substring test, so a real key that happens
       // to contain '*' is never mistaken for the mask.
       const currentMasked = current.apiKey ? maskApiKey(current.apiKey) : ''
+      const savedApiKey = rawApiKey(loadRawConfig())
+      const savedMasked = savedApiKey ? maskApiKey(savedApiKey) : ''
       if (typeof body.apiKey === 'string' && body.apiKey) {
-        if (!(currentMasked && body.apiKey === currentMasked)) {
+        if (!((currentMasked && body.apiKey === currentMasked) || (savedMasked && body.apiKey === savedMasked))) {
           tempConfig.apiKey = body.apiKey
         }
       }
@@ -313,7 +347,7 @@ async function handleApi(method, url, req, res) {
       const connectionResult = await testModelConnection(tempConfig)
       sendJson(res, 200, { ok: true, message: connectionResult })
     } catch (err) {
-      sendJson(res, 400, { error: err.message })
+      sendJson(res, err.statusCode || 400, { error: err.message })
     }
     return true
   }
@@ -415,7 +449,9 @@ export function startWebuiServer(port) {
     server.on('error', reject)
 
     server.listen(port, '127.0.0.1', () => {
-      const url = `http://127.0.0.1:${port}`
+      const address = server.address()
+      const actualPort = address && typeof address === 'object' ? address.port : port
+      const url = `http://127.0.0.1:${actualPort}`
       process.stderr.write(`\n[visionpower] WebUI started at: ${url}\n`)
       process.stderr.write(`[visionpower] Config file: ${getConfigFilePath()}\n`)
       process.stderr.write(`[visionpower] Press Ctrl+C to stop\n\n`)
@@ -423,7 +459,7 @@ export function startWebuiServer(port) {
       if (process.env.VISIONPOWER_NO_OPEN !== '1') {
         openBrowser(url).catch(() => {})
       }
-      resolveStart()
+      resolveStart(server)
     })
   })
 }

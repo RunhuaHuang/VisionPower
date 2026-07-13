@@ -5,6 +5,10 @@ import { isIP } from 'node:net'
 import { extname, isAbsolute, resolve, sep } from 'node:path'
 
 const VISION_RETRYABLE_STATUS = new Set([429, 500, 502, 503, 504])
+const MAX_PROMPT_CHARS = 20_000
+const SUPPORTED_IMAGE_MIME_TYPES = new Set([
+  'image/jpeg', 'image/png', 'image/webp', 'image/gif', 'image/bmp',
+])
 
 function debugLog(config, message) {
   if (config.debug) {
@@ -139,13 +143,19 @@ export async function readLocalImageAsBase64(imagePath, config) {
 }
 
 function isPrivateIpv4Address(ipAddress) {
-  const [a, b] = ipAddress.split('.').map((part) => Number.parseInt(part, 10))
+  const [a, b, c] = ipAddress.split('.').map((part) => Number.parseInt(part, 10))
   return a === 0
     || a === 10
     || a === 127
+    || a >= 224
+    || (a === 100 && b >= 64 && b <= 127)
     || (a === 169 && b === 254)
     || (a === 172 && b >= 16 && b <= 31)
+    || (a === 192 && b === 0 && (c === 0 || c === 2))
     || (a === 192 && b === 168)
+    || (a === 198 && (b === 18 || b === 19))
+    || (a === 198 && b === 51 && c === 100)
+    || (a === 203 && b === 0 && c === 113)
 }
 
 function ipv4FromMappedIpv6(ipAddress) {
@@ -252,6 +262,41 @@ function normalizeBase64Image(imageBase64, imageMimeType, config) {
 
 function countImageSources(params) {
   return ['image_path', 'image_url', 'image_base64'].filter((key) => Boolean(params[key])).length
+}
+
+function validateImageSourceFields(input, label) {
+  if (input === null || typeof input !== 'object' || Array.isArray(input)) {
+    throw new Error(`${label} must be a JSON object`)
+  }
+  for (const key of ['image_path', 'image_url', 'image_base64']) {
+    if (input[key] !== undefined && (typeof input[key] !== 'string' || !input[key].trim())) {
+      throw new Error(`${label}.${key} must be a non-empty string`)
+    }
+  }
+  if (input.image_mime_type !== undefined
+    && (typeof input.image_mime_type !== 'string' || !SUPPORTED_IMAGE_MIME_TYPES.has(input.image_mime_type))) {
+    throw new Error(`${label}.image_mime_type must be a supported image MIME type`)
+  }
+}
+
+function validateDescribeImageParams(params) {
+  validateImageSourceFields(params, 'request')
+
+  if (params.images !== undefined) {
+    if (!Array.isArray(params.images) || params.images.length === 0) {
+      throw new Error('images must be a non-empty array')
+    }
+    params.images.forEach((image, index) => validateImageSourceFields(image, `images[${index}]`))
+  }
+
+  if (params.prompt !== undefined) {
+    if (typeof params.prompt !== 'string') {
+      throw new Error('prompt must be a string')
+    }
+    if (params.prompt.trim().length > MAX_PROMPT_CHARS) {
+      throw new Error(`prompt must not exceed ${MAX_PROMPT_CHARS} characters`)
+    }
+  }
 }
 
 function assertExactlyOneImageSource(params) {
@@ -391,24 +436,31 @@ async function fetchVisionCompletion(requestBody, config) {
 // image+question. A miss degrades gracefully to a normal provider call.
 const resultCache = new Map()
 
-function computeCacheKey(requestBody) {
+function computeCacheKey(requestBody, config) {
   const hash = createHash('sha256')
+  // Scope cached answers to the exact provider endpoint and credential. The
+  // same model ID can exist behind different gateways/accounts with different
+  // behavior or data boundaries, so sharing across either is incorrect.
+  hash.update(`base_url=${config.baseUrl}\n`)
+  hash.update(`api_key=${config.apiKey}\n`)
   hash.update(`model=${requestBody.model}\n`)
   hash.update(`max_tokens=${requestBody.max_tokens}\n`)
   for (const part of requestBody.messages?.[0]?.content ?? []) {
     if (part.type === 'text') {
       hash.update(`text:${part.text}\n`)
     } else if (part.type === 'image_url') {
-      // image_url.url holds either a public URL or a full data: URI (bytes),
-      // so this captures the actual image content, not just a reference.
-      hash.update(`image:${part.image_url?.url ?? ''}\n`)
+      const imageUrl = part.image_url?.url ?? ''
+      // A public URL is a mutable reference: its bytes may change while the
+      // URL remains identical. Only byte-backed data URIs are safe to cache.
+      if (!imageUrl.startsWith('data:')) return null
+      hash.update(`image:${imageUrl}\n`)
     }
   }
   return hash.digest('hex')
 }
 
 function readResultCache(key, config) {
-  if (!config.cache?.enabled) return undefined
+  if (!config.cache?.enabled || !key) return undefined
   const entry = resultCache.get(key)
   if (!entry) return undefined
   if (Date.now() > entry.expiresAt) {
@@ -423,7 +475,7 @@ function readResultCache(key, config) {
 }
 
 function writeResultCache(key, text, config) {
-  if (!config.cache?.enabled) return
+  if (!config.cache?.enabled || !key) return
   resultCache.set(key, { text, expiresAt: Date.now() + config.cache.ttlMs })
   // Evict oldest entries once over capacity (Map preserves insertion order).
   while (resultCache.size > config.cache.maxEntries) {
@@ -433,6 +485,7 @@ function writeResultCache(key, text, config) {
 }
 
 export async function describeImage(params, config) {
+  validateDescribeImageParams(params)
   const images = normalizeImageInputs(params, config)
   if (!config.apiKey) {
     throw new Error('API key is not configured. Set VISIONPOWER_API_KEY, OPENAI_API_KEY, or apiKey in ~/.visionpower/config.json')
@@ -464,7 +517,7 @@ export async function describeImage(params, config) {
     max_tokens: config.maxTokens,
   }
 
-  const cacheKey = computeCacheKey(requestBody)
+  const cacheKey = computeCacheKey(requestBody, config)
   const cached = readResultCache(cacheKey, config)
   if (cached !== undefined) return cached
 

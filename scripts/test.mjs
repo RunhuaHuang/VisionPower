@@ -2,9 +2,11 @@ import assert from 'node:assert/strict'
 import { existsSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { request as httpRequest } from 'node:http'
 import { buildSkillScript } from './build-skill.mjs'
 import { getConfigFilePath, getSkillStateFilePath, loadVisionConfig, markSkillConfigNeedsSetup, markSkillConfigVerified, normalizeConfigObject, saveVisionConfig } from '../src/config.js'
 import { describeImage } from '../src/vision-core.js'
+import { startWebuiServer } from '../src/webui/server.js'
 
 const pngBytes = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])
 const gifBytes = Buffer.from('GIF89a', 'ascii')
@@ -83,6 +85,31 @@ function assertThrowsMessage(fn, pattern) {
   })
 }
 
+function localHttpRequest(url, { method = 'GET', body, rawBody } = {}) {
+  const payload = rawBody ?? (body === undefined ? null : Buffer.from(JSON.stringify(body)))
+  return new Promise((resolveRequest, rejectRequest) => {
+    const req = httpRequest(url, {
+      method,
+      headers: payload ? {
+        'Content-Type': 'application/json',
+        'Content-Length': payload.length,
+      } : undefined,
+    }, (res) => {
+      const chunks = []
+      res.on('data', (chunk) => chunks.push(chunk))
+      res.on('end', () => {
+        const text = Buffer.concat(chunks).toString('utf8')
+        let json
+        try { json = text ? JSON.parse(text) : null } catch { json = null }
+        resolveRequest({ status: res.statusCode, text, json })
+      })
+    })
+    req.on('error', rejectRequest)
+    if (payload) req.write(payload)
+    req.end()
+  })
+}
+
 const tempDir = mkdtempSync(join(tmpdir(), 'visionpower-test-'))
 try {
   const pngPath = join(tempDir, 'one.png')
@@ -119,6 +146,12 @@ try {
     () => describeImage({ image_url: 'http://[::ffff:127.0.0.1]/image.png' }, testConfig()),
     /publicly reachable/,
   )
+  for (const address of ['100.64.0.1', '192.0.2.1', '198.51.100.2', '203.0.113.3', '224.0.0.1']) {
+    await assertRejectsMessage(
+      () => describeImage({ image_url: `http://${address}/image.png` }, testConfig()),
+      /publicly reachable/,
+    )
+  }
   await assertRejectsMessage(
     () => describeImage({ image_url: 'https://example.com/image.png' }, testConfig({ apiKey: '' })),
     /Set VISIONPOWER_API_KEY/,
@@ -158,6 +191,30 @@ try {
   await assertRejectsMessage(
     () => describeImage({ image_path: join(tempDir, 'does-not-exist.png') }, testConfig()),
     /image_path does not exist/,
+  )
+  await assertRejectsMessage(
+    () => describeImage(null, testConfig()),
+    /request must be a JSON object/,
+  )
+  await assertRejectsMessage(
+    () => describeImage({ image_base64: 123 }, testConfig()),
+    /image_base64 must be a non-empty string/,
+  )
+  await assertRejectsMessage(
+    () => describeImage({ images: 'not-an-array' }, testConfig()),
+    /images must be a non-empty array/,
+  )
+  await assertRejectsMessage(
+    () => describeImage({ images: [null] }, testConfig()),
+    /images\[0\] must be a JSON object/,
+  )
+  await assertRejectsMessage(
+    () => describeImage({ image_base64: gifBytes.toString('base64'), image_mime_type: 'image/svg+xml' }, testConfig()),
+    /supported image MIME type/,
+  )
+  await assertRejectsMessage(
+    () => describeImage({ image_base64: gifBytes.toString('base64'), prompt: 'x'.repeat(20_001) }, testConfig()),
+    /prompt must not exceed 20000 characters/,
   )
 
   // Retries: a retryable status recovers on a later attempt.
@@ -221,6 +278,25 @@ try {
     const base64 = gifBytes.toString('base64')
     await describeImage({ image_base64: base64, prompt: 'one' }, cacheConfig)
     await describeImage({ image_base64: base64, prompt: 'two' }, cacheConfig)
+    assert.equal(calls.length, 2)
+  })
+
+  // Cache entries must never cross provider endpoints or credentials, even
+  // when those providers expose the same model ID.
+  await withMockFetch(async (calls) => {
+    const input = { image_base64: gifBytes.toString('base64'), prompt: 'cache provider scope' }
+    await describeImage(input, testConfig({ ...cacheConfig, baseUrl: 'https://one.example/v1', apiKey: 'key-one' }))
+    await describeImage(input, testConfig({ ...cacheConfig, baseUrl: 'https://two.example/v1', apiKey: 'key-one' }))
+    await describeImage(input, testConfig({ ...cacheConfig, baseUrl: 'https://two.example/v1', apiKey: 'key-two' }))
+    assert.equal(calls.length, 3)
+  })
+
+  // Public URLs are mutable references, so repeating one must call the model
+  // again instead of returning a potentially stale cached answer.
+  await withMockFetch(async (calls) => {
+    const input = { image_url: 'https://images.example/current.png', prompt: 'mutable URL' }
+    await describeImage(input, cacheConfig)
+    await describeImage(input, cacheConfig)
     assert.equal(calls.length, 2)
   })
 
@@ -314,11 +390,19 @@ try {
     VISIONPOWER_API_KEY: 'k',
     VISIONPOWER_BASE_URL: 'file:///tmp/model',
   }), /VISIONPOWER_BASE_URL must use http or https/)
+  assert.throws(() => cfg({
+    VISIONPOWER_API_KEY: 'k',
+    VISIONPOWER_BASE_URL: 'https://user:password@api.example.com/v1',
+  }), /VISIONPOWER_BASE_URL must not include credentials/)
   assert.throws(() => cfg({ VISIONPOWER_API_KEY: 'k', VISIONPOWER_MAX_TOKENS: '20abc' }), /positive integer/)
   assert.throws(() => cfg({
     VISIONPOWER_API_KEY: 'k',
     VISIONPOWER_TIMEOUT_MS: 'later',
   }), /VISIONPOWER_TIMEOUT_MS must be a positive integer/)
+  assert.throws(() => cfg({
+    VISIONPOWER_API_KEY: 'k',
+    VISIONPOWER_TIMEOUT_MS: '2147483648',
+  }), /VISIONPOWER_TIMEOUT_MS must not exceed 2147483647/)
 
   // --- Persistent config file (env still wins over it) ---
   const fileConfigPath = join(tempDir, 'vp-config.json')
@@ -374,6 +458,16 @@ try {
   assert.throws(
     () => loadVisionConfig({ VISIONPOWER_CONFIG: badFileConfigPath }),
     /config file "maxRetries" must be a non-negative integer/,
+  )
+  writeFileSync(badFileConfigPath, JSON.stringify({ cache: 'enabled' }))
+  assert.throws(
+    () => loadVisionConfig({ VISIONPOWER_CONFIG: badFileConfigPath }),
+    /config file "cache" must be an object/,
+  )
+  writeFileSync(badFileConfigPath, JSON.stringify({ allowedDirs: ['/tmp', 123] }))
+  assert.throws(
+    () => loadVisionConfig({ VISIONPOWER_CONFIG: badFileConfigPath }),
+    /config file "allowedDirs" entries must be strings/,
   )
 
   // --- Skill setup state marker ---
@@ -494,6 +588,10 @@ try {
     () => normalizeConfigObject({ baseUrl: 'file:///tmp' }),
     /baseUrl must use http or https/,
   )
+  assertThrowsMessage(
+    () => normalizeConfigObject({ baseUrl: 'https://user:password@api.example.com/v1' }),
+    /baseUrl must not include credentials/,
+  )
 
   // The three "poison value" regressions that broke loadVisionConfig on read:
   assertThrowsMessage(
@@ -508,9 +606,17 @@ try {
     () => normalizeConfigObject({ maxImages: 0 }),
     /maxImages.*positive integer/,
   )
+  assertThrowsMessage(
+    () => normalizeConfigObject({ timeoutMs: 2_147_483_648 }),
+    /timeoutMs.*must not exceed 2147483647/,
+  )
 
   // allowedDirs accepts an array too.
   assert.deepEqual(normalizeConfigObject({ allowedDirs: ['/x', '/y'] }).allowedDirs, ['/x', '/y'])
+  assertThrowsMessage(
+    () => normalizeConfigObject({ allowedDirs: ['/x', 123] }),
+    /allowedDirs entries must be strings/,
+  )
 
   // apiKey/model: non-string and null values must be rejected/dropped, not
   // persisted — otherwise loadVisionConfig's stringFromFile throws on read.
@@ -550,6 +656,99 @@ try {
     // maxEntries:0 disables the cache on read (matches the documented behavior).
     assert.equal(loaded.cache.enabled, false)
     assert.equal(loaded.cache.maxEntries, 0)
+  }
+
+  // --- WebUI integration: effective env config and status stay aligned with
+  // the same precedence rules used by MCP calls. In particular,
+  // OPENAI_API_KEY alone must make the console ready without exposing it.
+  {
+    const envNames = [
+      'VISIONPOWER_CONFIG', 'VISIONPOWER_API_KEY', 'OPENAI_API_KEY',
+      'VISIONPOWER_MODEL', 'VISIONPOWER_BASE_URL', 'VISIONPOWER_NO_OPEN',
+    ]
+    const originalEnv = new Map(envNames.map((name) => [name, process.env[name]]))
+    let webuiServer
+    try {
+      process.env.VISIONPOWER_CONFIG = join(tempDir, 'webui-absent.json')
+      process.env.VISIONPOWER_API_KEY = ''
+      process.env.OPENAI_API_KEY = 'openai-env-secret'
+      process.env.VISIONPOWER_MODEL = 'gpt-4o'
+      delete process.env.VISIONPOWER_BASE_URL
+      process.env.VISIONPOWER_NO_OPEN = '1'
+
+      webuiServer = await startWebuiServer(0)
+      const address = webuiServer.address()
+      assert.ok(address && typeof address === 'object')
+      const origin = `http://127.0.0.1:${address.port}`
+
+      const configResponse = await fetch(`${origin}/api/config`)
+      assert.equal(configResponse.status, 200)
+      const webuiConfig = await configResponse.json()
+      assert.equal(webuiConfig.model, 'gpt-4o')
+      assert.equal(webuiConfig.baseUrl, 'https://api.openai.com/v1')
+      assert.equal(webuiConfig.apiKey, '')
+      assert.equal(webuiConfig.apiKeyConfigured, true)
+      assert.equal(webuiConfig.timeoutMs, 60_000)
+      assert.equal(webuiConfig.requestTimeoutMs, undefined)
+
+      const statusResponse = await fetch(`${origin}/api/status`)
+      assert.equal(statusResponse.status, 200)
+      assert.equal((await statusResponse.json()).ready, true)
+
+      // A masked key originating in the config file must never become the
+      // temporary connection-test credential when an env key overrides it.
+      const savedKey = 'file-secret-1234567890'
+      writeFileSync(process.env.VISIONPOWER_CONFIG, JSON.stringify({ apiKey: savedKey }))
+      const mixedConfigResponse = await fetch(`${origin}/api/config`)
+      const mixedConfig = await mixedConfigResponse.json()
+      assert.equal(mixedConfig.apiKey, 'file****7890')
+
+      const originalFetch = globalThis.fetch
+      const providerCalls = []
+      try {
+        globalThis.fetch = async (url, options) => {
+          providerCalls.push({ url, options })
+          return new Response(JSON.stringify({ choices: [{ message: { content: 'connected' } }] }), { status: 200 })
+        }
+        const connectionResponse = await localHttpRequest(`${origin}/api/test-connection`, {
+          method: 'POST',
+          body: {
+            apiKey: mixedConfig.apiKey,
+            model: mixedConfig.model,
+            baseUrl: mixedConfig.baseUrl,
+          },
+        })
+        assert.equal(connectionResponse.status, 200)
+        assert.equal(connectionResponse.json.message, 'connected')
+        assert.equal(providerCalls.length, 1)
+        assert.equal(providerCalls[0].options.headers.Authorization, 'Bearer openai-env-secret')
+      } finally {
+        globalThis.fetch = originalFetch
+      }
+
+      // Oversized small JSON endpoints report the correct HTTP status without
+      // destroying the server connection.
+      const oversizedResponse = await localHttpRequest(`${origin}/api/config`, {
+        method: 'PUT',
+        rawBody: Buffer.alloc(1024 * 1024 + 1, 0x61),
+      })
+      assert.equal(oversizedResponse.status, 413)
+      assert.match(oversizedResponse.json.error, /Request body too large/)
+
+      const webuiSource = readFileSync(new URL('../src/webui/index-html.js', import.meta.url), 'utf8')
+      assert.ok(webuiSource.includes("removeLocalPreference('vp-keys-by-url')"))
+      assert.ok(!webuiSource.includes("localStorage.setItem('vp-keys-by-url'"))
+    } finally {
+      if (webuiServer) {
+        await new Promise((resolveClose, rejectClose) => {
+          webuiServer.close((error) => error ? rejectClose(error) : resolveClose())
+        })
+      }
+      for (const [name, value] of originalEnv) {
+        if (value === undefined) delete process.env[name]
+        else process.env[name] = value
+      }
+    }
   }
 
   console.log('Unit tests passed.')
