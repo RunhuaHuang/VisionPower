@@ -353,16 +353,37 @@ When no source flag is given, the script reads a **JSON request from stdin** (th
 
 ## 🤖 Supported Models
 
-Any provider that supports OpenAI's `/chat/completions` vision input format works. Switch by changing `VISIONPOWER_MODEL` and `VISIONPOWER_BASE_URL`.
+Any provider that supports OpenAI's `/chat/completions` vision input format works. Switch by changing `VISIONPOWER_MODEL` and `VISIONPOWER_BASE_URL` (most presets in the tables below are also built into the WebUI **CONFIG** tab dropdown).
+
+> Model IDs change as vendors release new versions; the table lists current mainstream ones. If an ID is retired, check the provider's console for the latest name — the base URL is generally stable.
+
+**China endpoints (CN)**
 
 | Provider | `VISIONPOWER_MODEL` | `VISIONPOWER_BASE_URL` | Notes |
 | --- | --- | --- | --- |
 | Alibaba Cloud Model Studio / DashScope | `qwen3-vl-flash` | `https://dashscope.aliyuncs.com/compatible-mode/v1` | **Default.** Fast and cost-effective. |
-| Alibaba Cloud Model Studio / DashScope | `qwen3-vl-plus` | `https://dashscope.aliyuncs.com/compatible-mode/v1` | Higher-quality Qwen-VL, subject to account access. |
-| Alibaba Cloud Model Studio / DashScope | `qwen3.6-flash` | `https://dashscope.aliyuncs.com/compatible-mode/v1` | Use if this multimodal model is available in your account. |
+| Alibaba Cloud Model Studio / DashScope | `qwen3-vl-plus` | same | Higher-quality Qwen-VL, subject to account access. |
+| Alibaba Cloud Model Studio / DashScope | `qwen3.6-flash` | same | Use if this multimodal model is available in your account. |
+| Zhipu BigModel | `glm-4.5v` | `https://open.bigmodel.cn/api/paas/v4` | Zhipu vision flagship; global endpoint `https://api.z.ai/api/paas/v4`. |
+| Volcengine Ark (Doubao) | `doubao-seed-1-8` | `https://ark.cn-beijing.volces.com/api/v3` | Older `doubao-seed-1-6-vision-*` is being retired; prefer 1.8. ¹ |
+| MiniMax (China) | `minimax-m3` | `https://api.minimax.chat/v1` | Note the global endpoint is `api.minimaxi.com` (extra `i`). |
+| Moonshot (Kimi) | `kimi-k2.6` | `https://api.moonshot.cn/v1` | Native multimodal + vision; older K2 series is retired, use K2.6. |
+
+**Global endpoints**
+
+| Provider | `VISIONPOWER_MODEL` | `VISIONPOWER_BASE_URL` | Notes |
+| --- | --- | --- | --- |
+| Google Gemini | `gemini-3.6-flash` | `https://generativelanguage.googleapis.com/v1beta/openai` | Native OpenAI-compatible endpoint; `image_url` supported. |
 | OpenAI | `gpt-4o` | `https://api.openai.com/v1` | Strong general image understanding. |
 | OpenAI | `gpt-4o-mini` | `https://api.openai.com/v1` | Lower-cost OpenAI option. |
+| MiniMax (Global) | `minimax-m3` | `https://api.minimaxi.com/v1` | Note: `minimaxi` (with an extra `i`). |
+| Moonshot (Kimi Global) | `kimi-k2.6` | `https://api.moonshot.ai/v1` | Global endpoint uses the `.ai` domain. |
 | Other OpenAI-compatible | provider model ID | provider `/v1` base URL | Replace both fields with your provider's config. |
+
+> **Footnotes**
+> ¹ **Volcengine Ark / Doubao**: Ark's `model` is actually an "endpoint ID" (shaped like `ep-2024xxxxxx-xxxxx`). The table lists version names; in practice, create an endpoint in the [Ark console](https://www.volcengine.com/product/ark) for the model and set `VISIONPOWER_MODEL` to that `ep-`-prefixed ID.
+> ² **Anthropic Claude**: Claude's native API uses the Anthropic protocol (`/v1/messages`) and is **not directly compatible** with OpenAI's `/chat/completions`, so you cannot point VisionPower straight at `api.anthropic.com`. To use Claude, put an OpenAI↔Anthropic adapter in between (e.g. [LiteLLM](https://github.com/BerriAI/litellm), [OpenRouter](https://openrouter.ai)) and set `VISIONPOWER_BASE_URL` to that adapter.
+> ³ **DeepSeek**: DeepSeek's hosted API currently focuses on text models; its vision models (VL2 / Janus) are mostly open-source self-hosted, so it's not listed above. If you run your own OpenAI-compatible inference, fill it in per the "Other OpenAI-compatible" row.
 
 <details>
 <summary><b>OpenAI example (MCP env)</b></summary>
