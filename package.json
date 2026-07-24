@@ -9,6 +9,7 @@
   "files": [
     "src",
     "VisionPower-Skill",
+    "docs/images",
     "README.md",
     "README.en.md",
     "LICENSE"

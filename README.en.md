@@ -91,9 +91,35 @@ npx -y --package visionpower@latest visionpower --webui
 > 💡 This is **the only command you need to remember**: use it for first-time setup, reopening the WebUI later to change your config, and updating to a new release. The `@latest` tag automatically pulls the newest version from npm.
 
 **② Configure and Test**
-1. Once running, open `http://127.0.0.1:17900` in your browser.
-2. Select your model preset, paste your API Key in the **CONFIG** tab, and click **Commit Config**.
-3. Upload an image in the **PLAYGROUND** tab and test if it works.
+1. Once running, your browser opens `http://127.0.0.1:17900` automatically (the launch command opens it for you; if it doesn't, visit that address manually).
+2. The console has three tabs at the top, covering the full "configure → test → integrate" flow:
+
+> 💡 The console supports **English/Chinese** (toggle top-right) and **dark/light themes**. All screenshots below are the actual UI.
+>
+> ![WebUI CONFIG console](docs/images/webui-config.png)
+>
+> **`CONFIG`** — Pick a model preset (Qwen3-VL / MiniMax-M3 / GPT-4o, or Custom), paste your API Key, and optionally tune advanced params (max image bytes, timeout, cache, debug mode). The status badge in the top-right reads `LIVE` once configured. Click **▸ COMMIT CONFIG** to save (or hit **⚡ TEST CONNECTION** first to verify the key).
+
+3. After saving, switch to **`PLAYGROUND`** to verify the model works right away — no need to wire up Claude/Cursor first:
+
+> ![WebUI PLAYGROUND](docs/images/webui-playground.png)
+>
+> Upload or drop an image (JPG/PNG/WEBP/GIF/BMP/TIFF), type a prompt, click **▸ ANALYZE IMAGE**, and the model's description appears on the right. Above is a real run on a Q3 revenue dashboard.
+
+4. Finally, open **`PATCH BAY`** to generate the MCP config for each host client in one click:
+
+> ![WebUI PATCH BAY](docs/images/webui-patchbay.png)
+>
+> Pick a target host (Claude Desktop / Cursor / Cline), copy the generated JSON snippet, and paste it into that client's config file — **since your API Key already lives in the local config file, the host config is just a single `npx visionpower` line, with no `env` block needed**.
+
+<details>
+<summary>🎨 View the light theme</summary>
+
+The console also ships a light theme (toggle `LIGHT`/`DARK` top-right) for users who prefer a bright interface. All features are identical:
+
+![WebUI light theme](docs/images/webui-light.png)
+
+</details>
 
 **③ Add to your Host Config (Copy the snippet below)**
 Once configured, you only need the **simplest configuration** in your MCP client (such as Claude Desktop or Cursor). There is no need for a complex `env` block. Please copy and paste this block directly:

@@ -91,9 +91,35 @@ npx -y --package visionpower@latest visionpower --webui
 > 💡 这是**唯一需要记住的命令**：首次配置、后续召唤 WebUI 修改配置、以及更新到新版本，都用这一条命令即可。命令中的 `@latest` 会自动从 npm 拉取最新版本。
 
 **② 进行配置与测试**
-1. 终端输出成功后，在浏览器打开 `http://127.0.0.1:17900`。
-2. 在 **CONFIG** 选项卡中选择您的模型预设、粘贴您的 API Key，然后保存（Commit Config）。
-3. 在 **PLAYGROUND** 选项卡中上传一张图片，输入 prompt，测试接口是否连通。
+1. 终端输出成功后，浏览器会自动打开 `http://127.0.0.1:17900`（启动命令默认会唤起浏览器；若未自动打开，手动访问该地址即可）。
+2. 控制台顶部有三个选项卡，分别覆盖「配置 → 试测 → 接入」完整流程：
+
+> 💡 控制台支持**中英双语**（右上角切换）和**暗/亮双主题**，所有截图均为实际界面。
+>
+> ![WebUI 配置控制台](docs/images/webui-config.png)
+>
+> **`CONFIG` 配置** —— 选择模型预设（Qwen3-VL / MiniMax-M3 / GPT-4o 等，或选 Custom 自定义）、粘贴 API Key、按需调整高级参数（单图大小上限、超时、缓存、调试模式等）。右上角状态徽章显示 `运行中` 即代表已配置成功。填好后点 **▸ 保存并应用配置**（或先用 **⚡ 测试连接** 验证 Key 是否有效）。
+
+3. 配置保存后，切到 **`PLAYGROUND` 测试台**，立即验证模型是否连通、效果如何 —— 无需先接入 Claude/Cursor：
+
+> ![WebUI Playground 测试台](docs/images/webui-playground.png)
+>
+> 上传或拖拽一张图片（支持 JPG/PNG/WEBP/GIF/BMP/TIFF），输入提示词，点 **▸ 开始分析图像**，右侧即显示模型返回的描述。上图是用一张 Q3 营收看板实测的结果。
+
+4. 最后切到 **`PATCH BAY` 集成向导**，一键生成各宿主客户端的接入配置：
+
+> ![WebUI Patch Bay 集成向导](docs/images/webui-patchbay.png)
+>
+> 选择目标宿主（Claude Desktop / Cursor / Cline），复制生成好的 JSON 片段，粘贴到对应客户端的配置文件即可 —— **因为 API Key 已经存在本地配置文件里，宿主配置只剩一行 `npx visionpower`，无需再写 env**。
+
+<details>
+<summary>🎨 查看亮色主题</summary>
+
+控制台同时提供亮色主题（右上角 `LIGHT`/`DARK` 切换），偏好浅色界面的用户可随时切换，所有功能完全一致：
+
+![WebUI 亮色主题](docs/images/webui-light.png)
+
+</details>
 
 **③ 写入宿主配置（直接复制下方内容）**
 配置成功后，您的宿主配置文件（如 Claude Desktop 或 Cursor）只需**最简化配置**即可运行，不再需要写繁琐的 `env` 环境变量。请直接复制以下 JSON 配置：
