@@ -143,6 +143,10 @@ setup to configure the API key).
 - `image_url` must be **publicly reachable**; local/private addresses are rejected.
 - Provide exactly **one** source per image: `image_path` OR `image_url` OR `image_base64`.
 - Do not combine top-level image fields with `images[]`.
+- Local/Base64 images are validated and forwarded in their original format without
+  transcoding. If the configured model rejects that format, report the script's
+  suggestion to change vision model or convert the image to PNG/JPEG; do not silently
+  convert or switch models. Multi-page TIFF handling is provider-dependent.
 
 ## Configuration reference
 

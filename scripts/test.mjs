@@ -5,11 +5,22 @@ import { join } from 'node:path'
 import { request as httpRequest } from 'node:http'
 import { buildSkillScript } from './build-skill.mjs'
 import { getConfigFilePath, getSkillStateFilePath, loadVisionConfig, markSkillConfigNeedsSetup, markSkillConfigVerified, normalizeConfigObject, saveVisionConfig } from '../src/config.js'
+import { toolInputSchema } from '../src/schema.js'
 import { describeImage } from '../src/vision-core.js'
 import { startWebuiServer } from '../src/webui/server.js'
 
 const pngBytes = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])
 const gifBytes = Buffer.from('GIF89a', 'ascii')
+const littleEndianTiffBytes = Buffer.from([0x49, 0x49, 0x2a, 0x00, 0x08, 0x00, 0x00, 0x00])
+const bigEndianTiffBytes = Buffer.from([0x4d, 0x4d, 0x00, 0x2a, 0x00, 0x00, 0x00, 0x08])
+const littleEndianBigTiffBytes = Buffer.from([
+  0x49, 0x49, 0x2b, 0x00, 0x08, 0x00, 0x00, 0x00,
+  0x10, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+])
+const malformedBigTiffBytes = Buffer.from([
+  0x49, 0x49, 0x2b, 0x00, 0x04, 0x00, 0x00, 0x00,
+  0x10, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+])
 
 function testConfig(overrides = {}) {
   return {
@@ -114,6 +125,60 @@ const tempDir = mkdtempSync(join(tmpdir(), 'visionpower-test-'))
 try {
   const pngPath = join(tempDir, 'one.png')
   writeFileSync(pngPath, pngBytes)
+  const tiffPath = join(tempDir, 'one.tiff')
+  writeFileSync(tiffPath, littleEndianTiffBytes)
+  const tifPath = join(tempDir, 'two.tif')
+  writeFileSync(tifPath, bigEndianTiffBytes)
+
+  assert.doesNotThrow(() => toolInputSchema.parse({
+    image_base64: littleEndianTiffBytes.toString('base64'),
+    image_mime_type: 'image/tiff',
+  }))
+
+  // TIFF is validated by its signature and forwarded byte-for-byte. VisionPower
+  // does not transcode it or pre-emptively decide whether the configured model
+  // supports the format.
+  await withMockFetch(async (calls) => {
+    const result = await describeImage({
+      images: [
+        { image_path: tiffPath },
+        { image_path: tifPath },
+        { image_base64: littleEndianBigTiffBytes.toString('base64'), image_mime_type: 'image/tiff' },
+      ],
+      prompt: 'Read every image.',
+    }, testConfig())
+
+    assert.equal(result, 'ok')
+    assert.equal(calls.length, 1)
+    const imageParts = calls[0].body.messages[0].content.filter((part) => part.type === 'image_url')
+    assert.equal(imageParts.length, 3)
+    assert.match(imageParts[0].image_url.url, /^data:image\/tiff;base64,/)
+    assert.match(imageParts[1].image_url.url, /^data:image\/tiff;base64,/)
+    assert.match(imageParts[2].image_url.url, /^data:image\/tiff;base64,/)
+    assert.deepEqual(
+      Buffer.from(imageParts[0].image_url.url.split(',')[1], 'base64'),
+      littleEndianTiffBytes,
+    )
+    assert.deepEqual(
+      Buffer.from(imageParts[1].image_url.url.split(',')[1], 'base64'),
+      bigEndianTiffBytes,
+    )
+    assert.deepEqual(
+      Buffer.from(imageParts[2].image_url.url.split(',')[1], 'base64'),
+      littleEndianBigTiffBytes,
+    )
+  })
+
+  const disguisedTiffPath = join(tempDir, 'disguised.png')
+  writeFileSync(disguisedTiffPath, littleEndianTiffBytes)
+  await assertRejectsMessage(
+    () => describeImage({ image_path: disguisedTiffPath }, testConfig()),
+    /extension does not match.*\.png \/ image\/tiff/,
+  )
+  await assertRejectsMessage(
+    () => describeImage({ image_base64: malformedBigTiffBytes.toString('base64') }, testConfig()),
+    /not a supported raster image/,
+  )
 
   await withMockFetch(async (calls) => {
     const result = await describeImage({
@@ -233,6 +298,30 @@ try {
     },
   )
 
+  // Other OpenAI-compatible providers often use a file-type rather than an
+  // image-format error label. These should receive the same actionable advice.
+  await withSequencedFetch(
+    [{ status: 415, body: JSON.stringify({ error: { message: 'unsupported_file_type: image/tiff' } }) }],
+    async () => {
+      await assertRejectsMessage(
+        () => describeImage({ image_path: tiffPath }, testConfig({ model: 'format-test-model' })),
+        /configured vision model "format-test-model" rejected image\/tiff input.*PNG\/JPEG/i,
+      )
+    },
+  )
+
+  // "Invalid image format" can also mean malformed image data. Preserve that
+  // upstream diagnosis rather than incorrectly claiming a model lacks TIFF support.
+  await withSequencedFetch(
+    [{ status: 400, body: JSON.stringify({ error: { message: 'invalid image format: corrupt TIFF payload' } }) }],
+    async () => {
+      await assertRejectsMessage(
+        () => describeImage({ image_path: tiffPath }, testConfig({ model: 'format-test-model' })),
+        /Vision model API request failed \(400\): .*invalid image format/i,
+      )
+    },
+  )
+
   // Retries are exhausted after maxRetries and the last status surfaces.
   await withSequencedFetch(
     [{ status: 503, body: 'still-overloaded' }],
@@ -252,6 +341,32 @@ try {
       await assertRejectsMessage(
         () => describeImage({ image_base64: gifBytes.toString('base64') }, testConfig({ maxRetries: 2 })),
         /failed \(400\)/,
+      )
+      assert.equal(calls.length, 1)
+    },
+  )
+
+  // Providers decide format support. When one explicitly rejects TIFF,
+  // VisionPower explains that it forwarded the original bytes and suggests
+  // changing model or converting externally instead of silently transcoding.
+  await withSequencedFetch(
+    [{
+      status: 400,
+      body: JSON.stringify({
+        type: 'error',
+        error: {
+          type: 'bad_request_error',
+          message: 'invalid param: image format ".tiff" not allowed (2013)',
+        },
+      }),
+    }],
+    async (calls) => {
+      await assertRejectsMessage(
+        () => describeImage(
+          { image_path: tiffPath },
+          testConfig({ model: 'MiniMax-M3', maxRetries: 2 }),
+        ),
+        /configured vision model "MiniMax-M3" rejected image\/tiff input.*forwarded the original image without conversion.*PNG\/JPEG.*image format "\.tiff" not allowed/i,
       )
       assert.equal(calls.length, 1)
     },
@@ -739,6 +854,10 @@ try {
       const webuiSource = readFileSync(new URL('../src/webui/index-html.js', import.meta.url), 'utf8')
       assert.ok(webuiSource.includes("removeLocalPreference('vp-keys-by-url')"))
       assert.ok(!webuiSource.includes("localStorage.setItem('vp-keys-by-url'"))
+      assert.ok(webuiSource.includes('image/tiff,.tif,.tiff'))
+      assert.ok(webuiSource.includes('JPG, PNG, WEBP, GIF, BMP, TIFF'))
+      assert.ok(webuiSource.includes('previewUnavailable'))
+      assert.ok(webuiSource.includes('(!playground.imageBytes && !playground.imageUrl)'))
     } finally {
       if (webuiServer) {
         await new Promise((resolveClose, rejectClose) => {

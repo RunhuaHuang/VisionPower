@@ -347,9 +347,10 @@ code-block{display:block;background:var(--code-bg);color:var(--code-text);font-f
                  @drop.prevent="handleDrop($event)"
                  :style="dragOver ? 'border-color:var(--signal);background:var(--surface-3)' : ''"
                  @click="$refs.fileInput.click()">
-              <input type="file" x-ref="fileInput" style="display:none" accept="image/*" @change="handleFileSelect($event)" />
+              <input type="file" x-ref="fileInput" style="display:none" accept="image/jpeg,image/png,image/webp,image/gif,image/bmp,image/tiff,.tif,.tiff" @change="handleFileSelect($event)" />
               <div class="mono" style="font-size:var(--fs-mono-sm); white-space: pre-wrap;" x-text="imageName || i18n[lang].dropzonePlaceholder"></div>
               <img x-show="imagePreview" :src="imagePreview" class="dropzone-img" />
+              <div x-show="imageName && playground.imageBytes && !imagePreview" class="mono" style="font-size:var(--fs-mono-xs);color:var(--text-muted);margin-top:var(--space-xs)" x-text="i18n[lang].previewUnavailable"></div>
             </div>
           </div>
 
@@ -367,7 +368,7 @@ code-block{display:block;background:var(--code-bg);color:var(--code-text);font-f
             <div style="font-size:var(--fs-mono-xs);color:var(--warn);line-height:1.4" x-text="i18n[lang].notLiveWarning"></div>
           </div>
 
-          <button class="btn" style="width:100%" @click="runTest()" :disabled="testing || (!imagePreview && !playground.imageUrl)">
+          <button class="btn" style="width:100%" @click="runTest()" :disabled="testing || (!playground.imageBytes && !playground.imageUrl)">
             <span x-text="testing ? i18n[lang].analyzingBtn : i18n[lang].analyzeBtn"></span>
           </button>
         </div>
@@ -507,7 +508,8 @@ function consoleApp() {
         // Playground
         playgroundTitle: '信号测试工作台 // SIGNAL PLAYGROUND',
         fileLabel: '图片来源文件',
-        dropzonePlaceholder: '拖拽图片到这里，或点击选择图片\\n(支持 JPG, PNG, WEBP, GIF, BMP)',
+        dropzonePlaceholder: '拖拽图片到这里，或点击选择图片\\n(支持 JPG, PNG, WEBP, GIF, BMP, TIFF)',
+        previewUnavailable: '此格式无法在浏览器中预览，但仍可提交给模型分析。',
         urlLabel: '或输入公开图片 URL',
         urlPlaceholder: 'https://example.com/image.png',
         promptLabel: '提示词 (Prompt)',
@@ -564,7 +566,8 @@ function consoleApp() {
         // Playground
         playgroundTitle: 'SIGNAL PLAYGROUND // TESTING WORKSTATION',
         fileLabel: 'Image Source File',
-        dropzonePlaceholder: 'Drag & Drop Image or Click to Select\\n(JPG, PNG, WEBP, GIF, BMP)',
+        dropzonePlaceholder: 'Drag & Drop Image or Click to Select\\n(JPG, PNG, WEBP, GIF, BMP, TIFF)',
+        previewUnavailable: 'This format cannot be previewed by the browser, but can still be sent to the model.',
         urlLabel: 'Or Public Image URL',
         urlPlaceholder: 'https://example.com/image.png',
         promptLabel: 'Prompt (Query)',
@@ -773,7 +776,12 @@ function consoleApp() {
     },
 
     processImage(file) {
-      if (!file.type.startsWith('image/')) {
+      // Some browsers leave File.type empty for TIFF. Permit a known image
+      // extension in that case; the server still verifies magic bytes before
+      // forwarding any image to a model.
+      const extension = file.name.split('.').pop()?.toLowerCase();
+      const supportedExtension = ['jpg', 'jpeg', 'png', 'webp', 'gif', 'bmp', 'tif', 'tiff'].includes(extension);
+      if (!file.type.startsWith('image/') && !supportedExtension) {
         this.showAlert('File must be an image', 'error');
         return;
       }
@@ -782,10 +790,16 @@ function consoleApp() {
 
       const reader = new FileReader();
       reader.onload = (e) => {
-        this.imagePreview = e.target.result;
+        const dataUrl = e.target.result;
         // strip data uri prefix for API
-        const base64Str = e.target.result.split(',')[1];
+        const base64Str = dataUrl.split(',')[1];
         this.playground.imageBytes = base64Str;
+        // TIFF is forwarded to the model but most browsers cannot render it in
+        // an <img>. Avoid a broken-image icon while keeping the file analyzable.
+        const mimeType = dataUrl.match(/^data:([^;,]+);base64,/i)?.[1]?.toLowerCase();
+        this.imagePreview = ['image/jpeg', 'image/png', 'image/webp', 'image/gif', 'image/bmp'].includes(mimeType)
+          ? dataUrl
+          : '';
       };
       reader.readAsDataURL(file);
     },

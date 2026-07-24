@@ -260,11 +260,13 @@ Both forms share the same core logic (`src/vision-core.js` + `src/config.js`): t
 | `image_path` | string | **Absolute path** to a local image file. |
 | `image_url` | string | **Publicly reachable** `http`/`https` image URL. |
 | `image_base64` | string | Standard base64 **without** a `data:` prefix. |
-| `image_mime_type` | enum | `image/jpeg`, `image/png`, `image/webp`, `image/gif`, `image/bmp`; only with `image_base64`. Auto-detected from bytes if omitted. |
+| `image_mime_type` | enum | `image/jpeg`, `image/png`, `image/webp`, `image/gif`, `image/bmp`, `image/tiff`; only with `image_base64`. Auto-detected from bytes if omitted. |
 | `images` | array | Ordered array of images, each item a combination of the four fields above. **Do not combine with the top-level single-image fields.** |
 | `prompt` | string | A specific question or instruction; leave empty for a full description. |
 
 > Provide exactly one of `image_path` / `image_url` / `image_base64` (one per item for multi-image calls).
+
+> **Image format support is model-dependent**: VisionPower verifies the real format of local/Base64 images and forwards the original bytes **without transcoding**. For example, Qwen3-VL can receive TIFF directly, while a model that rejects TIFF/BMP produces an actionable error suggesting another vision model or an external PNG/JPEG conversion. Multi-page TIFF handling is also provider-dependent; when every page must be analyzed, export the pages as separate images and submit them with `images[]`.
 
 <details open>
 <summary><b>Examples: local / URL / Base64 / multiple</b></summary>

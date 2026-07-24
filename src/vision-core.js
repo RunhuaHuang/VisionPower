@@ -7,7 +7,7 @@ import { extname, isAbsolute, resolve, sep } from 'node:path'
 const VISION_RETRYABLE_STATUS = new Set([429, 500, 502, 503, 504])
 const MAX_PROMPT_CHARS = 20_000
 const SUPPORTED_IMAGE_MIME_TYPES = new Set([
-  'image/jpeg', 'image/png', 'image/webp', 'image/gif', 'image/bmp',
+  'image/jpeg', 'image/png', 'image/webp', 'image/gif', 'image/bmp', 'image/tiff',
 ])
 
 function debugLog(config, message) {
@@ -32,6 +32,37 @@ const MIME_BY_EXT = {
   '.webp': 'image/webp',
   '.gif': 'image/gif',
   '.bmp': 'image/bmp',
+  '.tif': 'image/tiff',
+  '.tiff': 'image/tiff',
+}
+
+function hasTiffSignature(data) {
+  if (data.length < 8) return false
+
+  const littleEndian = data[0] === 0x49 && data[1] === 0x49
+  const bigEndian = data[0] === 0x4d && data[1] === 0x4d
+  const classicTiff = littleEndian
+    ? data[2] === 0x2a && data[3] === 0x00
+    : bigEndian && data[2] === 0x00 && data[3] === 0x2a
+  // BigTIFF has an extended 16-byte header. Its offset width must be 8 and
+  // its following two reserved bytes must be zero; otherwise it is not a
+  // valid BigTIFF header.
+  const bigTiff = data.length >= 16 && (littleEndian
+    ? data[2] === 0x2b
+      && data[3] === 0x00
+      && data[4] === 0x08
+      && data[5] === 0x00
+      && data[6] === 0x00
+      && data[7] === 0x00
+    : bigEndian
+      && data[2] === 0x00
+      && data[3] === 0x2b
+      && data[4] === 0x00
+      && data[5] === 0x08
+      && data[6] === 0x00
+      && data[7] === 0x00)
+
+  return classicTiff || bigTiff
 }
 
 function detectImageMimeType(data) {
@@ -64,7 +95,9 @@ function detectImageMimeType(data) {
                       && data[8] === 0x00
                       && data[9] === 0x00
                         ? 'image/bmp'
-                        : null
+                        : hasTiffSignature(data)
+                          ? 'image/tiff'
+                          : null
 
   return detectedMimeType
 }
@@ -377,6 +410,65 @@ function extractTextContent(data) {
   return text.replace(/<think>[\s\S]*?(?:<\/think>|$)\n?/gi, '')
 }
 
+function extractUpstreamErrorMessage(bodyText) {
+  try {
+    const data = JSON.parse(bodyText)
+    const candidates = [
+      data?.error?.message,
+      data?.message,
+      data?.base_resp?.status_msg,
+      data?.error_msg,
+    ]
+    const message = candidates.find((candidate) => typeof candidate === 'string' && candidate.trim())
+    if (message) return message.trim()
+  } catch {
+    // Some OpenAI-compatible providers return plain-text error bodies.
+  }
+
+  return bodyText.trim()
+}
+
+function isUnsupportedImageFormatError(status, message) {
+  if (![400, 415, 422].includes(status)) return false
+
+  const formatOrType = '(?:image|file)[_\\s-]*(?:format|type)'
+  // Keep this deliberately narrow. "Invalid image format" can mean corrupt
+  // bytes rather than a model capability limitation, so only replace an
+  // upstream error with format-support advice when the provider explicitly
+  // says the format is unsupported or disallowed.
+  const rejection = '(?:not[_\\s-]*(?:allowed|supported)|unsupported)'
+  return /image\s+format[\s\S]{0,160}(?:not\s+(?:allowed|supported)|unsupported)/i.test(message)
+    || new RegExp(`${formatOrType}[\\s\\S]{0,160}${rejection}`, 'i').test(message)
+    || new RegExp(`${rejection}[\\s\\S]{0,160}${formatOrType}`, 'i').test(message)
+    || /unsupported[_\s-]*media[_\s-]*type/i.test(message)
+}
+
+function inferRejectedImageFormat(requestBody, upstreamMessage) {
+  const dataMimeTypes = []
+  for (const part of requestBody.messages?.[0]?.content ?? []) {
+    if (part?.type !== 'image_url') continue
+    const imageUrl = part.image_url?.url ?? ''
+    const mimeType = imageUrl.match(/^data:(image\/[a-z0-9.+-]+);base64,/i)?.[1]?.toLowerCase()
+    if (mimeType && !dataMimeTypes.includes(mimeType)) dataMimeTypes.push(mimeType)
+  }
+  if (dataMimeTypes.length === 1) return dataMimeTypes[0]
+
+  const extension = upstreamMessage.match(/\.(tiff?|bmp|png|jpe?g|gif|webp)\b/i)?.[1]?.toLowerCase()
+  if (!extension) return 'the submitted image format'
+  if (extension === 'tif' || extension === 'tiff') return 'image/tiff'
+  if (extension === 'jpg' || extension === 'jpeg') return 'image/jpeg'
+  return `image/${extension}`
+}
+
+function unsupportedImageFormatMessage(requestBody, config, result) {
+  const upstreamMessage = extractUpstreamErrorMessage(result.bodyText)
+  if (!isUnsupportedImageFormatError(result.status, upstreamMessage)) return null
+
+  const imageFormat = inferRejectedImageFormat(requestBody, upstreamMessage)
+  const conciseUpstreamMessage = upstreamMessage.replace(/\s+/g, ' ').slice(0, 240)
+  return `The configured vision model "${config.model}" rejected ${imageFormat} input. VisionPower forwarded the original image without conversion. Try a vision model that supports this format, or convert the image to PNG/JPEG and retry. Upstream message: ${conciseUpstreamMessage}`
+}
+
 async function fetchVisionCompletion(requestBody, config) {
   const url = `${config.baseUrl}/chat/completions`
 
@@ -423,6 +515,8 @@ async function fetchVisionCompletion(requestBody, config) {
       await delay(wait)
       continue
     }
+    const formatError = unsupportedImageFormatMessage(requestBody, config, result)
+    if (formatError) throw new Error(formatError)
     throw new Error(`Vision model API request failed (${result.status}): ${result.bodyText.slice(0, 500)}`)
   }
 }

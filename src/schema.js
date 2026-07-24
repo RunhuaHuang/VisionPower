@@ -8,7 +8,7 @@ export const imageSourceSchemaShape = {
   image_path: z.string().trim().min(1).optional().describe('Absolute path to a local raster image file. Use this when the image is available on disk.'),
   image_url: z.string().trim().min(1).optional().describe('Public http(s) URL of an image that the configured vision model provider can access.'),
   image_base64: z.string().trim().min(1).optional().describe('Base64-encoded image data without a data: URI prefix.'),
-  image_mime_type: z.enum(['image/jpeg', 'image/png', 'image/webp', 'image/gif', 'image/bmp']).optional().describe('MIME type for image_base64. If omitted, VisionPower detects it from image bytes.'),
+  image_mime_type: z.enum(['image/jpeg', 'image/png', 'image/webp', 'image/gif', 'image/bmp', 'image/tiff']).optional().describe('MIME type for image_base64. If omitted, VisionPower detects it from image bytes.'),
 }
 
 export const imageSourceSchema = z.object(imageSourceSchemaShape).strict()

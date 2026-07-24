@@ -258,11 +258,13 @@ flowchart TB
 | `image_path` | string | 本地图片的**绝对路径**。 |
 | `image_url` | string | **公网可访问**的 `http`/`https` 图片地址。 |
 | `image_base64` | string | 不含 `data:` 前缀的标准 base64。 |
-| `image_mime_type` | enum | `image/jpeg`、`image/png`、`image/webp`、`image/gif`、`image/bmp`，仅配合 `image_base64`；不填则自动从字节探测。 |
+| `image_mime_type` | enum | `image/jpeg`、`image/png`、`image/webp`、`image/gif`、`image/bmp`、`image/tiff`，仅配合 `image_base64`；不填则自动从字节探测。 |
 | `images` | array | 多图有序数组，每项是上面四个字段的组合。**不要与顶层单图字段混用。** |
 | `prompt` | string | 对图片的具体问题或指令；留空则返回详尽的整体描述。 |
 
 > `image_path` / `image_url` / `image_base64` 三选一（多图时数组内每项也是三选一）。
+
+> **图片格式由模型决定**：VisionPower 会验证本地/Base64 图片的真实格式，然后按原始字节透明转发，**不会转码**。例如 Qwen3-VL 可直接接收 TIFF，而不支持 TIFF/BMP 的模型会返回明确错误；VisionPower 会建议更换视觉模型，或由用户先转换为 PNG/JPEG。多页 TIFF 是否读取全部页面同样取决于模型；若必须逐页识别，请先导出为独立图片并通过 `images[]` 提交。
 
 <details open>
 <summary><b>示例：本地图片 / URL / Base64 / 多图</b></summary>
