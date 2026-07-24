@@ -103,7 +103,8 @@ npx -y --package visionpower@latest visionpower --webui
   "mcpServers": {
     "visionpower": {
       "command": "npx",
-      "args": ["-y", "--package", "visionpower@latest", "visionpower"]
+      "args": ["-y", "--package", "visionpower@latest", "visionpower"],
+      "timeoutMs": 120000
     }
   }
 }
@@ -127,6 +128,8 @@ args = ["-y", "--package", "visionpower@latest", "visionpower"]
 | 环境变量 (Env) | （留空） |
 
 > **注意**：宿主配置会在宿主**启动时**读取，配置完毕后请**重启宿主**生效。
+>
+> **关于 `timeoutMs`**：`npx` 首次运行需下载 VisionPower，且视觉模型推理本身比纯文本慢，部分宿主默认超时（如 30–60 秒）容易在首屏或大图识别时超时。建议设为 `120000`（2 分钟）留出宽裕时间；若仍遇超时，可进一步上调。注意 `timeoutMs` 是**宿主层**（MCP client）的等待上限，与服务商侧 `VISIONPOWER_TIMEOUT_MS`（默认 60s）是两回事，两者均按需调整即可。
 
 ---
 

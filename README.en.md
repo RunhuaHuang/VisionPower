@@ -103,7 +103,8 @@ Once configured, you only need the **simplest configuration** in your MCP client
   "mcpServers": {
     "visionpower": {
       "command": "npx",
-      "args": ["-y", "--package", "visionpower@latest", "visionpower"]
+      "args": ["-y", "--package", "visionpower@latest", "visionpower"],
+      "timeoutMs": 120000
     }
   }
 }
@@ -127,6 +128,8 @@ args = ["-y", "--package", "visionpower@latest", "visionpower"]
 | Env | *(leave empty)* |
 
 > **Note**: The host reads config **at startup**, so you must **restart** the host application after configuration changes.
+>
+> **About `timeoutMs`**: The first `npx` run downloads VisionPower, and vision-model inference is inherently slower than plain text, so some hosts' default timeouts (e.g. 30–60s) are easily hit on first launch or with large images. Setting `120000` (2 minutes) leaves comfortable headroom; raise it further if you still see timeouts. Note that `timeoutMs` is a **host-layer** (MCP client) wait limit, distinct from the provider-side `VISIONPOWER_TIMEOUT_MS` (default 60s) — adjust each as needed.
 
 ---
 
