@@ -362,8 +362,8 @@ echo '<JSON 请求>' | node <skill>/describe_image.mjs # 或从 stdin 传入
 | 阿里云百炼 / DashScope | `qwen3-vl-flash` | `https://dashscope.aliyuncs.com/compatible-mode/v1` | **默认**，快速且性价比高。 |
 | 阿里云百炼 / DashScope | `qwen3-vl-plus` | 同上 | 更高质量的 Qwen-VL，取决于账号权限。 |
 | 阿里云百炼 / DashScope | `qwen3.6-flash` | 同上 | 账号可用该多模态模型时可直接替换。 |
-| 智谱 BigModel | `glm-4.5v` | `https://open.bigmodel.cn/api/paas/v4` | 智谱视觉旗舰；海外端点为 `https://api.z.ai/api/paas/v4`。 |
-| 火山方舟（豆包） | `doubao-seed-1-8` | `https://ark.cn-beijing.volces.com/api/v3` | 旧版 `doubao-seed-1-6-vision-*` 即将下线，建议用 1.8。¹ |
+| 智谱 BigModel | `glm-4.6v` | `https://open.bigmodel.cn/api/paas/v4` | 智谱视觉旗舰；海外端点为 `https://api.z.ai/api/paas/v4`。 |
+| 火山方舟（豆包） | `doubao-seed-2-1-turbo-260628` | `https://ark.cn-beijing.volces.com/api/v3` | 豆包最新多模态版本。¹ |
 | MiniMax（国内） | `minimax-m3` | `https://api.minimax.chat/v1` | 注意海外端点是 `api.minimaxi.com`（多一个 `i`）。 |
 | 月之暗面（Kimi） | `kimi-k2.6` | `https://api.moonshot.cn/v1` | 原生多模态+视觉；旧 K2 系列已下线，请用 K2.6。 |
 
@@ -381,7 +381,6 @@ echo '<JSON 请求>' | node <skill>/describe_image.mjs # 或从 stdin 传入
 > **脚注**
 > ¹ **火山方舟/豆包**：方舟的 `model` 实际是「接入点 ID」（形如 `ep-2024xxxxxx-xxxxx`）。上表写的是模型版本名，实际使用时请到[火山方舟控制台](https://www.volcengine.com/product/ark)为对应模型创建接入点，把 `VISIONPOWER_MODEL` 填成那个 `ep-` 开头的 ID。
 > ² **Anthropic Claude**：Claude 原生 API 是 Anthropic 协议（`/v1/messages`），**不直接兼容** OpenAI 的 `/chat/completions`，因此不能把 VisionPower 直接指向 `api.anthropic.com`。若需用 Claude，请在中间架一层 OpenAI↔Anthropic 适配器（如 [LiteLLM](https://github.com/BerriAI/litellm)、[OpenRouter](https://openrouter.ai)），再把 `VISIONPOWER_BASE_URL` 指向该适配器地址。
-> ³ **DeepSeek**：DeepSeek 的官方托管 API 目前以文本模型为主，视觉模型（VL2 / Janus）多为开源自部署，故未列入上表。如有自建推理服务且兼容 OpenAI 协议，按「其他 OpenAI-compatible」一行填入即可。
 
 <details>
 <summary><b>OpenAI 示例（MCP env）</b></summary>

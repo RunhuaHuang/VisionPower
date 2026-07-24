@@ -19,8 +19,8 @@ export const VISION_MODEL_PRESETS = [
   { model: 'qwen3-vl-flash', label: 'Qwen3-VL Flash (阿里云百炼)', baseUrl: DEFAULT_VISION_BASE_URL },
   { model: 'qwen3-vl-plus', label: 'Qwen3-VL Plus (阿里云百炼)', baseUrl: DEFAULT_VISION_BASE_URL },
   { model: 'qwen3.6-flash', label: 'Qwen3.6 Flash (阿里云百炼)', baseUrl: DEFAULT_VISION_BASE_URL },
-  { model: 'glm-4.5v', label: 'GLM-4.5V (智谱 BigModel)', baseUrl: 'https://open.bigmodel.cn/api/paas/v4' },
-  { model: 'doubao-seed-1-8', label: 'Doubao Seed 1.8 Vision (火山方舟)', baseUrl: 'https://ark.cn-beijing.volces.com/api/v3' },
+  { model: 'glm-4.6v', label: 'GLM-4.6V (智谱 BigModel)', baseUrl: 'https://open.bigmodel.cn/api/paas/v4' },
+  { model: 'doubao-seed-2-1-turbo-260628', label: 'Doubao Seed 2.1 Turbo (火山方舟)', baseUrl: 'https://ark.cn-beijing.volces.com/api/v3' },
   { model: 'minimax-m3', label: 'MiniMax-M3 (国内)', baseUrl: 'https://api.minimax.chat/v1' },
   { model: 'kimi-k2.6', label: 'Kimi K2.6 (月之暗面 国内)', baseUrl: 'https://api.moonshot.cn/v1' },
   // —— 国际（International）端点 ——

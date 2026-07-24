@@ -364,8 +364,8 @@ Any provider that supports OpenAI's `/chat/completions` vision input format work
 | Alibaba Cloud Model Studio / DashScope | `qwen3-vl-flash` | `https://dashscope.aliyuncs.com/compatible-mode/v1` | **Default.** Fast and cost-effective. |
 | Alibaba Cloud Model Studio / DashScope | `qwen3-vl-plus` | same | Higher-quality Qwen-VL, subject to account access. |
 | Alibaba Cloud Model Studio / DashScope | `qwen3.6-flash` | same | Use if this multimodal model is available in your account. |
-| Zhipu BigModel | `glm-4.5v` | `https://open.bigmodel.cn/api/paas/v4` | Zhipu vision flagship; global endpoint `https://api.z.ai/api/paas/v4`. |
-| Volcengine Ark (Doubao) | `doubao-seed-1-8` | `https://ark.cn-beijing.volces.com/api/v3` | Older `doubao-seed-1-6-vision-*` is being retired; prefer 1.8. ¹ |
+| Zhipu BigModel | `glm-4.6v` | `https://open.bigmodel.cn/api/paas/v4` | Zhipu vision flagship; global endpoint `https://api.z.ai/api/paas/v4`. |
+| Volcengine Ark (Doubao) | `doubao-seed-2-1-turbo-260628` | `https://ark.cn-beijing.volces.com/api/v3` | Latest Doubao multimodal version. ¹ |
 | MiniMax (China) | `minimax-m3` | `https://api.minimax.chat/v1` | Note the global endpoint is `api.minimaxi.com` (extra `i`). |
 | Moonshot (Kimi) | `kimi-k2.6` | `https://api.moonshot.cn/v1` | Native multimodal + vision; older K2 series is retired, use K2.6. |
 
@@ -383,7 +383,6 @@ Any provider that supports OpenAI's `/chat/completions` vision input format work
 > **Footnotes**
 > ¹ **Volcengine Ark / Doubao**: Ark's `model` is actually an "endpoint ID" (shaped like `ep-2024xxxxxx-xxxxx`). The table lists version names; in practice, create an endpoint in the [Ark console](https://www.volcengine.com/product/ark) for the model and set `VISIONPOWER_MODEL` to that `ep-`-prefixed ID.
 > ² **Anthropic Claude**: Claude's native API uses the Anthropic protocol (`/v1/messages`) and is **not directly compatible** with OpenAI's `/chat/completions`, so you cannot point VisionPower straight at `api.anthropic.com`. To use Claude, put an OpenAI↔Anthropic adapter in between (e.g. [LiteLLM](https://github.com/BerriAI/litellm), [OpenRouter](https://openrouter.ai)) and set `VISIONPOWER_BASE_URL` to that adapter.
-> ³ **DeepSeek**: DeepSeek's hosted API currently focuses on text models; its vision models (VL2 / Janus) are mostly open-source self-hosted, so it's not listed above. If you run your own OpenAI-compatible inference, fill it in per the "Other OpenAI-compatible" row.
 
 <details>
 <summary><b>OpenAI example (MCP env)</b></summary>
