@@ -364,7 +364,7 @@ echo '<JSON 请求>' | node <skill>/describe_image.mjs # 或从 stdin 传入
 | 阿里云百炼 / DashScope | `qwen3.6-flash` | 同上 | 账号可用该多模态模型时可直接替换。 |
 | 智谱 BigModel | `glm-4.6v` | `https://open.bigmodel.cn/api/paas/v4` | 智谱视觉旗舰；海外端点为 `https://api.z.ai/api/paas/v4`。 |
 | 火山方舟（豆包） | `doubao-seed-2-1-turbo-260628` | `https://ark.cn-beijing.volces.com/api/v3` | 豆包最新多模态版本。¹ |
-| MiniMax（国内） | `minimax-m3` | `https://api.minimax.chat/v1` | 注意海外端点是 `api.minimaxi.com`（多一个 `i`）。 |
+| MiniMax（国内） | `minimax-m3` | `https://api.minimaxi.com/v1` | 海外端点为 `api.minimax.io`，国内/海外账户体系独立、Key 不互通。 |
 | 月之暗面（Kimi） | `kimi-k2.6` | `https://api.moonshot.cn/v1` | 原生多模态+视觉；旧 K2 系列已下线，请用 K2.6。 |
 
 **国际端点（Global）**
@@ -374,7 +374,7 @@ echo '<JSON 请求>' | node <skill>/describe_image.mjs # 或从 stdin 传入
 | Google Gemini | `gemini-3.6-flash` | `https://generativelanguage.googleapis.com/v1beta/openai` | 原生提供 OpenAI 兼容端点，`image_url` 可用。 |
 | OpenAI | `gpt-4o` | `https://api.openai.com/v1` | 通用视觉理解能力强。 |
 | OpenAI | `gpt-4o-mini` | `https://api.openai.com/v1` | 成本更低的 OpenAI 选项。 |
-| MiniMax（海外） | `minimax-m3` | `https://api.minimaxi.com/v1` | 注意是 `minimaxi`（多一个 `i`）。 |
+| MiniMax（海外） | `minimax-m3` | `https://api.minimax.io/v1` | 海外域名是 `.io`（国内是 `minimaxi.com`）。 |
 | 月之暗面（Kimi 海外） | `kimi-k2.6` | `https://api.moonshot.ai/v1` | 海外端点用 `.ai` 域名。 |
 | 其他 OpenAI-compatible | 服务商提供的模型 ID | 服务商提供的 `/v1` 地址 | 把模型名和接口地址替换成你的配置即可。 |
 

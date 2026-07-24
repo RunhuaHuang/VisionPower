@@ -21,13 +21,13 @@ export const VISION_MODEL_PRESETS = [
   { model: 'qwen3.6-flash', label: 'Qwen3.6 Flash (阿里云百炼)', baseUrl: DEFAULT_VISION_BASE_URL },
   { model: 'glm-4.6v', label: 'GLM-4.6V (智谱 BigModel)', baseUrl: 'https://open.bigmodel.cn/api/paas/v4' },
   { model: 'doubao-seed-2-1-turbo-260628', label: 'Doubao Seed 2.1 Turbo (火山方舟)', baseUrl: 'https://ark.cn-beijing.volces.com/api/v3' },
-  { model: 'minimax-m3', label: 'MiniMax-M3 (国内)', baseUrl: 'https://api.minimax.chat/v1' },
+  { model: 'minimax-m3', label: 'MiniMax-M3 (国内)', baseUrl: 'https://api.minimaxi.com/v1' },
   { model: 'kimi-k2.6', label: 'Kimi K2.6 (月之暗面 国内)', baseUrl: 'https://api.moonshot.cn/v1' },
   // —— 国际（International）端点 ——
   { model: 'gemini-3.6-flash', label: 'Gemini 3.6 Flash (Google)', baseUrl: 'https://generativelanguage.googleapis.com/v1beta/openai' },
   { model: 'gpt-4o', label: 'GPT-4o (OpenAI)', baseUrl: 'https://api.openai.com/v1' },
   { model: 'gpt-4o-mini', label: 'GPT-4o mini (OpenAI)', baseUrl: 'https://api.openai.com/v1' },
-  { model: 'minimax-m3', label: 'MiniMax-M3 (海外 minimaxi)', baseUrl: 'https://api.minimaxi.com/v1' },
+  { model: 'minimax-m3', label: 'MiniMax-M3 (海外)', baseUrl: 'https://api.minimax.io/v1' },
   { model: 'kimi-k2.6', label: 'Kimi K2.6 (月之暗面 海外)', baseUrl: 'https://api.moonshot.ai/v1' },
 ]
 

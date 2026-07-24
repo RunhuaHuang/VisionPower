@@ -366,7 +366,7 @@ Any provider that supports OpenAI's `/chat/completions` vision input format work
 | Alibaba Cloud Model Studio / DashScope | `qwen3.6-flash` | same | Use if this multimodal model is available in your account. |
 | Zhipu BigModel | `glm-4.6v` | `https://open.bigmodel.cn/api/paas/v4` | Zhipu vision flagship; global endpoint `https://api.z.ai/api/paas/v4`. |
 | Volcengine Ark (Doubao) | `doubao-seed-2-1-turbo-260628` | `https://ark.cn-beijing.volces.com/api/v3` | Latest Doubao multimodal version. ¹ |
-| MiniMax (China) | `minimax-m3` | `https://api.minimax.chat/v1` | Note the global endpoint is `api.minimaxi.com` (extra `i`). |
+| MiniMax (China) | `minimax-m3` | `https://api.minimaxi.com/v1` | Global endpoint is `api.minimax.io`; CN/global accounts are separate and keys are not interchangeable. |
 | Moonshot (Kimi) | `kimi-k2.6` | `https://api.moonshot.cn/v1` | Native multimodal + vision; older K2 series is retired, use K2.6. |
 
 **Global endpoints**
@@ -376,7 +376,7 @@ Any provider that supports OpenAI's `/chat/completions` vision input format work
 | Google Gemini | `gemini-3.6-flash` | `https://generativelanguage.googleapis.com/v1beta/openai` | Native OpenAI-compatible endpoint; `image_url` supported. |
 | OpenAI | `gpt-4o` | `https://api.openai.com/v1` | Strong general image understanding. |
 | OpenAI | `gpt-4o-mini` | `https://api.openai.com/v1` | Lower-cost OpenAI option. |
-| MiniMax (Global) | `minimax-m3` | `https://api.minimaxi.com/v1` | Note: `minimaxi` (with an extra `i`). |
+| MiniMax (Global) | `minimax-m3` | `https://api.minimax.io/v1` | Global domain is `.io` (China is `minimaxi.com`). |
 | Moonshot (Kimi Global) | `kimi-k2.6` | `https://api.moonshot.ai/v1` | Global endpoint uses the `.ai` domain. |
 | Other OpenAI-compatible | provider model ID | provider `/v1` base URL | Replace both fields with your provider's config. |
 
