@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { request as httpRequest } from 'node:http'
 import { buildSkillScript } from './build-skill.mjs'
-import { getConfigFilePath, getSkillStateFilePath, loadVisionConfig, markSkillConfigNeedsSetup, markSkillConfigVerified, normalizeConfigObject, saveVisionConfig } from '../src/config.js'
+import { DEFAULT_VISION_BASE_URL, getConfigFilePath, getSkillStateFilePath, getDefaultBaseUrlForModel, loadVisionConfig, markSkillConfigNeedsSetup, markSkillConfigVerified, normalizeConfigObject, saveVisionConfig } from '../src/config.js'
 import { toolInputSchema } from '../src/schema.js'
 import { describeImage } from '../src/vision-core.js'
 import { startWebuiServer } from '../src/webui/server.js'
@@ -753,6 +753,19 @@ try {
   assert.equal(normalizeConfigObject({ model: null }).model, undefined)
   // empty apiKey is allowed (user is clearing the key); it trims to ''.
   assert.equal(normalizeConfigObject({ apiKey: '  ' }).apiKey, '')
+
+  // getDefaultBaseUrlForModel must NOT guess for ambiguous models. Models that
+  // have a China + global preset sharing the same model ID (minimax-m3, kimi-k2.6,
+  // glm-4.6v) must fall back to the default, so inferring from model alone never
+  // silently routes a global user to the China endpoint (and vice versa).
+  assert.equal(getDefaultBaseUrlForModel('gpt-4o'), 'https://api.openai.com/v1')
+  assert.equal(getDefaultBaseUrlForModel('gpt-4o-mini'), 'https://api.openai.com/v1')
+  assert.equal(getDefaultBaseUrlForModel('doubao-seed-2-1-turbo-260628'), 'https://ark.cn-beijing.volces.com/api/v3')
+  // Ambiguous models (China + global share the ID) fall back to the default.
+  assert.equal(getDefaultBaseUrlForModel('minimax-m3'), DEFAULT_VISION_BASE_URL)
+  assert.equal(getDefaultBaseUrlForModel('kimi-k2.6'), DEFAULT_VISION_BASE_URL)
+  assert.equal(getDefaultBaseUrlForModel('glm-4.6v'), DEFAULT_VISION_BASE_URL)
+  assert.equal(getDefaultBaseUrlForModel('totally-unknown-model'), DEFAULT_VISION_BASE_URL)
 
   // Full round-trip: a validated object survives save -> load.
   {

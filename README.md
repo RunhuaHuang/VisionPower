@@ -13,7 +13,7 @@
 
 VisionPower 让 Codex、Claude Desktop、Cursor、Cline、Cherry Studio 等 Agent 获得**识别图片内容、读取截图文字（OCR）、解读图表、按顺序分析多张图片**的能力。
 
-它**不绑定任何模型**：默认走阿里云百炼 / DashScope 的 Qwen-VL（OpenAI-compatible 接口），也可通过模型名和 Base URL 配置切换到 GPT-4o 或任何兼容 OpenAI `/chat/completions` 视觉输入的服务。同一套内核提供**两种接入形态**——[MCP](#作为-mcp-使用) 和 [Skill](#作为-skill-使用)，按你的 Agent 能力任选其一或都装。
+它**不绑定任何模型**：默认走阿里云百炼 / DashScope 的 Qwen-VL（OpenAI-compatible 接口），也可通过模型名和 Base URL 配置切换到智谱 GLM、MiniMax、Kimi、火山方舟豆包、Google Gemini、GPT-4o 或任何兼容 OpenAI `/chat/completions` 视觉输入的服务。同一套内核提供**两种接入形态**——[MCP](#作为-mcp-使用) 和 [Skill](#作为-skill-使用)，按你的 Agent 能力任选其一或都装。
 
 ---
 
@@ -21,6 +21,7 @@ VisionPower 让 Codex、Claude Desktop、Cursor、Cline、Cherry Studio 等 Agen
 
 - 🧩 **一个能力，两种形态** —— 同一内核，既可作为 MCP 工具 `describe_image`，也可作为自包含的 Skill（一个零依赖脚本，下载即用）。
 - 🖼️ **四种输入源** —— 本地路径 `image_path`、公网 `image_url`、`image_base64`、以及多图有序数组 `images[]`。
+- 🎨 **六种图片格式** —— JPEG / PNG / WEBP / GIF / BMP / TIFF，按原始字节透明转发；模型不支持时给出可操作的换格式提示，而非晦涩报错。
 - 🔢 **多图有序分析** —— 自动标记 `Image 1 / Image 2 / …` 并要求模型按相同顺序作答。
 - 🔌 **模型无关** —— 任意 OpenAI-compatible 视觉服务，改两个环境变量即可切换。
 - 🔒 **安全优先** —— 路径白名单、文件 magic-byte 校验、私网/SSRF 防护、严格 base64 与输入 schema 校验。详见 [安全设计](#-安全设计)。
@@ -98,7 +99,7 @@ npx -y --package visionpower@latest visionpower --webui
 >
 > ![WebUI 配置控制台](docs/images/webui-config.png)
 >
-> **`CONFIG` 配置** —— 选择模型预设（Qwen3-VL / MiniMax-M3 / GPT-4o 等，或选 Custom 自定义）、粘贴 API Key、按需调整高级参数（单图大小上限、超时、缓存、调试模式等）。右上角状态徽章显示 `运行中` 即代表已配置成功。填好后点 **▸ 保存并应用配置**（或先用 **⚡ 测试连接** 验证 Key 是否有效）。
+> **`CONFIG` 配置** —— 选择模型预设（Qwen3-VL / MiniMax-M3 / GLM-4.6V / Kimi K2.7 Code / Doubao / Gemini / GPT-4o 等 18 个内置预设，覆盖国内与海外端点；或选 Custom 自定义）、粘贴 API Key、按需调整高级参数（单图大小上限、超时、缓存、调试模式等）。选好预设后还能直接改模型名，复用同渠道下的其他模型。右上角状态徽章显示 `运行中` 即代表已配置成功。填好后点 **▸ 保存并应用配置**（或先用 **⚡ 测试连接** 验证 Key 是否有效）。
 
 3. 配置保存后，切到 **`PLAYGROUND` 测试台**，立即验证模型是否连通、效果如何 —— 无需先接入 Claude/Cursor：
 
@@ -270,7 +271,7 @@ flowchart TB
     M -- "describe_image 工具" --> CORE
     S -- "node describe_image.mjs（自带脚本）" --> CORE
     CORE["VisionPower 内核<br/>输入校验 · 安全检查 · 归一化"]
-    CORE --> API["视觉模型<br/>Qwen-VL · GPT-4o · …"]
+    CORE --> API["视觉模型<br/>Qwen-VL · GLM · Kimi · Gemini · GPT-4o · …"]
     API --> CORE
 ```
 
@@ -363,9 +364,12 @@ echo '<JSON 请求>' | node <skill>/describe_image.mjs # 或从 stdin 传入
 | 阿里云百炼 / DashScope | `qwen3-vl-plus` | 同上 | 更高质量的 Qwen-VL，取决于账号权限。 |
 | 阿里云百炼 / DashScope | `qwen3.6-flash` | 同上 | 账号可用该多模态模型时可直接替换。 |
 | 智谱 BigModel | `glm-4.6v` | `https://open.bigmodel.cn/api/paas/v4` | 智谱视觉旗舰；海外端点为 `https://api.z.ai/api/paas/v4`。 |
+| 智谱 BigModel | `glm-5v-turbo` | `https://open.bigmodel.cn/api/paas/v4` | 智谱首个多模态 Coding 基座模型；海外端点为 `https://api.z.ai/api/paas/v4`。 |
 | 火山方舟（豆包） | `doubao-seed-2-1-turbo-260628` | `https://ark.cn-beijing.volces.com/api/v3` | 豆包最新多模态版本。¹ |
+| 火山方舟（豆包） | `doubao-seed-2-0-lite-260428` | `https://ark.cn-beijing.volces.com/api/v3` | 轻量版，性价比高。¹ |
 | MiniMax（国内） | `minimax-m3` | `https://api.minimaxi.com/v1` | 海外端点为 `api.minimax.io`，国内/海外账户体系独立、Key 不互通。 |
 | 月之暗面（Kimi） | `kimi-k2.6` | `https://api.moonshot.cn/v1` | 原生多模态+视觉；旧 K2 系列已下线，请用 K2.6。 |
+| 月之暗面（Kimi） | `kimi-k2.7-code` | `https://api.moonshot.cn/v1` | 面向代码场景的 Agentic Coding 模型，256K 上下文。 |
 
 **国际端点（Global）**
 
@@ -376,10 +380,11 @@ echo '<JSON 请求>' | node <skill>/describe_image.mjs # 或从 stdin 传入
 | OpenAI | `gpt-4o-mini` | `https://api.openai.com/v1` | 成本更低的 OpenAI 选项。 |
 | MiniMax（海外） | `minimax-m3` | `https://api.minimax.io/v1` | 海外域名是 `.io`（国内是 `minimaxi.com`）。 |
 | 月之暗面（Kimi 海外） | `kimi-k2.6` | `https://api.moonshot.ai/v1` | 海外端点用 `.ai` 域名。 |
+| 月之暗面（Kimi 海外） | `kimi-k2.7-code` | `https://api.moonshot.ai/v1` | 同上，Coding 模型海外端点。 |
 | 其他 OpenAI-compatible | 服务商提供的模型 ID | 服务商提供的 `/v1` 地址 | 把模型名和接口地址替换成你的配置即可。 |
 
 > **脚注**
-> ¹ **火山方舟/豆包**：方舟的 `model` 实际是「接入点 ID」（形如 `ep-2024xxxxxx-xxxxx`）。上表写的是模型版本名，实际使用时请到[火山方舟控制台](https://www.volcengine.com/product/ark)为对应模型创建接入点，把 `VISIONPOWER_MODEL` 填成那个 `ep-` 开头的 ID。
+> ¹ **火山方舟/豆包**：方舟支持两种调用方式——直接用上表的 **Model ID**（推荐，`ark-` 开头的 API Key 即可鉴权），或用「接入点 ID」（形如 `ep-2024xxxxxx-xxxxx`，需在[火山方舟控制台](https://www.volcengine.com/product/ark)为模型创建推理接入点后，把 `VISIONPOWER_MODEL` 填成那个 `ep-` 开头的 ID）。实测 Model ID 方式开箱即用，无需创建接入点。
 > ² **Anthropic Claude**：Claude 原生 API 是 Anthropic 协议（`/v1/messages`），**不直接兼容** OpenAI 的 `/chat/completions`，因此不能把 VisionPower 直接指向 `api.anthropic.com`。若需用 Claude，请在中间架一层 OpenAI↔Anthropic 适配器（如 [LiteLLM](https://github.com/BerriAI/litellm)、[OpenRouter](https://openrouter.ai)），再把 `VISIONPOWER_BASE_URL` 指向该适配器地址。
 
 <details>

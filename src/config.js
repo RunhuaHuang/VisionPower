@@ -1,4 +1,4 @@
-import { readFileSync, writeFileSync, mkdirSync, renameSync, unlinkSync } from 'node:fs'
+import { readFileSync, writeFileSync, mkdirSync, renameSync, unlinkSync, readdirSync, statSync } from 'node:fs'
 import { readdir, chmod, mkdir, rename, stat, unlink, writeFile } from 'node:fs/promises'
 import { basename, dirname, join } from 'node:path'
 import { homedir } from 'node:os'
@@ -16,23 +16,38 @@ export const DEFAULT_CACHE_TTL_MS = 30 * 60 * 1000
 
 export const VISION_MODEL_PRESETS = [
   // —— 国内（China）端点 ——
-  { model: 'qwen3-vl-flash', label: 'Qwen3-VL Flash (阿里云百炼)', baseUrl: DEFAULT_VISION_BASE_URL },
-  { model: 'qwen3-vl-plus', label: 'Qwen3-VL Plus (阿里云百炼)', baseUrl: DEFAULT_VISION_BASE_URL },
-  { model: 'qwen3.6-flash', label: 'Qwen3.6 Flash (阿里云百炼)', baseUrl: DEFAULT_VISION_BASE_URL },
-  { model: 'glm-4.6v', label: 'GLM-4.6V (智谱 BigModel)', baseUrl: 'https://open.bigmodel.cn/api/paas/v4' },
-  { model: 'doubao-seed-2-1-turbo-260628', label: 'Doubao Seed 2.1 Turbo (火山方舟)', baseUrl: 'https://ark.cn-beijing.volces.com/api/v3' },
-  { model: 'minimax-m3', label: 'MiniMax-M3 (国内)', baseUrl: 'https://api.minimaxi.com/v1' },
-  { model: 'kimi-k2.6', label: 'Kimi K2.6 (月之暗面 国内)', baseUrl: 'https://api.moonshot.cn/v1' },
+  { model: 'qwen3-vl-flash', label: { zh: 'Qwen3-VL Flash (阿里云百炼)', en: 'Qwen3-VL Flash (Alibaba Cloud)' }, baseUrl: DEFAULT_VISION_BASE_URL },
+  { model: 'qwen3-vl-plus', label: { zh: 'Qwen3-VL Plus (阿里云百炼)', en: 'Qwen3-VL Plus (Alibaba Cloud)' }, baseUrl: DEFAULT_VISION_BASE_URL },
+  { model: 'qwen3.6-flash', label: { zh: 'Qwen3.6 Flash (阿里云百炼)', en: 'Qwen3.6 Flash (Alibaba Cloud)' }, baseUrl: DEFAULT_VISION_BASE_URL },
+  { model: 'minimax-m3', label: { zh: 'MiniMax-M3 (国内)', en: 'MiniMax-M3 (China)' }, baseUrl: 'https://api.minimaxi.com/v1' },
+  { model: 'minimax-m3', label: { zh: 'MiniMax-M3 (海外)', en: 'MiniMax-M3 (Global)' }, baseUrl: 'https://api.minimax.io/v1' },
+  { model: 'glm-4.6v', label: { zh: 'GLM-4.6V (智谱 BigModel 国内)', en: 'GLM-4.6V (Zhipu China)' }, baseUrl: 'https://open.bigmodel.cn/api/paas/v4' },
+  { model: 'glm-4.6v', label: { zh: 'GLM-4.6V (智谱 Z.AI 海外)', en: 'GLM-4.6V (Zhipu Global)' }, baseUrl: 'https://api.z.ai/api/paas/v4' },
+  { model: 'glm-5v-turbo', label: { zh: 'GLM-5V-Turbo (智谱 BigModel 国内)', en: 'GLM-5V-Turbo (Zhipu China)' }, baseUrl: 'https://open.bigmodel.cn/api/paas/v4' },
+  { model: 'glm-5v-turbo', label: { zh: 'GLM-5V-Turbo (智谱 Z.AI 海外)', en: 'GLM-5V-Turbo (Zhipu Global)' }, baseUrl: 'https://api.z.ai/api/paas/v4' },
+  { model: 'doubao-seed-2-1-turbo-260628', label: { zh: 'Doubao Seed 2.1 Turbo (火山方舟)', en: 'Doubao Seed 2.1 Turbo (Volcengine Ark)' }, baseUrl: 'https://ark.cn-beijing.volces.com/api/v3' },
+  { model: 'doubao-seed-2-0-lite-260428', label: { zh: 'Doubao Seed 2.0 Lite (火山方舟)', en: 'Doubao Seed 2.0 Lite (Volcengine Ark)' }, baseUrl: 'https://ark.cn-beijing.volces.com/api/v3' },
+  { model: 'kimi-k2.6', label: { zh: 'Kimi K2.6 (月之暗面 国内)', en: 'Kimi K2.6 (Moonshot China)' }, baseUrl: 'https://api.moonshot.cn/v1' },
+  { model: 'kimi-k2.6', label: { zh: 'Kimi K2.6 (月之暗面 海外)', en: 'Kimi K2.6 (Moonshot Global)' }, baseUrl: 'https://api.moonshot.ai/v1' },
+  { model: 'kimi-k2.7-code', label: { zh: 'Kimi K2.7 Code (月之暗面 国内)', en: 'Kimi K2.7 Code (Moonshot China)' }, baseUrl: 'https://api.moonshot.cn/v1' },
+  { model: 'kimi-k2.7-code', label: { zh: 'Kimi K2.7 Code (月之暗面 海外)', en: 'Kimi K2.7 Code (Moonshot Global)' }, baseUrl: 'https://api.moonshot.ai/v1' },
   // —— 国际（International）端点 ——
-  { model: 'gemini-3.6-flash', label: 'Gemini 3.6 Flash (Google)', baseUrl: 'https://generativelanguage.googleapis.com/v1beta/openai' },
-  { model: 'gpt-4o', label: 'GPT-4o (OpenAI)', baseUrl: 'https://api.openai.com/v1' },
-  { model: 'gpt-4o-mini', label: 'GPT-4o mini (OpenAI)', baseUrl: 'https://api.openai.com/v1' },
-  { model: 'minimax-m3', label: 'MiniMax-M3 (海外)', baseUrl: 'https://api.minimax.io/v1' },
-  { model: 'kimi-k2.6', label: 'Kimi K2.6 (月之暗面 海外)', baseUrl: 'https://api.moonshot.ai/v1' },
+  { model: 'gemini-3.6-flash', label: { zh: 'Gemini 3.6 Flash (Google)', en: 'Gemini 3.6 Flash (Google)' }, baseUrl: 'https://generativelanguage.googleapis.com/v1beta/openai' },
+  { model: 'gpt-4o', label: { zh: 'GPT-4o (OpenAI)', en: 'GPT-4o (OpenAI)' }, baseUrl: 'https://api.openai.com/v1' },
+  { model: 'gpt-4o-mini', label: { zh: 'GPT-4o mini (OpenAI)', en: 'GPT-4o mini (OpenAI)' }, baseUrl: 'https://api.openai.com/v1' },
 ]
 
 export function getDefaultBaseUrlForModel(model) {
-  return VISION_MODEL_PRESETS.find((preset) => preset.model === model)?.baseUrl ?? DEFAULT_VISION_BASE_URL
+  const matches = VISION_MODEL_PRESETS.filter((preset) => preset.model === model)
+  // A few model IDs (e.g. minimax-m3, kimi-k2.6) intentionally appear twice —
+  // once for the China endpoint and once for the global one. When that happens
+  // we cannot infer the correct base URL from the model alone, so fall back to
+  // the default instead of silently picking the first (China) match and routing
+  // a global user's traffic to the wrong region. The WebUI always persists
+  // baseUrl alongside model, so this only affects hand-written configs that
+  // omit baseUrl for an ambiguous model.
+  if (matches.length === 1) return matches[0].baseUrl
+  return DEFAULT_VISION_BASE_URL
 }
 
 function readEnvValue(env, names) {
@@ -134,6 +149,33 @@ async function cleanupStaleStateTempFiles(statePath, maxAgeMs) {
       // A concurrent writer may have renamed/removed it; ignore.
     }
   }))
+}
+
+// Sync twin of cleanupStaleStateTempFiles, used by the sync saveVisionConfig.
+// Same prefix/suffix/mtime rules: only reaps <base>.<pid>.<ts>.tmp orphans
+// older than maxAgeMs, so unrelated user files are never touched.
+function cleanupStaleTempFilesSync(filePath, maxAgeMs) {
+  const dir = dirname(filePath)
+  const prefix = `${basename(filePath)}.`
+  const suffix = '.tmp'
+  const now = Date.now()
+  let entries
+  try {
+    entries = readdirSync(dir)
+  } catch {
+    return
+  }
+  for (const entry of entries) {
+    if (!entry.startsWith(prefix) || !entry.endsWith(suffix)) continue
+    const tempPath = join(dir, entry)
+    try {
+      if (now - statSync(tempPath).mtimeMs > maxAgeMs) {
+        unlinkSync(tempPath)
+      }
+    } catch {
+      // A concurrent writer may have renamed/removed it; ignore.
+    }
+  }
 }
 
 async function writeSkillStateFile(state, env) {
@@ -362,6 +404,9 @@ export function saveVisionConfig(config, env = process.env) {
   try {
     writeFileSync(tmp, JSON.stringify(config, null, 2) + '\n', { encoding: 'utf8', mode: 0o600 })
     renameSync(tmp, configPath)
+    // A fresh successful write is a safe moment to reap leftover temp files
+    // (e.g. from a prior save interrupted mid-write). Mirrors writeSkillStateFile.
+    cleanupStaleTempFilesSync(configPath, 60 * 60 * 1000)
   } catch (error) {
     try { unlinkSync(tmp) } catch { /* best-effort cleanup */ }
     throw error

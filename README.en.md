@@ -13,7 +13,7 @@
 
 VisionPower gives Codex, Claude Desktop, Cursor, Cline, Cherry Studio, and other agents the ability to **understand image content, read screenshot text (OCR), interpret charts, and analyze multiple images in order**.
 
-It is **not tied to any single model**: it defaults to Qwen-VL via Alibaba Cloud Model Studio / DashScope's OpenAI-compatible endpoint, and you can switch to GPT-4o or any provider that supports OpenAI `/chat/completions` vision input by configuring the model name and base URL. The same core ships in **two forms** — [MCP](#use-as-an-mcp-server) and [Skill](#use-as-a-skill) — pick either or install both.
+It is **not tied to any single model**: it defaults to Qwen-VL via Alibaba Cloud Model Studio / DashScope's OpenAI-compatible endpoint, and you can switch to Zhipu GLM, MiniMax, Kimi, Volcengine Doubao, Google Gemini, GPT-4o, or any provider that supports OpenAI `/chat/completions` vision input by configuring the model name and base URL. The same core ships in **two forms** — [MCP](#use-as-an-mcp-server) and [Skill](#use-as-a-skill) — pick either or install both.
 
 ---
 
@@ -21,6 +21,7 @@ It is **not tied to any single model**: it defaults to Qwen-VL via Alibaba Cloud
 
 - 🧩 **One capability, two forms** — the same core works as the MCP tool `describe_image` or as a self-contained Skill (one zero-dependency script, download and run).
 - 🖼️ **Four input sources** — local `image_path`, public `image_url`, `image_base64`, and an ordered `images[]` array.
+- 🎨 **Six image formats** — JPEG / PNG / WEBP / GIF / BMP / TIFF, forwarded as raw bytes; gives an actionable "convert and retry" hint instead of an opaque error when a model rejects a format.
 - 🔢 **Ordered multi-image analysis** — auto-labels images as `Image 1 / Image 2 / …` and asks the model to answer in the same order.
 - 🔌 **Model-agnostic** — any OpenAI-compatible vision provider; switch by changing two env vars.
 - 🔒 **Security first** — path allowlist, file magic-byte verification, private/SSRF guard, strict base64 and input schema validation. See [Security](#-security-by-design).
@@ -98,7 +99,7 @@ npx -y --package visionpower@latest visionpower --webui
 >
 > ![WebUI CONFIG console](docs/images/webui-config.png)
 >
-> **`CONFIG`** — Pick a model preset (Qwen3-VL / MiniMax-M3 / GPT-4o, or Custom), paste your API Key, and optionally tune advanced params (max image bytes, timeout, cache, debug mode). The status badge in the top-right reads `LIVE` once configured. Click **▸ COMMIT CONFIG** to save (or hit **⚡ TEST CONNECTION** first to verify the key).
+> **`CONFIG`** — Pick a model preset (18 built-in presets covering China and global endpoints: Qwen3-VL / MiniMax-M3 / GLM-4.6V / Kimi K2.7 Code / Doubao / Gemini / GPT-4o, or Custom), paste your API Key, and optionally tune advanced params (max image bytes, timeout, cache, debug mode). After picking a preset you can still edit the model name to use another model on the same provider. The status badge in the top-right reads `LIVE` once configured. Click **▸ COMMIT CONFIG** to save (or hit **⚡ TEST CONNECTION** first to verify the key).
 
 3. After saving, switch to **`PLAYGROUND`** to verify the model works right away — no need to wire up Claude/Cursor first:
 
@@ -272,7 +273,7 @@ flowchart TB
     M -- "describe_image tool" --> CORE
     S -- "node describe_image.mjs (bundled script)" --> CORE
     CORE["VisionPower core<br/>validate · safety checks · normalize"]
-    CORE --> API["Vision model<br/>Qwen-VL · GPT-4o · …"]
+    CORE --> API["Vision model<br/>Qwen-VL · GLM · Kimi · Gemini · GPT-4o · …"]
     API --> CORE
 ```
 
@@ -365,9 +366,12 @@ Any provider that supports OpenAI's `/chat/completions` vision input format work
 | Alibaba Cloud Model Studio / DashScope | `qwen3-vl-plus` | same | Higher-quality Qwen-VL, subject to account access. |
 | Alibaba Cloud Model Studio / DashScope | `qwen3.6-flash` | same | Use if this multimodal model is available in your account. |
 | Zhipu BigModel | `glm-4.6v` | `https://open.bigmodel.cn/api/paas/v4` | Zhipu vision flagship; global endpoint `https://api.z.ai/api/paas/v4`. |
+| Zhipu BigModel | `glm-5v-turbo` | `https://open.bigmodel.cn/api/paas/v4` | Zhipu's first multimodal coding model; global endpoint `https://api.z.ai/api/paas/v4`. |
 | Volcengine Ark (Doubao) | `doubao-seed-2-1-turbo-260628` | `https://ark.cn-beijing.volces.com/api/v3` | Latest Doubao multimodal version. ¹ |
+| Volcengine Ark (Doubao) | `doubao-seed-2-0-lite-260428` | `https://ark.cn-beijing.volces.com/api/v3` | Lightweight, cost-effective. ¹ |
 | MiniMax (China) | `minimax-m3` | `https://api.minimaxi.com/v1` | Global endpoint is `api.minimax.io`; CN/global accounts are separate and keys are not interchangeable. |
 | Moonshot (Kimi) | `kimi-k2.6` | `https://api.moonshot.cn/v1` | Native multimodal + vision; older K2 series is retired, use K2.6. |
+| Moonshot (Kimi) | `kimi-k2.7-code` | `https://api.moonshot.cn/v1` | Agentic coding model, 256K context. |
 
 **Global endpoints**
 
@@ -378,10 +382,11 @@ Any provider that supports OpenAI's `/chat/completions` vision input format work
 | OpenAI | `gpt-4o-mini` | `https://api.openai.com/v1` | Lower-cost OpenAI option. |
 | MiniMax (Global) | `minimax-m3` | `https://api.minimax.io/v1` | Global domain is `.io` (China is `minimaxi.com`). |
 | Moonshot (Kimi Global) | `kimi-k2.6` | `https://api.moonshot.ai/v1` | Global endpoint uses the `.ai` domain. |
+| Moonshot (Kimi Global) | `kimi-k2.7-code` | `https://api.moonshot.ai/v1` | Same, coding model global endpoint. |
 | Other OpenAI-compatible | provider model ID | provider `/v1` base URL | Replace both fields with your provider's config. |
 
 > **Footnotes**
-> ¹ **Volcengine Ark / Doubao**: Ark's `model` is actually an "endpoint ID" (shaped like `ep-2024xxxxxx-xxxxx`). The table lists version names; in practice, create an endpoint in the [Ark console](https://www.volcengine.com/product/ark) for the model and set `VISIONPOWER_MODEL` to that `ep-`-prefixed ID.
+> ¹ **Volcengine Ark / Doubao**: Ark supports two calling styles — use the **Model ID** directly from the table above (recommended; an `ark-`-prefixed API Key is all you need), or use an "endpoint ID" (shaped like `ep-2024xxxxxx-xxxxx`) created in the [Ark console](https://www.volcengine.com/product/ark) by setting `VISIONPOWER_MODEL` to that `ep-`-prefixed ID. The Model ID approach works out of the box — no endpoint creation required.
 > ² **Anthropic Claude**: Claude's native API uses the Anthropic protocol (`/v1/messages`) and is **not directly compatible** with OpenAI's `/chat/completions`, so you cannot point VisionPower straight at `api.anthropic.com`. To use Claude, put an OpenAI↔Anthropic adapter in between (e.g. [LiteLLM](https://github.com/BerriAI/litellm), [OpenRouter](https://openrouter.ai)) and set `VISIONPOWER_BASE_URL` to that adapter.
 
 <details>

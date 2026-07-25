@@ -223,16 +223,17 @@ code-block{display:block;background:var(--code-bg);color:var(--code-text);font-f
         <div class="form-group">
           <label class="label" x-text="i18n[lang].presetLabel"></label>
           <select x-model="config.presetId" @change="onPresetChange()">
-            <template x-for="p in presets" :key="p.model">
-              <option :value="p.model" x-text="p.label"></option>
+            <template x-for="p in presets" :key="p.model + '|' + p.baseUrl">
+              <option :value="p.model + '|' + p.baseUrl" x-text="p.label[lang]"></option>
             </template>
             <option value="custom" x-text="i18n[lang].presetCustom"></option>
           </select>
         </div>
 
-        <div class="form-group" x-show="config.presetId === 'custom'">
-          <label class="label" x-text="i18n[lang].customModelLabel"></label>
-          <input type="text" x-model="config.model" placeholder="e.g. gpt-4o" />
+        <div class="form-group">
+          <label class="label" x-text="i18n[lang].modelIdLabel"></label>
+          <input type="text" x-model="config.model" :placeholder="i18n[lang].modelIdPlaceholder" />
+          <div class="mono" style="font-size:var(--fs-mono-xs);color:var(--text-muted);margin-top:var(--space-xs)" x-show="config.presetId !== 'custom'" x-text="i18n[lang].modelIdHint"></div>
         </div>
       </div>
 
@@ -249,7 +250,8 @@ code-block{display:block;background:var(--code-bg);color:var(--code-text);font-f
 
       <div class="form-group">
         <label class="label" x-text="i18n[lang].baseUrlLabel"></label>
-        <input type="text" x-model="config.baseUrl" :readonly="config.presetId !== 'custom'" :style="config.presetId !== 'custom' ? 'opacity:0.6;cursor:not-allowed' : ''" />
+        <input type="text" x-model="config.baseUrl" :readonly="config.presetId !== 'custom'" :placeholder="i18n[lang].baseUrlPlaceholder" :style="config.presetId !== 'custom' ? 'opacity:0.6;cursor:not-allowed' : ''" />
+        <div class="mono" style="font-size:var(--fs-mono-xs);color:var(--text-muted);margin-top:var(--space-xs)" x-show="config.presetId === 'custom'" x-text="i18n[lang].baseUrlHint"></div>
       </div>
 
       <div style="border-top:1px solid var(--line);margin-top:var(--space-lg);padding-top:var(--space-md)">
@@ -259,6 +261,7 @@ code-block{display:block;background:var(--code-bg);color:var(--code-text);font-f
           <div class="form-group">
             <label class="label" x-text="i18n[lang].allowedDirsLabel"></label>
             <input type="text" x-model="config.allowedDirs" :placeholder="i18n[lang].allowedDirsPlaceholder" />
+            <div class="mono" style="font-size:var(--fs-mono-xs);color:var(--text-muted);margin-top:var(--space-xs)" x-text="i18n[lang].allowedDirsHint"></div>
           </div>
           <div class="form-group">
             <label class="label" x-text="i18n[lang].maxImageBytesLabel"></label>
@@ -435,7 +438,7 @@ function consoleApp() {
     testingConnection: false,
     presets: [],
     config: {
-      presetId: 'qwen3-vl-flash',
+      presetId: 'qwen3-vl-flash|https://dashscope.aliyuncs.com/compatible-mode/v1',
       model: 'qwen3-vl-flash',
       baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
       apiKey: '',
@@ -478,14 +481,19 @@ function consoleApp() {
         statusUnconfigured: '待配置',
         presetLabel: '模型预设',
         presetCustom: '自定义模型预设',
-        customModelLabel: '自定义模型 ID',
+        modelIdLabel: '模型 ID',
+        modelIdPlaceholder: '例如 gpt-4o、glm-4.6v-flash',
+        modelIdHint: '可直接改用同一渠道下的其他模型（如更新版本或其他指定模型）。',
         apiKeyLabel: 'API 密钥 (API Key)',
         apiKeyPlaceholder: '已安全保存 · 输入新密钥以覆盖',
         apiKeyEmptyPlaceholder: '在此粘贴您的 API 密钥',
         baseUrlLabel: '请求网址 (Base URL)',
+        baseUrlPlaceholder: 'https://api.example.com/v1',
+        baseUrlHint: '需为 OpenAI 兼容端点（以 /v1 结尾，不含 /chat/completions）。Claude 原生协议不兼容，需经适配器。',
         advancedTitle: '高级配置',
         allowedDirsLabel: '允许访问的本地目录 (以逗号分隔)',
         allowedDirsPlaceholder: '例如: /path/to/project, /another/path',
+        allowedDirsHint: '留空表示不限制，可访问任意本地路径；填写后仅允许访问这些目录下的图片。',
         maxImageBytesLabel: '单张图片大小限制 (Bytes)',
         timeoutLabel: '请求超时时间 (毫秒)',
         maxTokensLabel: '最大输出 Token 数 (Max Tokens)',
@@ -510,6 +518,11 @@ function consoleApp() {
         fileLabel: '图片来源文件',
         dropzonePlaceholder: '拖拽图片到这里，或点击选择图片\\n(支持 JPG, PNG, WEBP, GIF, BMP, TIFF)',
         previewUnavailable: '此格式无法在浏览器中预览，但仍可提交给模型分析。',
+        configSaved: '配置已成功保存！',
+        fileNotImage: '文件必须是图片',
+        analyzingImage: '正在分析图片...',
+        testFailedPrefix: '测试失败：',
+        errorPrefix: '错误：',
         urlLabel: '或输入公开图片 URL',
         urlPlaceholder: 'https://example.com/image.png',
         promptLabel: '提示词 (Prompt)',
@@ -536,14 +549,19 @@ function consoleApp() {
         statusUnconfigured: 'UNCONFIGURED',
         presetLabel: 'Model Preset',
         presetCustom: 'Custom Model Preset',
-        customModelLabel: 'Custom Model ID',
+        modelIdLabel: 'Model ID',
+        modelIdPlaceholder: 'e.g. gpt-4o, glm-4.6v-flash',
+        modelIdHint: 'You can switch to another model on the same provider (e.g. a newer release or another specific model).',
         apiKeyLabel: 'API Key',
         apiKeyPlaceholder: 'stored · retype to overwrite',
         apiKeyEmptyPlaceholder: 'paste api key here',
-        baseUrlLabel: 'Base URL (API Endpoint)',
+        baseUrlLabel: 'Base URL (OpenAI-compatible Endpoint)',
+        baseUrlPlaceholder: 'https://api.example.com/v1',
+        baseUrlHint: 'Must be an OpenAI-compatible endpoint (ending in /v1, without /chat/completions). Claude native protocol is not compatible and needs an adapter.',
         advancedTitle: 'ADVANCED CONFIGURATION',
         allowedDirsLabel: 'Allowed Local Directories (comma-separated)',
         allowedDirsPlaceholder: 'e.g. /path/to/project, /another/path',
+        allowedDirsHint: 'Leave empty for no restriction (any local path is accessible); when set, only images under these directories are allowed.',
         maxImageBytesLabel: 'Max Image Bytes',
         timeoutLabel: 'Request Timeout (ms)',
         maxTokensLabel: 'Max Tokens',
@@ -568,6 +586,11 @@ function consoleApp() {
         fileLabel: 'Image Source File',
         dropzonePlaceholder: 'Drag & Drop Image or Click to Select\\n(JPG, PNG, WEBP, GIF, BMP, TIFF)',
         previewUnavailable: 'This format cannot be previewed by the browser, but can still be sent to the model.',
+        configSaved: 'Configuration committed successfully!',
+        fileNotImage: 'File must be an image',
+        analyzingImage: 'Analyzing image...',
+        testFailedPrefix: 'Testing failed: ',
+        errorPrefix: 'Error: ',
         urlLabel: 'Or Public Image URL',
         urlPlaceholder: 'https://example.com/image.png',
         promptLabel: 'Prompt (Query)',
@@ -629,12 +652,14 @@ function consoleApp() {
           dirsStr = Array.isArray(data.allowedDirs) ? data.allowedDirs.join(', ') : data.allowedDirs;
         }
 
-        // Resolve presetId: if the stored model matches a known preset use that model
-        // as the preset ID, otherwise fall back to 'custom' so the dropdown shows
-        // the custom input field instead of a blank/mismatched option.
+        // Resolve presetId by matching BOTH model and baseUrl against the known
+        // presets. Model alone is not unique (MiniMax/Kimi have China + global
+        // entries with the same model ID), so a composite "model|baseUrl" key is
+        // used. Falls back to 'custom' when the pair isn't a known preset.
         const storedModel = data.model || 'qwen3-vl-flash';
-        const knownModels = this.presets.map(p => p.model);
-        const resolvedPresetId = knownModels.includes(storedModel) ? storedModel : 'custom';
+        const storedBaseUrl = data.baseUrl || '';
+        const matched = this.presets.find(p => p.model === storedModel && p.baseUrl === storedBaseUrl);
+        const resolvedPresetId = matched ? (matched.model + '|' + matched.baseUrl) : 'custom';
 
         this.config = {
           presetId: resolvedPresetId,
@@ -684,7 +709,9 @@ function consoleApp() {
 
     onPresetChange() {
       if (this.config.presetId !== 'custom') {
-        const selected = this.presets.find(p => p.model === this.config.presetId);
+        // presetId is a "model|baseUrl" composite so that presets sharing a
+        // model ID (e.g. MiniMax / Kimi China vs. global) stay distinguishable.
+        const selected = this.presets.find(p => (p.model + '|' + p.baseUrl) === this.config.presetId);
         if (selected) {
           const providerChanged = this.config.baseUrl !== selected.baseUrl;
           this.config.model = selected.model;
@@ -729,7 +756,7 @@ function consoleApp() {
         
         await this.loadConfig();
         await this.loadStatus();
-        this.showAlert('Configuration committed successfully!', 'success');
+        this.showAlert(this.i18n[this.lang].configSaved, 'success');
       } catch (err) {
         this.showAlert(err.message, 'error');
       } finally {
@@ -782,7 +809,7 @@ function consoleApp() {
       const extension = file.name.split('.').pop()?.toLowerCase();
       const supportedExtension = ['jpg', 'jpeg', 'png', 'webp', 'gif', 'bmp', 'tif', 'tiff'].includes(extension);
       if (!file.type.startsWith('image/') && !supportedExtension) {
-        this.showAlert('File must be an image', 'error');
+        this.showAlert(this.i18n[this.lang].fileNotImage, 'error');
         return;
       }
       this.imageName = file.name;
@@ -817,7 +844,7 @@ function consoleApp() {
 
     async runTest() {
       this.testing = true;
-      this.testResult = 'Analyzing image...';
+      this.testResult = this.i18n[this.lang].analyzingImage;
       try {
         const body = {
           prompt: this.playground.prompt,
@@ -841,8 +868,8 @@ function consoleApp() {
         
         this.testResult = data.result;
       } catch (err) {
-        this.testResult = 'Error: ' + err.message;
-        this.showAlert('Testing failed: ' + err.message, 'error');
+        this.testResult = this.i18n[this.lang].errorPrefix + err.message;
+        this.showAlert(this.i18n[this.lang].testFailedPrefix + err.message, 'error');
       } finally {
         this.testing = false;
       }
@@ -865,26 +892,25 @@ function consoleApp() {
 
     get apiKeyLink() {
       const model = this.config.model || '';
-      if (model.startsWith('gpt-')) {
-        return 'https://platform.openai.com/api-keys';
-      }
-      if (model.startsWith('minimax-')) {
-        return 'https://platform.minimaxi.com/user-center/basic-information/interface-key';
-      }
+      if (model.startsWith('gpt-')) return 'https://platform.openai.com/api-keys';
+      if (model.startsWith('minimax-')) return 'https://platform.minimaxi.com/user-center/basic-information/interface-key';
+      if (model.startsWith('glm-')) return 'https://open.bigmodel.cn/usercenter/apikeys';
+      if (model.startsWith('doubao-')) return 'https://console.volcengine.com/ark/region:ark+cn-beijing/apiKey';
+      if (model.startsWith('gemini-')) return 'https://aistudio.google.com/app/apikey';
+      if (model.startsWith('kimi-')) return 'https://platform.moonshot.cn/console/api-keys';
       return 'https://bailian.console.aliyun.com/cn-beijing';
     },
 
     get apiKeyLinkText() {
       const model = this.config.model || '';
-      if (this.lang === 'zh') {
-        if (model.startsWith('gpt-')) return '获取 OpenAI API Key ↗';
-        if (model.startsWith('minimax-')) return '获取 MiniMax API Key ↗';
-        return '获取阿里云百炼 API Key ↗';
-      } else {
-        if (model.startsWith('gpt-')) return 'Get OpenAI API Key ↗';
-        if (model.startsWith('minimax-')) return 'Get MiniMax API Key ↗';
-        return 'Get Aliyun Bailian API Key ↗';
-      }
+      const zh = this.lang === 'zh';
+      if (model.startsWith('gpt-')) return zh ? '获取 OpenAI API Key ↗' : 'Get OpenAI API Key ↗';
+      if (model.startsWith('minimax-')) return zh ? '获取 MiniMax API Key ↗' : 'Get MiniMax API Key ↗';
+      if (model.startsWith('glm-')) return zh ? '获取智谱 API Key ↗' : 'Get Zhipu API Key ↗';
+      if (model.startsWith('doubao-')) return zh ? '获取火山方舟 API Key ↗' : 'Get Volcengine Ark API Key ↗';
+      if (model.startsWith('gemini-')) return zh ? '获取 Google AI API Key ↗' : 'Get Google AI API Key ↗';
+      if (model.startsWith('kimi-')) return zh ? '获取月之暗面 API Key ↗' : 'Get Moonshot API Key ↗';
+      return zh ? '获取阿里云百炼 API Key ↗' : 'Get Aliyun Bailian API Key ↗';
     },
 
     get highlightedExport() {
