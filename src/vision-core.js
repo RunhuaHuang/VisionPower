@@ -872,7 +872,13 @@ export async function testModelConnection(config) {
     messages: [
       { role: 'user', content: 'hi' }
     ],
-    max_tokens: 15
+    // Reasoning models (e.g. MiniMax-M3) spend tokens on a hidden
+    // reasoning_content pass before emitting any visible content. A tiny fixed
+    // budget gets entirely consumed by reasoning, the response is truncated
+    // (finish_reason: "length") with an empty content, and a healthy endpoint
+    // is wrongly reported as "no text content". Reuse the configured maxTokens
+    // (default 2048) so reasoning has room to finish and produce a real reply.
+    max_tokens: config.maxTokens,
   }
   const bodyText = await fetchVisionCompletion(requestBody, config)
   let data
@@ -885,8 +891,20 @@ export async function testModelConnection(config) {
     throw new Error(`API error: ${data.error.message}`)
   }
   const content = extractTextContent(data)
-  if (!content) {
-    throw new Error('Model returned no text content')
+  if (content) return content
+
+  // Fallback: even with a generous budget a reasoning model can still spend it
+  // all thinking and return an empty content. A connection test only needs to
+  // confirm the key/endpoint/model are reachable and the model responded — a
+  // populated reasoning_content proves the model actually processed the prompt,
+  // so treat that as a successful connection rather than a false failure.
+  const message = data?.choices?.[0]?.message
+  const hasReasoning = typeof message?.reasoning_content === 'string'
+    ? message.reasoning_content.trim() !== ''
+    : Array.isArray(message?.reasoning_details)
+      && message.reasoning_details.some((detail) => typeof detail?.text === 'string' && detail.text.trim())
+  if (hasReasoning) {
+    return '(connection ok; reasoning model produced no visible reply within the token budget)'
   }
-  return content
+  throw new Error('Model returned no text content')
 }

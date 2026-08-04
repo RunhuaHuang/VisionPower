@@ -29,6 +29,11 @@ const VISION_MODEL_PRESETS = [
   { model: 'qwen3.6-flash', label: { zh: 'Qwen3.6 Flash (阿里云百炼)', en: 'Qwen3.6 Flash (Alibaba Cloud)' }, baseUrl: DEFAULT_VISION_BASE_URL },
   { model: 'minimax-m3', label: { zh: 'MiniMax-M3 (国内)', en: 'MiniMax-M3 (China)' }, baseUrl: 'https://api.minimaxi.com/v1' },
   { model: 'minimax-m3', label: { zh: 'MiniMax-M3 (海外)', en: 'MiniMax-M3 (Global)' }, baseUrl: 'https://api.minimax.io/v1' },
+  // 福利预设：通过第三方中转站提供，key 留空由作者私下分发（小红书等渠道），
+  // 不对外公布获取入口。welfare:true 让 WebUI 隐藏官方「获取 API Key」链接。
+  // 注意 model 用大写 MiniMax-M3：该中转站的「福利」分组大小写敏感，小写
+  // minimax-m3 会 503「无可用渠道」，只有大写才能命中已接通的渠道。
+  { model: 'MiniMax-M3', label: { zh: 'MiniMax-M3 (福利)', en: 'MiniMax-M3 (Welfare)' }, baseUrl: 'https://api.prismaistudio.xyz:663/v1', welfare: true },
   { model: 'glm-4.6v', label: { zh: 'GLM-4.6V (智谱 BigModel 国内)', en: 'GLM-4.6V (Zhipu China)' }, baseUrl: 'https://open.bigmodel.cn/api/paas/v4' },
   { model: 'glm-4.6v', label: { zh: 'GLM-4.6V (智谱 Z.AI 海外)', en: 'GLM-4.6V (Zhipu Global)' }, baseUrl: 'https://api.z.ai/api/paas/v4' },
   { model: 'glm-5v-turbo', label: { zh: 'GLM-5V-Turbo (智谱 BigModel 国内)', en: 'GLM-5V-Turbo (Zhipu China)' }, baseUrl: 'https://open.bigmodel.cn/api/paas/v4' },
@@ -1413,7 +1418,13 @@ async function testModelConnection(config) {
     messages: [
       { role: 'user', content: 'hi' }
     ],
-    max_tokens: 15
+    // Reasoning models (e.g. MiniMax-M3) spend tokens on a hidden
+    // reasoning_content pass before emitting any visible content. A tiny fixed
+    // budget gets entirely consumed by reasoning, the response is truncated
+    // (finish_reason: "length") with an empty content, and a healthy endpoint
+    // is wrongly reported as "no text content". Reuse the configured maxTokens
+    // (default 2048) so reasoning has room to finish and produce a real reply.
+    max_tokens: config.maxTokens,
   }
   const bodyText = await fetchVisionCompletion(requestBody, config)
   let data
@@ -1426,10 +1437,22 @@ async function testModelConnection(config) {
     throw new Error(`API error: ${data.error.message}`)
   }
   const content = extractTextContent(data)
-  if (!content) {
-    throw new Error('Model returned no text content')
+  if (content) return content
+
+  // Fallback: even with a generous budget a reasoning model can still spend it
+  // all thinking and return an empty content. A connection test only needs to
+  // confirm the key/endpoint/model are reachable and the model responded — a
+  // populated reasoning_content proves the model actually processed the prompt,
+  // so treat that as a successful connection rather than a false failure.
+  const message = data?.choices?.[0]?.message
+  const hasReasoning = typeof message?.reasoning_content === 'string'
+    ? message.reasoning_content.trim() !== ''
+    : Array.isArray(message?.reasoning_details)
+      && message.reasoning_details.some((detail) => typeof detail?.text === 'string' && detail.text.trim())
+  if (hasReasoning) {
+    return '(connection ok; reasoning model produced no visible reply within the token budget)'
   }
-  return content
+  throw new Error('Model returned no text content')
 }
 
 // ---- Skill entry point (self-contained; no install, no extra deps) ----
