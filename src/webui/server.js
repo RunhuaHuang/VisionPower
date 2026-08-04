@@ -278,6 +278,9 @@ async function handleApi(method, url, req, res) {
       const params = {
         prompt: typeof body.prompt === 'string' ? body.prompt : 'Describe this image.',
       }
+      if (body.output_format !== undefined) {
+        params.output_format = body.output_format
+      }
       if (typeof body.image_url === 'string' && body.image_url) {
         params.image_url = body.image_url
       } else if (typeof body.image_base64 === 'string' && body.image_base64) {

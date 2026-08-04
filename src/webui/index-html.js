@@ -367,6 +367,14 @@ code-block{display:block;background:var(--code-bg);color:var(--code-text);font-f
             <textarea x-model="playground.prompt" rows="4" :placeholder="i18n[lang].promptPlaceholder"></textarea>
           </div>
 
+          <div class="form-group">
+            <label class="label" x-text="i18n[lang].outputFormatLabel"></label>
+            <select x-model="playground.outputFormat">
+              <option value="text" x-text="i18n[lang].outputFormatText"></option>
+              <option value="structured" x-text="i18n[lang].outputFormatStructured"></option>
+            </select>
+          </div>
+
           <div class="form-group" x-show="!status.ready" style="padding:var(--space-sm);border:1px solid var(--warn);background:rgba(245,161,66,0.1);border-radius:var(--radius);margin-bottom:var(--space-md)">
             <div style="font-size:var(--fs-mono-xs);color:var(--warn);line-height:1.4" x-text="i18n[lang].notLiveWarning"></div>
           </div>
@@ -461,7 +469,8 @@ function consoleApp() {
     playground: {
       imageBytes: '', // base64
       imageUrl: '',
-      prompt: 'Describe this image in detail.'
+      prompt: 'Describe this image in detail.',
+      outputFormat: 'text'
     },
     testing: false,
     testResult: '',
@@ -527,6 +536,9 @@ function consoleApp() {
         urlPlaceholder: 'https://example.com/image.png',
         promptLabel: '提示词 (Prompt)',
         promptPlaceholder: '详细描述这张图片，或提出具体问题...',
+        outputFormatLabel: '输出格式',
+        outputFormatText: '自由文本（带不可信来源提示）',
+        outputFormatStructured: '结构化 JSON',
         notLiveWarning: '⚠ 通道尚未就绪 — 请先在 CONFIG 选项卡中配置并保存 API 密钥。',
         analyzeBtn: '▸ 开始分析图像',
         analyzingBtn: '正在分析中...',
@@ -595,6 +607,9 @@ function consoleApp() {
         urlPlaceholder: 'https://example.com/image.png',
         promptLabel: 'Prompt (Query)',
         promptPlaceholder: 'Describe this image in detail, or ask a specific question...',
+        outputFormatLabel: 'Output Format',
+        outputFormatText: 'Free-form text (with untrusted-source banner)',
+        outputFormatStructured: 'Structured JSON',
         notLiveWarning: '⚠ CHANNEL NOT LIVE — You must complete and save the config tab before testing. Or paste a temporary key in the config tab first.',
         analyzeBtn: '▸ ANALYZE IMAGE',
         analyzingBtn: 'ANALYZING...',
@@ -848,6 +863,7 @@ function consoleApp() {
       try {
         const body = {
           prompt: this.playground.prompt,
+          output_format: this.playground.outputFormat,
         };
         if (this.playground.imageBytes) {
           body.image_base64 = this.playground.imageBytes;

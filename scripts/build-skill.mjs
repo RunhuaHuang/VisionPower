@@ -70,12 +70,12 @@ const MAIN = `// ---- Skill entry point (self-contained; no install, no extra de
 const HELP = \`VisionPower — understand images with a vision model.
 
 Usage:
-  node describe_image.mjs --image-path <absolute path> [--prompt <text>]
-  node describe_image.mjs --image-url <https url> [--prompt <text>]
+  node describe_image.mjs --image-path <absolute path> [--prompt <text>] [--output-format text|structured]
+  node describe_image.mjs --image-url <https url> [--prompt <text>] [--output-format text|structured]
   node describe_image.mjs request.json
   echo '<json request>' | node describe_image.mjs
 
-The request JSON supports image_path / image_url / image_base64 / images[] / prompt.
+The request JSON supports image_path / image_url / image_base64 / images[] / prompt / output_format.
 Configure the API key in ~/.visionpower/config.json ({"apiKey":"...","model":"..."})
 or via the VISIONPOWER_API_KEY environment variable. See SKILL.md for first-time setup.\`
 
@@ -121,6 +121,7 @@ async function resolveSkillRequest(argv) {
   if (flags['image-base64']) request.image_base64 = flags['image-base64']
   if (flags.mime) request.image_mime_type = flags.mime
   if (flags.prompt) request.prompt = flags.prompt
+  if (flags['output-format']) request.output_format = flags['output-format']
 
   if (request.image_path || request.image_url || request.image_base64) {
     return { request }
@@ -174,7 +175,13 @@ mainSkill()
 export async function buildSkillScript() {
   const config = stripModuleSyntax(await readFile(new URL('src/config.js', ROOT), 'utf8'))
   const core = stripModuleSyntax(await readFile(new URL('src/vision-core.js', ROOT), 'utf8'))
-  const imports = mergeImports([config, core]).join('\n')
+  // The skill entry point (MAIN above) has its own module dependencies that the
+  // core sources are not guaranteed to share — declare them explicitly and merge
+  // them in. Regression: `readFile` used to arrive "for free" via vision-core.js;
+  // when the core dropped that import, the generated bundle lost it too and the
+  // `--input <file>` / positional-JSON CLI path crashed with ReferenceError.
+  const entryImports = stripModuleSyntax("import { readFile } from 'node:fs/promises'\n")
+  const imports = mergeImports([config, core, entryImports]).join('\n')
 
   return `#!/usr/bin/env node
 
