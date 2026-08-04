@@ -240,7 +240,7 @@ code-block{display:block;background:var(--code-bg);color:var(--code-text);font-f
       <div class="form-group">
         <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:var(--space-xs)">
           <label class="label" style="margin-bottom:0" x-text="i18n[lang].apiKeyLabel"></label>
-          <a :href="apiKeyLink" target="_blank" rel="noopener noreferrer" class="mono" style="font-size:var(--fs-mono-xs);color:var(--signal);text-decoration:none;border-bottom:1px dashed var(--signal);cursor:pointer;opacity:0.85;transition:opacity .15s" @mouseenter="$el.style.opacity = '1'" @mouseleave="$el.style.opacity = '0.85'" x-text="apiKeyLinkText"></a>
+          <a x-show="apiKeyLink" :href="apiKeyLink" target="_blank" rel="noopener noreferrer" class="mono" style="font-size:var(--fs-mono-xs);color:var(--signal);text-decoration:none;border-bottom:1px dashed var(--signal);cursor:pointer;opacity:0.85;transition:opacity .15s" @mouseenter="$el.style.opacity = '1'" @mouseleave="$el.style.opacity = '0.85'" x-text="apiKeyLinkText"></a>
         </div>
         <div style="position:relative">
           <input :type="showKey ? 'text' : 'password'" x-model="config.apiKey" :placeholder="(config.apiKey || config.apiKeyConfigured) ? i18n[lang].apiKeyPlaceholder : i18n[lang].apiKeyEmptyPlaceholder" />
@@ -906,7 +906,16 @@ function consoleApp() {
       return this.exportData ? JSON.stringify(this.exportData.config, null, 2) : '';
     },
 
+    // The currently selected preset object, or null for the "custom" option.
+    // Used to drive welfare-preset behavior (e.g. hiding the official API-key
+    // link so users reach out to the author for a key instead).
+    get currentPreset() {
+      if (this.config.presetId === 'custom') return null;
+      return this.presets.find(p => (p.model + '|' + p.baseUrl) === this.config.presetId) || null;
+    },
+
     get apiKeyLink() {
+      if (this.currentPreset?.welfare) return '';
       const model = this.config.model || '';
       if (model.startsWith('gpt-')) return 'https://platform.openai.com/api-keys';
       if (model.startsWith('minimax-')) return 'https://platform.minimaxi.com/user-center/basic-information/interface-key';
@@ -918,6 +927,7 @@ function consoleApp() {
     },
 
     get apiKeyLinkText() {
+      if (this.currentPreset?.welfare) return '';
       const model = this.config.model || '';
       const zh = this.lang === 'zh';
       if (model.startsWith('gpt-')) return zh ? '获取 OpenAI API Key ↗' : 'Get OpenAI API Key ↗';
