@@ -5,7 +5,7 @@ export const WEBUI_HTML = `<!DOCTYPE html>
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
 <title>VisionPower · Image Understanding Console</title>
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='12' fill='%230c0d0a'/%3E%3Cpath d='M13 17h9l10 29 10-29h9L37 54H27z' fill='%23c4f542'/%3E%3C/svg%3E" />
-<script defer src="/assets/alpine.min.js"></script>
+<script defer src="/assets/alpine.min.js?v=__VISIONPOWER_VERSION__"></script>
 <script>
 (function(){
   try {
@@ -192,9 +192,9 @@ code-block{display:block;background:var(--code-bg);color:var(--code-text);font-f
     </div>
     <div class="header-actions">
       <div class="tabs">
-        <button class="tab-btn" :class="activeTab === 'config' && 'active'" @click="activeTab = 'config'" x-text="lang === 'zh' ? '配置 CONFIG' : 'CONFIG'"></button>
-        <button class="tab-btn" :class="activeTab === 'playground' && 'active'" @click="activeTab = 'playground'" x-text="lang === 'zh' ? '测试 PLAYGROUND' : 'PLAYGROUND'"></button>
-        <button class="tab-btn" :class="activeTab === 'guide' && 'active'" @click="activeTab = 'guide'" x-text="lang === 'zh' ? '集成 PATCH BAY' : 'PATCH BAY'"></button>
+        <button class="tab-btn" :class="{ active: activeTab === 'config' }" @click="activeTab = 'config'" x-text="lang === 'zh' ? '配置 CONFIG' : 'CONFIG'"></button>
+        <button class="tab-btn" :class="{ active: activeTab === 'playground' }" @click="activeTab = 'playground'" x-text="lang === 'zh' ? '测试 PLAYGROUND' : 'PLAYGROUND'"></button>
+        <button class="tab-btn" :class="{ active: activeTab === 'guide' }" @click="activeTab = 'guide'" x-text="lang === 'zh' ? '集成 PATCH BAY' : 'PATCH BAY'"></button>
       </div>
       <div class="header-toggles">
         <button class="theme-toggle" @click="toggleLang()" x-text="lang === 'zh' ? 'ENGLISH' : '中文'"></button>
@@ -243,7 +243,7 @@ code-block{display:block;background:var(--code-bg);color:var(--code-text);font-f
           <a x-show="apiKeyLink" :href="apiKeyLink" target="_blank" rel="noopener noreferrer" class="mono" style="font-size:var(--fs-mono-xs);color:var(--signal);text-decoration:none;border-bottom:1px dashed var(--signal);cursor:pointer;opacity:0.85;transition:opacity .15s" @mouseenter="$el.style.opacity = '1'" @mouseleave="$el.style.opacity = '0.85'" x-text="apiKeyLinkText"></a>
         </div>
         <div style="position:relative">
-          <input :type="showKey ? 'text' : 'password'" x-model="config.apiKey" :placeholder="(config.apiKey || config.apiKeyConfigured) ? i18n[lang].apiKeyPlaceholder : i18n[lang].apiKeyEmptyPlaceholder" />
+          <input :type="showKey ? 'text' : 'password'" x-model="config.apiKey" @input="apiKeyDirty = true" :placeholder="(config.apiKey || config.apiKeyConfigured) ? i18n[lang].apiKeyPlaceholder : i18n[lang].apiKeyEmptyPlaceholder" />
           <button type="button" @click="showKey = !showKey" style="position:absolute;right:10px;top:50%;transform:translateY(-50%);background:transparent;border:0;color:var(--text-muted);font-family:var(--font-mono);font-size:var(--fs-mono-xs);cursor:pointer;" x-text="showKey ? 'HIDE' : 'SHOW'"></button>
         </div>
       </div>
@@ -268,6 +268,24 @@ code-block{display:block;background:var(--code-bg);color:var(--code-text);font-f
             <input type="number" min="1" x-model.number="config.maxImageBytes" />
           </div>
         </div>
+
+        <div class="form-group">
+          <label class="label" x-text="i18n[lang].maxTotalImageBytesLabel"></label>
+          <input type="number" min="1" x-model.number="config.maxTotalImageBytes" />
+          <div class="mono" style="font-size:var(--fs-mono-xs);color:var(--text-muted);margin-top:var(--space-xs)" x-text="i18n[lang].maxTotalImageBytesHint"></div>
+        </div>
+
+        <div class="grid-2">
+          <div class="form-group">
+            <label class="label" x-text="i18n[lang].inboxTtlLabel"></label>
+            <input type="number" min="1" x-model.number="config.inboxTtlMs" />
+          </div>
+          <div class="form-group">
+            <label class="label" x-text="i18n[lang].inboxMaxLabel"></label>
+            <input type="number" min="1" x-model.number="config.inboxMaxEntries" />
+          </div>
+        </div>
+        <div class="mono" style="font-size:var(--fs-mono-xs);color:var(--text-muted);margin-top:calc(-1 * var(--space-sm));margin-bottom:var(--space-md)" x-text="i18n[lang].inboxHint"></div>
 
         <div class="grid-2">
           <div class="form-group">
@@ -363,6 +381,25 @@ code-block{display:block;background:var(--code-bg);color:var(--code-text);font-f
           </div>
 
           <div class="form-group">
+            <label class="label" x-text="i18n[lang].inboxRefLabel"></label>
+            <div style="display:flex;gap:var(--space-sm)">
+              <select x-model="playground.imageRef" @change="onRefInput()" style="flex:1">
+                <option value="" x-text="i18n[lang].inboxRefPlaceholder"></option>
+                <template x-for="item in inboxItems" :key="item.id">
+                  <option :value="item.id" x-text="item.id + ' · ' + formatExpiry(item.expiresAt)"></option>
+                </template>
+              </select>
+              <button class="btn" style="white-space:nowrap" @click="stageCurrentImage()" :disabled="staging || !playground.imageBytes" x-text="staging ? i18n[lang].stagingBtn : i18n[lang].stageBtn"></button>
+            </div>
+            <div x-show="playground.imageRef" style="display:flex;gap:var(--space-sm);margin-top:var(--space-sm)">
+              <input type="text" readonly :value="playground.imageRef" style="flex:1" />
+              <button class="btn" style="background:var(--surface-3);color:var(--text-primary);border:1px solid var(--line)" @click="copyImageRef()" x-text="i18n[lang].copyRefBtn"></button>
+              <button class="btn" style="background:var(--surface-3);color:var(--warn);border:1px solid var(--line)" @click="deleteSelectedImageRef()" x-text="i18n[lang].deleteRefBtn"></button>
+            </div>
+            <div class="mono" style="font-size:var(--fs-mono-xs);color:var(--text-muted);margin-top:var(--space-xs)" x-text="i18n[lang].inboxRefHint"></div>
+          </div>
+
+          <div class="form-group">
             <label class="label" x-text="i18n[lang].promptLabel"></label>
             <textarea x-model="playground.prompt" rows="4" :placeholder="i18n[lang].promptPlaceholder"></textarea>
           </div>
@@ -379,7 +416,7 @@ code-block{display:block;background:var(--code-bg);color:var(--code-text);font-f
             <div style="font-size:var(--fs-mono-xs);color:var(--warn);line-height:1.4" x-text="i18n[lang].notLiveWarning"></div>
           </div>
 
-          <button class="btn" style="width:100%" @click="runTest()" :disabled="testing || (!playground.imageBytes && !playground.imageUrl)">
+          <button class="btn" style="width:100%" @click="runTest()" :disabled="testing || (!playground.imageBytes && !playground.imageUrl && !playground.imageRef)">
             <span x-text="testing ? i18n[lang].analyzingBtn : i18n[lang].analyzeBtn"></span>
           </button>
         </div>
@@ -403,9 +440,9 @@ code-block{display:block;background:var(--code-bg);color:var(--code-text);font-f
       <div class="form-group">
         <label class="label" style="display:inline-block;margin-bottom:var(--space-xs)" x-text="i18n[lang].selectTargetLabel"></label>
         <div style="display:flex;gap:var(--space-sm);margin-bottom:var(--space-md)">
-          <button class="tab-btn" :class="exportAgent === 'claude' && 'active'" @click="exportAgent = 'claude'; fetchExport()">Claude Desktop</button>
-          <button class="tab-btn" :class="exportAgent === 'cursor' && 'active'" @click="exportAgent = 'cursor'; fetchExport()">Cursor</button>
-          <button class="tab-btn" :class="exportAgent === 'cline' && 'active'" @click="exportAgent = 'cline'; fetchExport()">Cline</button>
+          <button class="tab-btn" :class="{ active: exportAgent === 'claude' }" @click="exportAgent = 'claude'; fetchExport()">Claude Desktop</button>
+          <button class="tab-btn" :class="{ active: exportAgent === 'cursor' }" @click="exportAgent = 'cursor'; fetchExport()">Cursor</button>
+          <button class="tab-btn" :class="{ active: exportAgent === 'cline' }" @click="exportAgent = 'cline'; fetchExport()">Cline</button>
         </div>
       </div>
 
@@ -442,6 +479,7 @@ function consoleApp() {
     theme: 'dark',
     alert: { msg: '', type: 'success' },
     showKey: false,
+    apiKeyDirty: false,
     saving: false,
     testingConnection: false,
     presets: [],
@@ -451,12 +489,15 @@ function consoleApp() {
       baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
       apiKey: '',
       apiKeyConfigured: false,
-      allowedDirs: '',
-      maxImageBytes: 20971520,
+        allowedDirs: '',
+        maxImageBytes: 20971520,
+        maxTotalImageBytes: 67108864,
       timeoutMs: 60000,
       maxTokens: 2048,
-      maxImages: 8,
-      maxRetries: 2,
+        maxImages: 8,
+        maxRetries: 2,
+        inboxTtlMs: 1800000,
+        inboxMaxEntries: 64,
       debug: false,
       cache: { enabled: true, maxEntries: 32, ttlMs: 1800000 }
     },
@@ -468,11 +509,15 @@ function consoleApp() {
     imagePreview: '',
     playground: {
       imageBytes: '', // base64
+      imageMimeType: '',
       imageUrl: '',
+      imageRef: '',
       prompt: 'Describe this image in detail.',
       outputFormat: 'text'
     },
     testing: false,
+    staging: false,
+    inboxItems: [],
     testResult: '',
 
     // Export guide states
@@ -498,16 +543,21 @@ function consoleApp() {
         apiKeyEmptyPlaceholder: '在此粘贴您的 API 密钥',
         baseUrlLabel: '请求网址 (Base URL)',
         baseUrlPlaceholder: 'https://api.example.com/v1',
-        baseUrlHint: '需为 OpenAI 兼容端点（以 /v1 结尾，不含 /chat/completions）。Claude 原生协议不兼容，需经适配器。',
+        baseUrlHint: '需为 OpenAI 兼容端点（不含 /chat/completions；路径按服务商要求填写，例如 /v1、/api/v3 或 /v4）。Claude 原生协议不兼容，需经适配器。',
         advancedTitle: '高级配置',
         allowedDirsLabel: '允许访问的本地目录 (以逗号分隔)',
         allowedDirsPlaceholder: '例如: /path/to/project, /another/path',
         allowedDirsHint: '留空表示不限制，可访问任意本地路径；填写后仅允许访问这些目录下的图片。',
         maxImageBytesLabel: '单张图片大小限制 (Bytes)',
+        maxTotalImageBytesLabel: '单次本地/Base64 图片总上限 (Bytes)',
+        maxTotalImageBytesHint: '默认 64MB；公网 URL 由模型服务商读取，不计入本地缓冲上限。',
         timeoutLabel: '请求超时时间 (毫秒)',
         maxTokensLabel: '最大输出 Token 数 (Max Tokens)',
         maxImagesLabel: '单次最大分析图片数',
         maxRetriesLabel: '失败自动重试次数',
+        inboxTtlLabel: '图片 Inbox 有效期 TTL (毫秒)',
+        inboxMaxLabel: '图片 Inbox 最大条目数',
+        inboxHint: '用于纯文本宿主的附件桥接；图片仅保存到本机私有目录，到期自动清理。',
         debugTitle: '调试模式 (Debug Mode)',
         debugDesc: '在标准错误输出 (process.stderr) 中打印详细调试日志',
         cacheTitle: '启用缓存 (Cache)',
@@ -517,10 +567,10 @@ function consoleApp() {
         configPathLabel: '配置文件路径: ',
         commitBtn: '▸ 保存并应用配置',
         committingBtn: '正在提交...',
-        testConnBtn: '⚡ 测试连接',
+        testConnBtn: '⚡ 测试视觉连接',
         testingConnBtn: '测试中...',
-        testSuccessMsg: '连接测试成功！模型回复："',
-        testFailMsg: '连接测试失败：',
+        testSuccessMsg: '视觉连接测试成功！模型回复："',
+        testFailMsg: '视觉连接测试失败：',
         
         // Playground
         playgroundTitle: '信号测试工作台 // SIGNAL PLAYGROUND',
@@ -529,11 +579,20 @@ function consoleApp() {
         previewUnavailable: '此格式无法在浏览器中预览，但仍可提交给模型分析。',
         configSaved: '配置已成功保存！',
         fileNotImage: '文件必须是图片',
+        fileTooLarge: '图片超过当前配置的单图大小上限',
+        fileReadFailed: '无法读取所选图片',
         analyzingImage: '正在分析图片...',
         testFailedPrefix: '测试失败：',
         errorPrefix: '错误：',
         urlLabel: '或输入公开图片 URL',
         urlPlaceholder: 'https://example.com/image.png',
+        inboxRefLabel: '图片 Inbox / image_ref',
+        inboxRefPlaceholder: '选择已暂存图片（可选）',
+        inboxRefHint: '点击“暂存到 Inbox”生成可复制的 image_ref，供 MCP 或 Skill 在宿主无法传递附件时使用。',
+        stageBtn: '暂存到 Inbox',
+        stagingBtn: '暂存中...',
+        copyRefBtn: '复制引用',
+        deleteRefBtn: '删除',
         promptLabel: '提示词 (Prompt)',
         promptPlaceholder: '详细描述这张图片，或提出具体问题...',
         outputFormatLabel: '输出格式',
@@ -569,16 +628,21 @@ function consoleApp() {
         apiKeyEmptyPlaceholder: 'paste api key here',
         baseUrlLabel: 'Base URL (OpenAI-compatible Endpoint)',
         baseUrlPlaceholder: 'https://api.example.com/v1',
-        baseUrlHint: 'Must be an OpenAI-compatible endpoint (ending in /v1, without /chat/completions). Claude native protocol is not compatible and needs an adapter.',
+        baseUrlHint: 'Must be an OpenAI-compatible endpoint (without /chat/completions; keep the provider-specific path such as /v1, /api/v3, or /v4). Claude native protocol is not compatible and needs an adapter.',
         advancedTitle: 'ADVANCED CONFIGURATION',
         allowedDirsLabel: 'Allowed Local Directories (comma-separated)',
         allowedDirsPlaceholder: 'e.g. /path/to/project, /another/path',
         allowedDirsHint: 'Leave empty for no restriction (any local path is accessible); when set, only images under these directories are allowed.',
         maxImageBytesLabel: 'Max Image Bytes',
+        maxTotalImageBytesLabel: 'Max Total Local/Base64 Image Bytes',
+        maxTotalImageBytesHint: 'Default 64MB. Public URLs are provider-fetched and do not count toward this local buffer cap.',
         timeoutLabel: 'Request Timeout (ms)',
         maxTokensLabel: 'Max Tokens',
         maxImagesLabel: 'Max Images',
         maxRetriesLabel: 'Max Retries',
+        inboxTtlLabel: 'Image Inbox TTL (ms)',
+        inboxMaxLabel: 'Image Inbox Max Entries',
+        inboxHint: 'Attachment bridge for text-only hosts. Images stay in a private local directory and expire automatically.',
         debugTitle: 'Debug Mode',
         debugDesc: 'Print debug information to process.stderr',
         cacheTitle: 'Cache Enabled',
@@ -588,10 +652,10 @@ function consoleApp() {
         configPathLabel: 'Config path: ',
         commitBtn: '▸ COMMIT CONFIG',
         committingBtn: 'COMMITTING...',
-        testConnBtn: '⚡ TEST CONNECTION',
+        testConnBtn: '⚡ TEST VISION CONNECTION',
         testingConnBtn: 'TESTING...',
-        testSuccessMsg: 'Connection test successful! Model response: "',
-        testFailMsg: 'Connection test failed: ',
+        testSuccessMsg: 'Visual connection verified! Model response: "',
+        testFailMsg: 'Visual connection failed: ',
         
         // Playground
         playgroundTitle: 'SIGNAL PLAYGROUND // TESTING WORKSTATION',
@@ -600,11 +664,20 @@ function consoleApp() {
         previewUnavailable: 'This format cannot be previewed by the browser, but can still be sent to the model.',
         configSaved: 'Configuration committed successfully!',
         fileNotImage: 'File must be an image',
+        fileTooLarge: 'Image exceeds the configured per-image size limit',
+        fileReadFailed: 'Could not read the selected image',
         analyzingImage: 'Analyzing image...',
         testFailedPrefix: 'Testing failed: ',
         errorPrefix: 'Error: ',
         urlLabel: 'Or Public Image URL',
         urlPlaceholder: 'https://example.com/image.png',
+        inboxRefLabel: 'Image Inbox / image_ref',
+        inboxRefPlaceholder: 'Select a staged image (optional)',
+        inboxRefHint: 'Stage the uploaded file to create a copyable image_ref for MCP or Skill calls when a host cannot pass attachments through.',
+        stageBtn: 'STAGE TO INBOX',
+        stagingBtn: 'STAGING...',
+        copyRefBtn: 'COPY REF',
+        deleteRefBtn: 'DELETE',
         promptLabel: 'Prompt (Query)',
         promptPlaceholder: 'Describe this image in detail, or ask a specific question...',
         outputFormatLabel: 'Output Format',
@@ -639,6 +712,7 @@ function consoleApp() {
       await this.loadPresets();
       await this.loadConfig();
       await this.loadStatus();
+      await this.loadInbox();
       await this.fetchExport();
     },
 
@@ -684,10 +758,13 @@ function consoleApp() {
           apiKeyConfigured: !!data.apiKeyConfigured,
           allowedDirs: dirsStr,
           maxImageBytes: data.maxImageBytes !== undefined ? data.maxImageBytes : 20971520,
+          maxTotalImageBytes: data.maxTotalImageBytes !== undefined ? data.maxTotalImageBytes : 67108864,
           timeoutMs: data.timeoutMs !== undefined ? data.timeoutMs : 60000,
           maxTokens: data.maxTokens !== undefined ? data.maxTokens : 2048,
           maxImages: data.maxImages !== undefined ? data.maxImages : 8,
           maxRetries: data.maxRetries !== undefined ? data.maxRetries : 2,
+          inboxTtlMs: data.inboxTtlMs !== undefined ? data.inboxTtlMs : 1800000,
+          inboxMaxEntries: data.inboxMaxEntries !== undefined ? data.inboxMaxEntries : 64,
           debug: !!data.debug,
           cache: {
             enabled: data.cache ? !!data.cache.enabled : true,
@@ -695,6 +772,7 @@ function consoleApp() {
             ttlMs: data.cache?.ttlMs !== undefined ? data.cache.ttlMs : 1800000
           }
         };
+        this.apiKeyDirty = false;
       } catch (err) {
         this.showAlert(err.message, 'error');
       }
@@ -731,9 +809,13 @@ function consoleApp() {
           const providerChanged = this.config.baseUrl !== selected.baseUrl;
           this.config.model = selected.model;
           this.config.baseUrl = selected.baseUrl;
+          if (selected.recommendedMaxTokens && this.config.maxTokens === 2048) {
+            this.config.maxTokens = selected.recommendedMaxTokens;
+          }
           if (providerChanged) {
             this.config.apiKey = '';
             this.config.apiKeyConfigured = false;
+            this.apiKeyDirty = true;
           }
         }
       }
@@ -751,8 +833,14 @@ function consoleApp() {
       try {
         // Exclude the UI-only presetId field — it is not a valid config key
         // and must never be persisted to config.json.
-        const { presetId, apiKeyConfigured, ...configFields } = this.config;
-        const payload = { ...configFields };
+          const { presetId, apiKeyConfigured, ...configFields } = this.config;
+          const payload = {
+            ...configFields,
+            // The mask returned by GET /api/config is display-only. Send an
+            // explicit intent signal so a real key that happens to contain the
+            // same asterisks is never mistaken for an unchanged value.
+            preserveConfiguredKey: apiKeyConfigured && !this.apiKeyDirty,
+          };
         
         // Convert comma separated string to array
         payload.allowedDirs = this.config.allowedDirs
@@ -786,6 +874,12 @@ function consoleApp() {
           apiKey: this.config.apiKey,
           baseUrl: this.config.baseUrl,
           model: this.config.model,
+          testVision: true,
+          // An empty field can mean either "use the key from env/config" or
+          // "the user intentionally cleared it". Carry the UI state so the
+          // server can distinguish those cases without forwarding an old
+          // provider key to a newly selected endpoint.
+            preserveConfiguredKey: this.config.apiKeyConfigured && !this.apiKeyDirty,
         };
         const res = await fetch('/api/test-connection', {
           method: 'POST',
@@ -809,6 +903,7 @@ function consoleApp() {
     handleFileSelect(e) {
       const file = e.target.files[0];
       if (file) this.processImage(file);
+      e.target.value = '';
     },
     
     handleDrop(e) {
@@ -823,25 +918,47 @@ function consoleApp() {
       // forwarding any image to a model.
       const extension = file.name.split('.').pop()?.toLowerCase();
       const supportedExtension = ['jpg', 'jpeg', 'png', 'webp', 'gif', 'bmp', 'tif', 'tiff'].includes(extension);
-      if (!file.type.startsWith('image/') && !supportedExtension) {
+      const supportedMime = ['image/jpeg', 'image/png', 'image/webp', 'image/gif', 'image/bmp', 'image/tiff']
+        .includes((file.type || '').toLowerCase());
+      if (!supportedMime && !supportedExtension) {
         this.showAlert(this.i18n[this.lang].fileNotImage, 'error');
+        return;
+      }
+      if (file.size > this.config.maxImageBytes) {
+        const maxMb = Math.round(this.config.maxImageBytes / 1024 / 1024);
+        this.showAlert(this.i18n[this.lang].fileTooLarge + ' (' + maxMb + 'MB)', 'error');
         return;
       }
       this.imageName = file.name;
       this.playground.imageUrl = ''; // clear url input if file uploaded
+      this.playground.imageRef = '';
+      this.playground.imageBytes = '';
+      this.playground.imageMimeType = '';
+      this.imagePreview = '';
 
       const reader = new FileReader();
       reader.onload = (e) => {
         const dataUrl = e.target.result;
+        if (typeof dataUrl !== 'string' || !dataUrl.includes(',')) {
+          this.showAlert(this.i18n[this.lang].fileReadFailed, 'error');
+          return;
+        }
         // strip data uri prefix for API
         const base64Str = dataUrl.split(',')[1];
         this.playground.imageBytes = base64Str;
         // TIFF is forwarded to the model but most browsers cannot render it in
         // an <img>. Avoid a broken-image icon while keeping the file analyzable.
         const mimeType = dataUrl.match(/^data:([^;,]+);base64,/i)?.[1]?.toLowerCase();
+        this.playground.imageMimeType = mimeType && mimeType.startsWith('image/') ? mimeType : '';
         this.imagePreview = ['image/jpeg', 'image/png', 'image/webp', 'image/gif', 'image/bmp'].includes(mimeType)
           ? dataUrl
           : '';
+      };
+      reader.onerror = () => {
+        this.playground.imageBytes = '';
+        this.playground.imageMimeType = '';
+        this.imagePreview = '';
+        this.showAlert(this.i18n[this.lang].fileReadFailed, 'error');
       };
       reader.readAsDataURL(file);
     },
@@ -851,10 +968,106 @@ function consoleApp() {
         this.imagePreview = this.playground.imageUrl;
         this.imageName = 'Image URL';
         this.playground.imageBytes = '';
+        this.playground.imageMimeType = '';
+        this.playground.imageRef = '';
       } else {
         this.imagePreview = '';
         this.imageName = '';
       }
+    },
+
+    onRefInput() {
+      if (!this.playground.imageRef) {
+        // Clearing the selector must also clear the stale visual label left by
+        // a previously selected/expired Inbox item; otherwise the dropzone
+        // looks populated while the analyze button has no image source.
+        if (!this.playground.imageBytes && !this.playground.imageUrl) {
+          this.imagePreview = '';
+          this.imageName = '';
+        }
+        return;
+      }
+      this.playground.imageUrl = '';
+      this.playground.imageBytes = '';
+      this.playground.imageMimeType = '';
+      this.imagePreview = '';
+      this.imageName = this.playground.imageRef;
+    },
+
+    async loadInbox() {
+      try {
+        const res = await fetch('/api/inbox');
+        if (!res.ok) return;
+        const data = await res.json();
+        this.inboxItems = Array.isArray(data.items) ? data.items : [];
+        if (this.playground.imageRef && !this.inboxItems.some(item => item.id === this.playground.imageRef)) {
+          this.playground.imageRef = '';
+          // The selector can be cleared programmatically when an item expires
+          // or is removed elsewhere. Keep the dropzone in sync with that
+          // state change; otherwise the old ref label/preview remains visible
+          // even though the analyze request no longer has an image source.
+          if (!this.playground.imageBytes && !this.playground.imageUrl) {
+            this.imagePreview = '';
+            this.imageName = '';
+          }
+        }
+      } catch (err) {
+        console.error('Failed to load image Inbox:', err);
+      }
+    },
+
+    async stageCurrentImage() {
+      if (!this.playground.imageBytes) return;
+      this.staging = true;
+      try {
+        const body = { image_base64: this.playground.imageBytes };
+        if (this.playground.imageMimeType) body.image_mime_type = this.playground.imageMimeType;
+        const res = await fetch('/api/inbox', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(body)
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error || 'Failed to stage image');
+        await this.loadInbox();
+        this.playground.imageRef = data.item.id;
+        this.showAlert(data.item.id, 'success');
+      } catch (err) {
+        this.showAlert(this.i18n[this.lang].errorPrefix + err.message, 'error');
+      } finally {
+        this.staging = false;
+      }
+    },
+
+    copyImageRef() {
+      if (!this.playground.imageRef) return;
+      navigator.clipboard.writeText(this.playground.imageRef).catch(() => {});
+    },
+
+    async deleteSelectedImageRef() {
+      if (!this.playground.imageRef) return;
+      const ref = this.playground.imageRef;
+      try {
+        const res = await fetch('/api/inbox/' + encodeURIComponent(ref), {
+          method: 'DELETE',
+          headers: { 'Content-Type': 'application/json' },
+          body: '{}'
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error || 'Failed to delete staged image');
+        this.playground.imageRef = '';
+        if (!this.playground.imageBytes && !this.playground.imageUrl) {
+          this.imagePreview = '';
+          this.imageName = '';
+        }
+        await this.loadInbox();
+      } catch (err) {
+        this.showAlert(this.i18n[this.lang].errorPrefix + err.message, 'error');
+      }
+    },
+
+    formatExpiry(value) {
+      try { return new Date(value).toLocaleTimeString(); } catch { return value; }
     },
 
     async runTest() {
@@ -865,8 +1078,11 @@ function consoleApp() {
           prompt: this.playground.prompt,
           output_format: this.playground.outputFormat,
         };
-        if (this.playground.imageBytes) {
+        if (this.playground.imageRef) {
+          body.image_ref = this.playground.imageRef;
+        } else if (this.playground.imageBytes) {
           body.image_base64 = this.playground.imageBytes;
+          if (this.playground.imageMimeType) body.image_mime_type = this.playground.imageMimeType;
         } else if (this.playground.imageUrl) {
           body.image_url = this.playground.imageUrl;
         }
@@ -916,7 +1132,7 @@ function consoleApp() {
 
     get apiKeyLink() {
       if (this.currentPreset?.welfare) return '';
-      const model = this.config.model || '';
+      const model = (this.config.model || '').toLowerCase();
       if (model.startsWith('gpt-')) return 'https://platform.openai.com/api-keys';
       if (model.startsWith('minimax-')) return 'https://platform.minimaxi.com/user-center/basic-information/interface-key';
       if (model.startsWith('glm-')) return 'https://open.bigmodel.cn/usercenter/apikeys';
@@ -928,7 +1144,7 @@ function consoleApp() {
 
     get apiKeyLinkText() {
       if (this.currentPreset?.welfare) return '';
-      const model = this.config.model || '';
+      const model = (this.config.model || '').toLowerCase();
       const zh = this.lang === 'zh';
       if (model.startsWith('gpt-')) return zh ? '获取 OpenAI API Key ↗' : 'Get OpenAI API Key ↗';
       if (model.startsWith('minimax-')) return zh ? '获取 MiniMax API Key ↗' : 'Get MiniMax API Key ↗';
@@ -959,7 +1175,7 @@ function consoleApp() {
       navigator.clipboard.writeText(this.exportText).then(() => {
         this.copied = true;
         setTimeout(() => this.copied = false, 2000);
-      });
+      }).catch(() => {});
     }
   };
 }

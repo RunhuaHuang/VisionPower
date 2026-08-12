@@ -35,16 +35,19 @@ server.registerTool(
   'describe_image',
   {
     title: 'Describe Image',
-    description: 'See and understand images — screenshots, photos, diagrams, charts. Extract text (OCR), describe scenes, compare images, and answer questions about what is shown. Use whenever an image is provided via image_path, image_url, image_base64, or images[].',
-    inputSchema: toolInputSchemaShape,
+      description: 'See and understand images — screenshots, photos, diagrams, charts. Extract text (OCR), describe scenes, compare images, and answer questions about what is shown. Use whenever an image is provided via image_path, image_url, image_base64, image_ref, or images[].',
+      inputSchema: toolInputSchemaShape,
+      annotations: {
+        openWorldHint: true,
+      },
   },
   async (args) => {
     try {
       const params = args ?? {}
-      if (!params.image_path && !params.image_url && !params.image_base64 && !params.images?.length) {
+      if (!params.image_path && !params.image_url && !params.image_base64 && !params.image_ref && !params.images?.length) {
         const text = params.image_mime_type
           ? 'image_mime_type can only be used with image_base64.'
-          : 'Provide one of image_path, image_url, image_base64, or images[].'
+          : 'Provide one of image_path, image_url, image_base64, image_ref, or images[].'
         return {
           content: [{ type: 'text', text }],
           isError: true,
@@ -53,9 +56,15 @@ server.registerTool(
 
       const config = loadVisionConfig()
       const text = await describeImage(params, config)
-      return {
+      const result = {
         content: [{ type: 'text', text }],
       }
+      // Keep the text payload for backward compatibility while also exposing
+      // native MCP structuredContent to clients that can consume it.
+      if (params.output_format === 'structured') {
+        result.structuredContent = JSON.parse(text)
+      }
+      return result
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error)
       return {
@@ -68,30 +77,53 @@ server.registerTool(
 
 function parseArgs(argv) {
   const parsed = { webui: false, port: 17900, help: false, version: false }
+  const seen = new Set()
+  let portProvided = false
+  const markSeen = (key, display) => {
+    if (seen.has(key)) throw new Error(`Duplicate option: ${display}`)
+    seen.add(key)
+  }
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i]
-    if (arg === '--help' || arg === '-h') parsed.help = true
-    else if (arg === '--version' || arg === '-v') parsed.version = true
-    else if (arg === '--webui' || arg === 'webui') parsed.webui = true
-    else if (arg === '--port') {
-      const next = argv[i + 1]
+    if (arg === '--help' || arg === '-h') {
+      markSeen('help', '--help')
+      parsed.help = true
+    } else if (arg === '--version' || arg === '-v') {
+      markSeen('version', '--version')
+      parsed.version = true
+    } else if (arg === '--webui' || arg === 'webui') {
+      markSeen('webui', '--webui')
+      parsed.webui = true
+    } else if (arg === '--port' || arg.startsWith('--port=')) {
+      markSeen('port', '--port')
+      portProvided = true
+      const inline = arg.startsWith('--port=') ? arg.slice('--port='.length) : null
+      const next = inline ?? argv[i + 1]
+      if (inline === null) i += 1
       const port = Number(next)
-      if (Number.isInteger(port) && port > 0 && port < 65536) {
-        parsed.port = port
-        i++
-      } else {
-        process.stderr.write(
-          `[visionpower] WARNING: Invalid --port value "${next}", using default ${parsed.port}\n`
-        )
-        if (next && !next.startsWith('-')) i++ // consume the bad value to avoid misparse
+      if (!Number.isInteger(port) || port <= 0 || port >= 65536) {
+        throw new Error(`Invalid --port value "${next ?? ''}"; expected an integer from 1 to 65535`)
       }
+      parsed.port = port
+    } else {
+      throw new Error(`Unknown option or command: ${arg}`)
     }
+  }
+  if (portProvided && !parsed.webui && !parsed.help && !parsed.version) {
+    throw new Error('--port can only be used with --webui')
   }
   return parsed
 }
 
 async function main() {
-  const args = parseArgs(process.argv.slice(2))
+  let args
+  try {
+    args = parseArgs(process.argv.slice(2))
+  } catch (error) {
+    process.stderr.write(`[visionpower] ${error.message}\n`)
+    process.exitCode = 1
+    return
+  }
 
   if (args.help) {
     console.log(HELP)

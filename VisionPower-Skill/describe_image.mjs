@@ -1,19 +1,20 @@
 #!/usr/bin/env node
 
 // AUTO-GENERATED — do not edit by hand.
-// Source of truth: src/config.js + src/vision-core.js.
+// Source of truth: src/config.js + src/image-inbox.js + src/vision-core.js.
 // Regenerate with: npm run build:skill
 
-import { readFileSync, writeFileSync, mkdirSync, renameSync, unlinkSync, readdirSync, statSync, realpathSync, constants as fsConstants } from 'node:fs'
-import { readdir, chmod, mkdir, rename, stat, unlink, writeFile, lstat, open, realpath, readFile } from 'node:fs/promises'
-import { basename, dirname, join, extname, isAbsolute, resolve, sep } from 'node:path'
+import { readFileSync, writeFileSync, mkdirSync, renameSync, unlinkSync, readdirSync, lstatSync, statSync, constants as fsConstants, realpathSync } from 'node:fs'
+import { readdir, chmod, lstat, mkdir, rename, unlink, writeFile, open, realpath } from 'node:fs/promises'
+import { basename, dirname, join, resolve, extname, isAbsolute, sep } from 'node:path'
 import { homedir } from 'node:os'
-import { createHash } from 'node:crypto'
-import { isIP } from 'node:net'
+import { createHash, randomBytes } from 'node:crypto'
+import { BlockList, isIP } from 'node:net'
 
 const DEFAULT_VISION_BASE_URL = 'https://dashscope.aliyuncs.com/compatible-mode/v1'
 const DEFAULT_VISION_MODEL = 'qwen3-vl-flash'
 const DEFAULT_MAX_IMAGE_BYTES = 20 * 1024 * 1024
+const DEFAULT_MAX_TOTAL_IMAGE_BYTES = 64 * 1024 * 1024
 const DEFAULT_REQUEST_TIMEOUT_MS = 60_000
 const MAX_REQUEST_TIMEOUT_MS = 2_147_483_647
 const DEFAULT_MAX_TOKENS = 2048
@@ -21,18 +22,154 @@ const DEFAULT_MAX_IMAGES = 8
 const DEFAULT_MAX_RETRIES = 2
 const DEFAULT_CACHE_MAX_ENTRIES = 32
 const DEFAULT_CACHE_TTL_MS = 30 * 60 * 1000
+const DEFAULT_INBOX_TTL_MS = 30 * 60 * 1000
+const DEFAULT_INBOX_MAX_ENTRIES = 64
+// Hard safety ceilings keep a malformed environment/config value from turning
+// the WebUI request limit or image buffers into an effectively unbounded
+// allocation. These are intentionally generous compared with the defaults.
+const MAX_CONFIG_IMAGE_BYTES = 256 * 1024 * 1024
+const MAX_CONFIG_TOTAL_IMAGE_BYTES = 512 * 1024 * 1024
+const MAX_CONFIG_TOKENS = 131_072
+const MAX_CONFIG_IMAGES = 64
+const MAX_CONFIG_RETRIES = 8
+const MAX_CONFIG_CACHE_ENTRIES = 10_000
+const MAX_CONFIG_CACHE_TTL_MS = 30 * 24 * 60 * 60 * 1000
+const MAX_CONFIG_INBOX_TTL_MS = 30 * 24 * 60 * 60 * 1000
+const MAX_CONFIG_INBOX_ENTRIES = 10_000
+const MAX_CONFIG_FILE_BYTES = 1024 * 1024
+const MAX_API_KEY_BYTES = 16 * 1024
+const MAX_MODEL_CHARS = 256
+
+// Provider/model behavior belongs in one registry instead of being inferred by
+// scattered error-string branches. Entries are ordered from most specific to
+// most general. Unknown/custom endpoints intentionally remain `auto`: the
+// request starts with the broadly-compatible OpenAI shape and keeps the narrow
+// runtime fallbacks in vision-core.js as a compatibility safety net.
+const VISION_PROVIDER_CAPABILITIES = [
+  {
+    provider: 'openai', hosts: ['api.openai.com'], modelPattern: '^gpt-5', region: 'global',
+    tokenParameter: 'max_completion_tokens', supportsSystemRole: true,
+    auth: 'bearer', vision: true, supportsPublicImageUrl: true, lastVerified: '2026-08-11',
+  },
+  {
+    provider: 'openai', hosts: ['api.openai.com'], region: 'global',
+    tokenParameter: 'max_tokens', supportsSystemRole: true,
+    auth: 'bearer', vision: true, supportsPublicImageUrl: true, lastVerified: null,
+  },
+  {
+    provider: 'alibaba-cloud', hosts: ['dashscope.aliyuncs.com'], modelPattern: '^qwen3\\.(?:6|7)-', region: 'china',
+    tokenParameter: 'max_completion_tokens', supportsSystemRole: true,
+    auth: 'bearer', vision: true, supportsPublicImageUrl: true, lastVerified: '2026-08-11',
+  },
+  {
+    provider: 'alibaba-cloud', hosts: ['dashscope.aliyuncs.com'], region: 'china',
+    tokenParameter: 'max_tokens', supportsSystemRole: true,
+    auth: 'bearer', vision: true, supportsPublicImageUrl: true, lastVerified: '2026-08-11',
+  },
+  {
+    provider: 'minimax', hosts: ['api.minimaxi.com'], region: 'china',
+    tokenParameter: 'max_completion_tokens', supportsSystemRole: true,
+    auth: 'bearer', vision: true, supportsPublicImageUrl: true, lastVerified: '2026-08-11',
+  },
+  {
+    provider: 'minimax', hosts: ['api.minimax.io'], region: 'global',
+    tokenParameter: 'max_completion_tokens', supportsSystemRole: true,
+    auth: 'bearer', vision: true, supportsPublicImageUrl: true, lastVerified: '2026-08-11',
+  },
+  {
+    provider: 'minimax-gateway', hosts: ['api.prismaistudio.xyz'], region: 'custom',
+    tokenParameter: 'auto', supportsSystemRole: 'auto',
+    auth: 'bearer', vision: true, supportsPublicImageUrl: 'auto', lastVerified: null,
+  },
+  {
+    provider: 'zhipu', hosts: ['open.bigmodel.cn'], region: 'china',
+    tokenParameter: 'max_tokens', supportsSystemRole: true,
+    auth: 'bearer', vision: true, supportsPublicImageUrl: true, lastVerified: null,
+  },
+  {
+    provider: 'zhipu', hosts: ['api.z.ai'], region: 'global',
+    tokenParameter: 'max_tokens', supportsSystemRole: true,
+    auth: 'bearer', vision: true, supportsPublicImageUrl: true, lastVerified: null,
+  },
+  {
+    provider: 'volcengine', hosts: ['ark.cn-beijing.volces.com'], region: 'china',
+    tokenParameter: 'max_tokens', supportsSystemRole: true,
+    auth: 'bearer', vision: true, supportsPublicImageUrl: true, lastVerified: null,
+  },
+  {
+    provider: 'moonshot', hosts: ['api.moonshot.cn'], modelPattern: '^kimi-(?:k2\\.6|k2\\.7-code|k3)$', region: 'china',
+    tokenParameter: 'max_tokens', supportsSystemRole: true,
+    auth: 'bearer', vision: true, supportsPublicImageUrl: false,
+    recommendedMaxTokens: 32_768, lastVerified: '2026-08-11',
+  },
+  {
+    provider: 'moonshot', hosts: ['api.moonshot.ai'], modelPattern: '^kimi-(?:k2\\.6|k2\\.7-code|k3)$', region: 'global',
+    tokenParameter: 'max_tokens', supportsSystemRole: true,
+    auth: 'bearer', vision: true, supportsPublicImageUrl: false,
+    recommendedMaxTokens: 32_768, lastVerified: '2026-08-11',
+  },
+  {
+    provider: 'moonshot', hosts: ['api.moonshot.cn', 'api.moonshot.ai'], region: 'custom',
+    tokenParameter: 'auto', supportsSystemRole: 'auto',
+    auth: 'bearer', vision: 'auto', supportsPublicImageUrl: 'auto', lastVerified: null,
+  },
+  {
+    provider: 'google', hosts: ['generativelanguage.googleapis.com'], region: 'global',
+    tokenParameter: 'max_tokens', supportsSystemRole: true,
+    auth: 'bearer', vision: true, supportsPublicImageUrl: true, lastVerified: null,
+  },
+]
+
+function resolveModelCapabilities(model, baseUrl) {
+  let hostname = ''
+  try {
+    hostname = new URL(baseUrl).hostname.toLowerCase()
+  } catch {
+    // normalizeBaseUrl reports the actionable configuration error elsewhere.
+  }
+  const capability = VISION_PROVIDER_CAPABILITIES.find((entry) => {
+    if (!entry.hosts.includes(hostname)) return false
+    return !entry.modelPattern || new RegExp(entry.modelPattern, 'i').test(model)
+  })
+  if (capability) {
+    return {
+      provider: capability.provider,
+      region: capability.region,
+      tokenParameter: capability.tokenParameter,
+      supportsSystemRole: capability.supportsSystemRole,
+      auth: capability.auth,
+      vision: capability.vision,
+      supportsPublicImageUrl: capability.supportsPublicImageUrl ?? true,
+      recommendedMaxTokens: capability.recommendedMaxTokens ?? null,
+      lastVerified: capability.lastVerified,
+    }
+  }
+  return {
+    provider: 'custom',
+    region: 'custom',
+    tokenParameter: 'auto',
+    supportsSystemRole: 'auto',
+    auth: 'bearer',
+    vision: 'auto',
+    supportsPublicImageUrl: 'auto',
+    recommendedMaxTokens: null,
+    lastVerified: null,
+  }
+}
 
 const VISION_MODEL_PRESETS = [
   // —— 国内（China）端点 ——
   { model: 'qwen3-vl-flash', label: { zh: 'Qwen3-VL Flash (阿里云百炼)', en: 'Qwen3-VL Flash (Alibaba Cloud)' }, baseUrl: DEFAULT_VISION_BASE_URL },
   { model: 'qwen3-vl-plus', label: { zh: 'Qwen3-VL Plus (阿里云百炼)', en: 'Qwen3-VL Plus (Alibaba Cloud)' }, baseUrl: DEFAULT_VISION_BASE_URL },
   { model: 'qwen3.6-flash', label: { zh: 'Qwen3.6 Flash (阿里云百炼)', en: 'Qwen3.6 Flash (Alibaba Cloud)' }, baseUrl: DEFAULT_VISION_BASE_URL },
-  { model: 'minimax-m3', label: { zh: 'MiniMax-M3 (国内)', en: 'MiniMax-M3 (China)' }, baseUrl: 'https://api.minimaxi.com/v1' },
-  { model: 'minimax-m3', label: { zh: 'MiniMax-M3 (海外)', en: 'MiniMax-M3 (Global)' }, baseUrl: 'https://api.minimax.io/v1' },
+  { model: 'qwen3.7-flash', label: { zh: 'Qwen3.7 Flash (阿里云百炼)', en: 'Qwen3.7 Flash (Alibaba Cloud)' }, baseUrl: DEFAULT_VISION_BASE_URL },
+  { model: 'qwen3.7-plus', label: { zh: 'Qwen3.7 Plus (阿里云百炼)', en: 'Qwen3.7 Plus (Alibaba Cloud)' }, baseUrl: DEFAULT_VISION_BASE_URL },
+  { model: 'MiniMax-M3', label: { zh: 'MiniMax-M3 (国内)', en: 'MiniMax-M3 (China)' }, baseUrl: 'https://api.minimaxi.com/v1' },
+  { model: 'MiniMax-M3', label: { zh: 'MiniMax-M3 (海外)', en: 'MiniMax-M3 (Global)' }, baseUrl: 'https://api.minimax.io/v1' },
   // 福利预设：通过第三方中转站提供，key 留空由作者私下分发（小红书等渠道），
   // 不对外公布获取入口。welfare:true 让 WebUI 隐藏官方「获取 API Key」链接。
-  // 注意 model 用大写 MiniMax-M3：该中转站的「福利」分组大小写敏感，小写
-  // minimax-m3 会 503「无可用渠道」，只有大写才能命中已接通的渠道。
+  // 注意保持官方大小写 MiniMax-M3：该中转站的「福利」分组同样大小写敏感，
+  // 写成全小写会 503「无可用渠道」。
   { model: 'MiniMax-M3', label: { zh: 'MiniMax-M3 (福利)', en: 'MiniMax-M3 (Welfare)' }, baseUrl: 'https://api.prismaistudio.xyz:663/v1', welfare: true },
   { model: 'glm-4.6v', label: { zh: 'GLM-4.6V (智谱 BigModel 国内)', en: 'GLM-4.6V (Zhipu China)' }, baseUrl: 'https://open.bigmodel.cn/api/paas/v4' },
   { model: 'glm-4.6v', label: { zh: 'GLM-4.6V (智谱 Z.AI 海外)', en: 'GLM-4.6V (Zhipu Global)' }, baseUrl: 'https://api.z.ai/api/paas/v4' },
@@ -40,27 +177,34 @@ const VISION_MODEL_PRESETS = [
   { model: 'glm-5v-turbo', label: { zh: 'GLM-5V-Turbo (智谱 Z.AI 海外)', en: 'GLM-5V-Turbo (Zhipu Global)' }, baseUrl: 'https://api.z.ai/api/paas/v4' },
   { model: 'doubao-seed-2-1-turbo-260628', label: { zh: 'Doubao Seed 2.1 Turbo (火山方舟)', en: 'Doubao Seed 2.1 Turbo (Volcengine Ark)' }, baseUrl: 'https://ark.cn-beijing.volces.com/api/v3' },
   { model: 'doubao-seed-2-0-lite-260428', label: { zh: 'Doubao Seed 2.0 Lite (火山方舟)', en: 'Doubao Seed 2.0 Lite (Volcengine Ark)' }, baseUrl: 'https://ark.cn-beijing.volces.com/api/v3' },
-  { model: 'kimi-k2.6', label: { zh: 'Kimi K2.6 (月之暗面 国内)', en: 'Kimi K2.6 (Moonshot China)' }, baseUrl: 'https://api.moonshot.cn/v1' },
-  { model: 'kimi-k2.6', label: { zh: 'Kimi K2.6 (月之暗面 海外)', en: 'Kimi K2.6 (Moonshot Global)' }, baseUrl: 'https://api.moonshot.ai/v1' },
-  { model: 'kimi-k2.7-code', label: { zh: 'Kimi K2.7 Code (月之暗面 国内)', en: 'Kimi K2.7 Code (Moonshot China)' }, baseUrl: 'https://api.moonshot.cn/v1' },
-  { model: 'kimi-k2.7-code', label: { zh: 'Kimi K2.7 Code (月之暗面 海外)', en: 'Kimi K2.7 Code (Moonshot Global)' }, baseUrl: 'https://api.moonshot.ai/v1' },
+  { model: 'kimi-k2.6', label: { zh: 'Kimi K2.6 (月之暗面 国内)', en: 'Kimi K2.6 (Moonshot China)' }, baseUrl: 'https://api.moonshot.cn/v1', recommendedMaxTokens: 32_768 },
+  { model: 'kimi-k2.6', label: { zh: 'Kimi K2.6 (月之暗面 海外)', en: 'Kimi K2.6 (Moonshot Global)' }, baseUrl: 'https://api.moonshot.ai/v1', recommendedMaxTokens: 32_768 },
+  { model: 'kimi-k2.7-code', label: { zh: 'Kimi K2.7 Code (月之暗面 国内)', en: 'Kimi K2.7 Code (Moonshot China)' }, baseUrl: 'https://api.moonshot.cn/v1', recommendedMaxTokens: 32_768 },
+  { model: 'kimi-k2.7-code', label: { zh: 'Kimi K2.7 Code (月之暗面 海外)', en: 'Kimi K2.7 Code (Moonshot Global)' }, baseUrl: 'https://api.moonshot.ai/v1', recommendedMaxTokens: 32_768 },
+  { model: 'kimi-k3', label: { zh: 'Kimi K3 (月之暗面 国内)', en: 'Kimi K3 (Moonshot China)' }, baseUrl: 'https://api.moonshot.cn/v1', recommendedMaxTokens: 32_768 },
+  { model: 'kimi-k3', label: { zh: 'Kimi K3 (月之暗面 海外)', en: 'Kimi K3 (Moonshot Global)' }, baseUrl: 'https://api.moonshot.ai/v1', recommendedMaxTokens: 32_768 },
   // —— 国际（International）端点 ——
   { model: 'gemini-3.6-flash', label: { zh: 'Gemini 3.6 Flash (Google)', en: 'Gemini 3.6 Flash (Google)' }, baseUrl: 'https://generativelanguage.googleapis.com/v1beta/openai' },
+  { model: 'gpt-5.6', label: { zh: 'GPT-5.6 (OpenAI)', en: 'GPT-5.6 (OpenAI)' }, baseUrl: 'https://api.openai.com/v1' },
+  { model: 'gpt-5.6-luna', label: { zh: 'GPT-5.6 Luna (OpenAI)', en: 'GPT-5.6 Luna (OpenAI)' }, baseUrl: 'https://api.openai.com/v1' },
   { model: 'gpt-4o', label: { zh: 'GPT-4o (OpenAI)', en: 'GPT-4o (OpenAI)' }, baseUrl: 'https://api.openai.com/v1' },
   { model: 'gpt-4o-mini', label: { zh: 'GPT-4o mini (OpenAI)', en: 'GPT-4o mini (OpenAI)' }, baseUrl: 'https://api.openai.com/v1' },
 ]
 
 function getDefaultBaseUrlForModel(model) {
   const matches = VISION_MODEL_PRESETS.filter((preset) => preset.model === model)
-  // A few model IDs (e.g. minimax-m3, kimi-k2.6) intentionally appear twice —
-  // once for the China endpoint and once for the global one. When that happens
-  // we cannot infer the correct base URL from the model alone, so fall back to
-  // the default instead of silently picking the first (China) match and routing
-  // a global user's traffic to the wrong region. The WebUI always persists
-  // baseUrl alongside model, so this only affects hand-written configs that
-  // omit baseUrl for an ambiguous model.
+  // Never send a credential to an unrelated default provider. A few model IDs
+  // intentionally appear more than once (China/global, plus optional gateways),
+  // and an unknown custom model has no trustworthy provider inference at all.
+  // The WebUI persists baseUrl alongside model, so this mainly protects manual
+  // configs/env setups that forgot VISIONPOWER_BASE_URL.
   if (matches.length === 1) return matches[0].baseUrl
-  return DEFAULT_VISION_BASE_URL
+  if (model === DEFAULT_VISION_MODEL) return DEFAULT_VISION_BASE_URL
+
+  const reason = matches.length > 1
+    ? 'it is available through multiple configured endpoints'
+    : 'its provider cannot be inferred safely'
+  throw new Error(`VISIONPOWER_BASE_URL is required for model "${model}" because ${reason}`)
 }
 
 function readEnvValue(env, names) {
@@ -74,7 +218,28 @@ function readEnvValue(env, names) {
   return { name: names[0], value: '' }
 }
 
-function parsePositiveInteger(envValue, fallback) {
+function assertSafeApiKey(value, label = 'API key') {
+  if (value && /[\u0000-\u001f\u007f]/.test(value)) {
+    throw new Error(`${label} must not contain control characters`)
+  }
+  if (value && !/^[\x20-\x7e]+$/.test(value)) {
+    throw new Error(`${label} must contain printable ASCII characters only`)
+  }
+  if (value && Buffer.byteLength(value, 'utf8') > MAX_API_KEY_BYTES) {
+    throw new Error(`${label} must not exceed ${MAX_API_KEY_BYTES} bytes`)
+  }
+}
+
+function assertSafeModel(value, label = 'model') {
+  if (/[\u0000-\u001f\u007f]/.test(value)) {
+    throw new Error(`${label} must not contain control characters`)
+  }
+  if (value.length > MAX_MODEL_CHARS) {
+    throw new Error(`${label} must not exceed ${MAX_MODEL_CHARS} characters`)
+  }
+}
+
+function parsePositiveInteger(envValue, fallback, max = Number.MAX_SAFE_INTEGER) {
   if (!envValue.value) return fallback
   const trimmed = envValue.value
   if (!/^\d+$/.test(trimmed)) {
@@ -85,11 +250,12 @@ function parsePositiveInteger(envValue, fallback) {
   if (!Number.isSafeInteger(parsed) || parsed <= 0) {
     throw new Error(`${envValue.name} must be a positive integer`)
   }
+  if (parsed > max) throw new Error(`${envValue.name} must not exceed ${max}`)
 
   return parsed
 }
 
-function parseNonNegativeInteger(envValue, fallback) {
+function parseNonNegativeInteger(envValue, fallback, max = Number.MAX_SAFE_INTEGER) {
   if (!envValue.value) return fallback
   const trimmed = envValue.value
   if (!/^\d+$/.test(trimmed)) {
@@ -100,6 +266,7 @@ function parseNonNegativeInteger(envValue, fallback) {
   if (!Number.isSafeInteger(parsed) || parsed < 0) {
     throw new Error(`${envValue.name} must be a non-negative integer`)
   }
+  if (parsed > max) throw new Error(`${envValue.name} must not exceed ${max}`)
 
   return parsed
 }
@@ -134,15 +301,24 @@ function getSkillStateFilePath(env = process.env) {
   return env.VISIONPOWER_SKILL_STATE?.trim() || join(homedir(), '.visionpower', 'skill-state.json')
 }
 
+function getInboxDir(env = process.env) {
+  return resolve(env.VISIONPOWER_INBOX_DIR?.trim() || join(dirname(getConfigFilePath(env)), 'inbox'))
+}
+
+function isOwnedTempFileEntry(filePath, entry) {
+  const prefix = `${basename(filePath)}.`
+  const suffix = '.tmp'
+  if (!entry.startsWith(prefix) || !entry.endsWith(suffix)) return false
+  const parts = entry.slice(prefix.length, -suffix.length).split('.')
+  return parts.length === 2 && parts.every((part) => /^\d+$/.test(part))
+}
+
 // Best-effort sweep of orphaned temp files left by a prior write that was killed
 // before it could rename. Only touches files matching this exact state file's
 // temp pattern (statePath.<pid>.<ts>.tmp) and only if older than the threshold,
 // so it never touches unrelated user files.
 async function cleanupStaleStateTempFiles(statePath, maxAgeMs) {
   const dir = dirname(statePath)
-  const base = basename(statePath)
-  const prefix = `${base}.`
-  const suffix = '.tmp'
   const now = Date.now()
   let entries
   try {
@@ -151,11 +327,11 @@ async function cleanupStaleStateTempFiles(statePath, maxAgeMs) {
     return
   }
   await Promise.all(entries.map(async (entry) => {
-    if (!entry.startsWith(prefix) || !entry.endsWith(suffix)) return
+    if (!isOwnedTempFileEntry(statePath, entry)) return
     const tempPath = join(dir, entry)
     try {
-      const fileStat = await stat(tempPath)
-      if (now - fileStat.mtimeMs > maxAgeMs) {
+      const fileStat = await lstat(tempPath)
+      if (fileStat.isFile() && now - fileStat.mtimeMs > maxAgeMs) {
         await unlink(tempPath)
       }
     } catch {
@@ -169,8 +345,6 @@ async function cleanupStaleStateTempFiles(statePath, maxAgeMs) {
 // older than maxAgeMs, so unrelated user files are never touched.
 function cleanupStaleTempFilesSync(filePath, maxAgeMs) {
   const dir = dirname(filePath)
-  const prefix = `${basename(filePath)}.`
-  const suffix = '.tmp'
   const now = Date.now()
   let entries
   try {
@@ -179,10 +353,11 @@ function cleanupStaleTempFilesSync(filePath, maxAgeMs) {
     return
   }
   for (const entry of entries) {
-    if (!entry.startsWith(prefix) || !entry.endsWith(suffix)) continue
+    if (!isOwnedTempFileEntry(filePath, entry)) continue
     const tempPath = join(dir, entry)
     try {
-      if (now - statSync(tempPath).mtimeMs > maxAgeMs) {
+      const fileStat = lstatSync(tempPath)
+      if (fileStat.isFile() && now - fileStat.mtimeMs > maxAgeMs) {
         unlinkSync(tempPath)
       }
     } catch {
@@ -196,14 +371,16 @@ async function writeSkillStateFile(state, env) {
   await mkdir(dirname(statePath), { recursive: true, mode: 0o700 })
   const tempPath = `${statePath}.${process.pid}.${Date.now()}.tmp`
   const content = `${JSON.stringify({ version: 1, ...state }, null, 2)}\n`
+  let tempCreated = false
   try {
     await writeFile(tempPath, content, { mode: 0o600, flag: 'wx' })
+    tempCreated = true
     await chmod(tempPath, 0o600)
     await rename(tempPath, statePath)
     // A fresh successful write is a safe moment to reap leftover temp files.
     await cleanupStaleStateTempFiles(statePath, 60 * 60 * 1000)
   } catch (error) {
-    await unlink(tempPath).catch(() => {})
+    if (tempCreated) await unlink(tempPath).catch(() => {})
     throw error
   }
 }
@@ -237,6 +414,13 @@ function loadConfigFile(env) {
   const configPath = getConfigFilePath(env)
   let raw
   try {
+    const fileStat = statSync(configPath)
+    if (!fileStat.isFile()) {
+      throw new Error('path is not a regular file')
+    }
+    if (fileStat.size > MAX_CONFIG_FILE_BYTES) {
+      throw new Error(`file exceeds the ${MAX_CONFIG_FILE_BYTES}-byte safety limit`)
+    }
     raw = readFileSync(configPath, 'utf8')
   } catch (error) {
     if (error?.code === 'ENOENT') return {}
@@ -246,8 +430,12 @@ function loadConfigFile(env) {
   let parsed
   try {
     parsed = JSON.parse(raw)
-  } catch (error) {
-    throw new Error(`Invalid JSON in config file ${configPath}: ${error.message}`)
+  } catch {
+    // Omit the underlying SyntaxError: V8's message echoes a slice of the file
+    // content (e.g. `Unexpected token '-', "-----BEGIN OPENSSH P..."`), which
+    // can leak sensitive bytes when VISIONPOWER_CONFIG is pointed at a non-JSON
+    // private file. Surface a static description instead.
+    throw new Error(`Invalid JSON in config file ${configPath}; ensure it contains a single JSON object`)
   }
   if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
     throw new Error(`Config file ${configPath} must contain a JSON object`)
@@ -272,21 +460,24 @@ function readFileStringValue(file, names) {
   return { name: `config file "${names[0]}"`, value: '' }
 }
 
-function integerFromFile(value, label, { allowZero = false } = {}) {
+// `prefix` lets the WebUI PUT path (normalizeConfigObject) surface "config
+// field" while loadVisionConfig keeps the historical "config file" wording.
+function integerFromFile(value, label, { allowZero = false, max = Number.MAX_SAFE_INTEGER, prefix = 'config file' } = {}) {
   if (value === undefined || value === null) return undefined
   const valid = typeof value === 'number'
     && Number.isSafeInteger(value)
     && (allowZero ? value >= 0 : value > 0)
   if (!valid) {
-    throw new Error(`config file "${label}" must be a ${allowZero ? 'non-negative' : 'positive'} integer`)
+    throw new Error(`${prefix} "${label}" must be a ${allowZero ? 'non-negative' : 'positive'} integer`)
   }
+  if (value > max) throw new Error(`${prefix} "${label}" must not exceed ${max}`)
   return value
 }
 
-function booleanFromFile(value, label) {
+function booleanFromFile(value, label, { prefix = 'config file' } = {}) {
   if (value === undefined || value === null) return undefined
   if (typeof value !== 'boolean') {
-    throw new Error(`config file "${label}" must be a boolean`)
+    throw new Error(`${prefix} "${label}" must be a boolean`)
   }
   return value
 }
@@ -309,22 +500,26 @@ function loadVisionConfig(env = process.env) {
   const file = loadConfigFile(env)
 
   const modelFile = readFileStringValue(file, ['model', 'VISIONPOWER_MODEL'])
-  const model = readEnvValue(env, ['VISIONPOWER_MODEL']).value
+  const configuredModel = readEnvValue(env, ['VISIONPOWER_MODEL']).value
     || modelFile.value
     || DEFAULT_VISION_MODEL
+  assertSafeModel(configuredModel, 'VISIONPOWER_MODEL')
 
   const apiKeyFile = readFileStringValue(file, ['apiKey', 'VISIONPOWER_API_KEY', 'OPENAI_API_KEY'])
   const apiKey = readEnvValue(env, ['VISIONPOWER_API_KEY', 'OPENAI_API_KEY']).value
     || apiKeyFile.value
     || ''
+  assertSafeApiKey(apiKey)
 
   const baseUrlEnv = readEnvValue(env, ['VISIONPOWER_BASE_URL'])
   const fileBaseUrl = readFileStringValue(file, ['baseUrl', 'VISIONPOWER_BASE_URL'])
-  const rawBaseUrl = baseUrlEnv.value || fileBaseUrl.value || getDefaultBaseUrlForModel(model)
+  const rawBaseUrl = baseUrlEnv.value || fileBaseUrl.value || getDefaultBaseUrlForModel(configuredModel)
   const baseUrlSource = baseUrlEnv.value
     ? baseUrlEnv.name
     : fileBaseUrl.value ? fileBaseUrl.name : 'VISIONPOWER_BASE_URL'
   const baseUrl = normalizeBaseUrl(rawBaseUrl, baseUrlSource)
+  const model = normalizeModelForKnownEndpoint(configuredModel, baseUrl)
+  const modelCapabilities = resolveModelCapabilities(model, baseUrl)
 
   const allowedDirsEnv = readEnvValue(env, ['VISIONPOWER_ALLOWED_DIRS'])
   const debugEnv = readEnvValue(env, ['VISIONPOWER_DEBUG'])
@@ -336,21 +531,70 @@ function loadVisionConfig(env = process.env) {
     throw new Error(`${source} must not exceed ${MAX_REQUEST_TIMEOUT_MS}`)
   }
 
-  return {
+  const config = {
     apiKey,
     model,
     baseUrl,
     allowedDirs: allowedDirsEnv.value
       ? parseAllowedDirs(allowedDirsEnv)
       : (allowedDirsFromFile(file.allowedDirs) ?? []),
-    maxImageBytes: parsePositiveInteger(readEnvValue(env, ['VISIONPOWER_MAX_IMAGE_BYTES']), integerFromFile(file.maxImageBytes, 'maxImageBytes') ?? DEFAULT_MAX_IMAGE_BYTES),
+    maxImageBytes: parsePositiveInteger(
+      readEnvValue(env, ['VISIONPOWER_MAX_IMAGE_BYTES']),
+      integerFromFile(file.maxImageBytes, 'maxImageBytes', { max: MAX_CONFIG_IMAGE_BYTES }) ?? DEFAULT_MAX_IMAGE_BYTES,
+      MAX_CONFIG_IMAGE_BYTES,
+    ),
+    maxTotalImageBytes: parsePositiveInteger(
+      readEnvValue(env, ['VISIONPOWER_MAX_TOTAL_IMAGE_BYTES']),
+      integerFromFile(file.maxTotalImageBytes, 'maxTotalImageBytes', { max: MAX_CONFIG_TOTAL_IMAGE_BYTES }) ?? DEFAULT_MAX_TOTAL_IMAGE_BYTES,
+      MAX_CONFIG_TOTAL_IMAGE_BYTES,
+    ),
     requestTimeoutMs,
-    maxTokens: parsePositiveInteger(readEnvValue(env, ['VISIONPOWER_MAX_TOKENS']), integerFromFile(file.maxTokens, 'maxTokens') ?? DEFAULT_MAX_TOKENS),
-    maxImages: parsePositiveInteger(readEnvValue(env, ['VISIONPOWER_MAX_IMAGES']), integerFromFile(file.maxImages, 'maxImages') ?? DEFAULT_MAX_IMAGES),
-    maxRetries: parseNonNegativeInteger(readEnvValue(env, ['VISIONPOWER_MAX_RETRIES']), integerFromFile(file.maxRetries, 'maxRetries', { allowZero: true }) ?? DEFAULT_MAX_RETRIES),
+    maxTokens: parsePositiveInteger(
+      readEnvValue(env, ['VISIONPOWER_MAX_TOKENS']),
+      integerFromFile(file.maxTokens, 'maxTokens', { max: MAX_CONFIG_TOKENS })
+        ?? modelCapabilities.recommendedMaxTokens
+        ?? DEFAULT_MAX_TOKENS,
+      MAX_CONFIG_TOKENS,
+    ),
+    maxImages: parsePositiveInteger(
+      readEnvValue(env, ['VISIONPOWER_MAX_IMAGES']),
+      integerFromFile(file.maxImages, 'maxImages', { max: MAX_CONFIG_IMAGES }) ?? DEFAULT_MAX_IMAGES,
+      MAX_CONFIG_IMAGES,
+    ),
+    maxRetries: parseNonNegativeInteger(
+      readEnvValue(env, ['VISIONPOWER_MAX_RETRIES']),
+      integerFromFile(file.maxRetries, 'maxRetries', { allowZero: true, max: MAX_CONFIG_RETRIES }) ?? DEFAULT_MAX_RETRIES,
+      MAX_CONFIG_RETRIES,
+    ),
     debug: debugEnv.value ? parseBoolean(debugEnv) : (booleanFromFile(file.debug, 'debug') ?? false),
     cache: resolveCacheConfig(env, file),
+    inbox: {
+      dir: getInboxDir(env),
+      ttlMs: parsePositiveInteger(
+        readEnvValue(env, ['VISIONPOWER_INBOX_TTL_MS']),
+        integerFromFile(file.inboxTtlMs, 'inboxTtlMs', { max: MAX_CONFIG_INBOX_TTL_MS }) ?? DEFAULT_INBOX_TTL_MS,
+        MAX_CONFIG_INBOX_TTL_MS,
+      ),
+      maxEntries: parsePositiveInteger(
+        readEnvValue(env, ['VISIONPOWER_INBOX_MAX_ENTRIES']),
+        integerFromFile(file.inboxMaxEntries, 'inboxMaxEntries', { max: MAX_CONFIG_INBOX_ENTRIES }) ?? DEFAULT_INBOX_MAX_ENTRIES,
+        MAX_CONFIG_INBOX_ENTRIES,
+      ),
+    },
   }
+  if (config.maxTotalImageBytes < config.maxImageBytes) {
+    throw new Error('VISIONPOWER_MAX_TOTAL_IMAGE_BYTES must be greater than or equal to VISIONPOWER_MAX_IMAGE_BYTES')
+  }
+  return config
+}
+
+function normalizeModelForKnownEndpoint(model, baseUrl) {
+  if (model !== 'minimax-m3') return model
+  const hostname = new URL(baseUrl).hostname.toLowerCase()
+  if (['api.minimaxi.com', 'api.minimax.io', 'api.prismaistudio.xyz'].includes(hostname)) {
+    return 'MiniMax-M3'
+  }
+  return model
 }
 
 // In-memory result cache config. The cache is purely process-local (never
@@ -368,11 +612,25 @@ function resolveCacheConfig(env, file) {
 
   // maxEntries allows zero: a capacity of zero means "store nothing", which is
   // equivalent to disabling the cache (so 0 is a valid way to turn it off).
-  const maxEntriesFile = integerFromFile(file.cache?.maxEntries, 'cache.maxEntries', { allowZero: true })
-  const maxEntries = parseNonNegativeInteger(readEnvValue(env, ['VISIONPOWER_CACHE_MAX_ENTRIES']), maxEntriesFile ?? DEFAULT_CACHE_MAX_ENTRIES)
+  const maxEntriesFile = integerFromFile(file.cache?.maxEntries, 'cache.maxEntries', {
+    allowZero: true,
+    max: MAX_CONFIG_CACHE_ENTRIES,
+  })
+  const maxEntries = parseNonNegativeInteger(
+    readEnvValue(env, ['VISIONPOWER_CACHE_MAX_ENTRIES']),
+    maxEntriesFile ?? DEFAULT_CACHE_MAX_ENTRIES,
+    MAX_CONFIG_CACHE_ENTRIES,
+  )
 
-  const ttlMsFile = integerFromFile(file.cache?.ttlMs, 'cache.ttlMs', { allowZero: false })
-  const ttlMs = parsePositiveInteger(readEnvValue(env, ['VISIONPOWER_CACHE_TTL_MS']), ttlMsFile ?? DEFAULT_CACHE_TTL_MS)
+  const ttlMsFile = integerFromFile(file.cache?.ttlMs, 'cache.ttlMs', {
+    allowZero: false,
+    max: MAX_CONFIG_CACHE_TTL_MS,
+  })
+  const ttlMs = parsePositiveInteger(
+    readEnvValue(env, ['VISIONPOWER_CACHE_TTL_MS']),
+    ttlMsFile ?? DEFAULT_CACHE_TTL_MS,
+    MAX_CONFIG_CACHE_TTL_MS,
+  )
 
   if (maxEntries <= 0) enabled = false
 
@@ -414,14 +672,25 @@ function saveVisionConfig(config, env = process.env) {
   // Atomic write: write to a temp file, then rename to final path.
   // This prevents a partially-written config.json if the process is killed mid-write.
   const tmp = `${configPath}.${process.pid}.${Date.now()}.tmp`
+  let tempCreated = false
   try {
-    writeFileSync(tmp, JSON.stringify(config, null, 2) + '\n', { encoding: 'utf8', mode: 0o600 })
+    // `wx` prevents a pre-created symlink or file at the predictable temp path
+    // from redirecting/overwriting the write when VISIONPOWER_CONFIG points at
+    // a directory that is writable by another local user.
+    writeFileSync(tmp, JSON.stringify(config, null, 2) + '\n', {
+      encoding: 'utf8',
+      mode: 0o600,
+      flag: 'wx',
+    })
+    tempCreated = true
     renameSync(tmp, configPath)
     // A fresh successful write is a safe moment to reap leftover temp files
     // (e.g. from a prior save interrupted mid-write). Mirrors writeSkillStateFile.
     cleanupStaleTempFilesSync(configPath, 60 * 60 * 1000)
   } catch (error) {
-    try { unlinkSync(tmp) } catch { /* best-effort cleanup */ }
+    if (tempCreated) {
+      try { unlinkSync(tmp) } catch { /* best-effort cleanup */ }
+    }
     throw error
   }
 }
@@ -431,8 +700,8 @@ function saveVisionConfig(config, env = process.env) {
 // the validators below) so the server and the validation pass always agree.
 const ALLOWED_CONFIG_KEYS = new Set([
   'apiKey', 'model', 'baseUrl', 'allowedDirs',
-  'maxImageBytes', 'timeoutMs', 'maxTokens', 'maxImages', 'maxRetries',
-  'debug', 'cache',
+  'maxImageBytes', 'maxTotalImageBytes', 'timeoutMs', 'maxTokens', 'maxImages', 'maxRetries',
+  'inboxTtlMs', 'inboxMaxEntries', 'debug', 'cache',
 ])
 
 // Validates and normalizes a config object coming from the WebUI before it is
@@ -473,6 +742,8 @@ function normalizeConfigObject(input) {
         throw new Error('config field "model" must not be empty')
       }
       cleaned[key] = trimmed
+      if (key === 'apiKey') assertSafeApiKey(trimmed, 'config field "apiKey"')
+      if (key === 'model') assertSafeModel(trimmed, 'config field "model"')
     } else if (cleaned[key] === null) {
       // null is never persisted for these — drop it so it can't reach the file.
       delete cleaned[key]
@@ -493,31 +764,50 @@ function normalizeConfigObject(input) {
 
   // Numeric fields: reuse the same file loaders so the rules stay in sync.
   const numericFields = [
-    { key: 'maxImageBytes', label: 'maxImageBytes', allowZero: false },
+    { key: 'maxImageBytes', label: 'maxImageBytes', allowZero: false, max: MAX_CONFIG_IMAGE_BYTES },
+    { key: 'maxTotalImageBytes', label: 'maxTotalImageBytes', allowZero: false, max: MAX_CONFIG_TOTAL_IMAGE_BYTES },
     { key: 'timeoutMs', label: 'timeoutMs', allowZero: false },
-    { key: 'maxTokens', label: 'maxTokens', allowZero: false },
-    { key: 'maxImages', label: 'maxImages', allowZero: false },
-    { key: 'maxRetries', label: 'maxRetries', allowZero: true },
+    { key: 'maxTokens', label: 'maxTokens', allowZero: false, max: MAX_CONFIG_TOKENS },
+    { key: 'maxImages', label: 'maxImages', allowZero: false, max: MAX_CONFIG_IMAGES },
+    { key: 'maxRetries', label: 'maxRetries', allowZero: true, max: MAX_CONFIG_RETRIES },
+    { key: 'inboxTtlMs', label: 'inboxTtlMs', allowZero: false, max: MAX_CONFIG_INBOX_TTL_MS },
+    { key: 'inboxMaxEntries', label: 'inboxMaxEntries', allowZero: false, max: MAX_CONFIG_INBOX_ENTRIES },
   ]
-  for (const { key, label, allowZero } of numericFields) {
+  for (const { key, label, allowZero, max } of numericFields) {
     if (cleaned[key] !== undefined && cleaned[key] !== null) {
-      const validated = integerFromFile(cleaned[key], label, { allowZero })
-      if (validated === undefined) {
-        throw new Error(`config field "${label}" must be a ${allowZero ? 'non-negative' : 'positive'} integer`)
-      }
-      cleaned[key] = validated
-      if (key === 'timeoutMs' && validated > MAX_REQUEST_TIMEOUT_MS) {
+      // integerFromFile only returns undefined for null/undefined (already
+      // filtered above); any other invalid value throws directly, so the
+      // "config field" message below can never be reached and was removed.
+      cleaned[key] = integerFromFile(cleaned[key], label, { allowZero, max, prefix: 'config field' })
+      if (key === 'timeoutMs' && cleaned[key] > MAX_REQUEST_TIMEOUT_MS) {
         throw new Error(`config field "timeoutMs" must not exceed ${MAX_REQUEST_TIMEOUT_MS}`)
       }
     }
   }
 
+  // PUT /api/config replaces the persisted object rather than merging it with
+  // the previous file. Validate omitted values against the defaults that the
+  // next loadVisionConfig() call will actually apply; otherwise a partial PUT
+  // such as {maxImageBytes: 100MB} could save successfully and immediately
+  // poison every later config read because the default total cap is only 64MB.
+  const effectiveMaxImageBytes = cleaned.maxImageBytes ?? DEFAULT_MAX_IMAGE_BYTES
+  const effectiveMaxTotalImageBytes = cleaned.maxTotalImageBytes ?? DEFAULT_MAX_TOTAL_IMAGE_BYTES
+  if (effectiveMaxTotalImageBytes < effectiveMaxImageBytes) {
+    throw new Error('maxTotalImageBytes must be greater than or equal to maxImageBytes')
+  }
+
+  // The same replacement semantics apply to model/baseUrl. A custom or
+  // region-ambiguous model without a base URL would be accepted here but fail
+  // on the very next read. Ask the shared resolver to prove that an omitted
+  // endpoint can be inferred safely before persisting the object.
+  if (cleaned.model !== undefined && cleaned.baseUrl === undefined) {
+    getDefaultBaseUrlForModel(cleaned.model)
+  }
+
   // Booleans.
   for (const key of ['debug']) {
     if (cleaned[key] !== undefined && cleaned[key] !== null) {
-      const value = booleanFromFile(cleaned[key], key)
-      if (value === undefined) throw new Error(`config field "${key}" must be a boolean`)
-      cleaned[key] = value
+      cleaned[key] = booleanFromFile(cleaned[key], key, { prefix: 'config field' })
     }
   }
 
@@ -528,21 +818,23 @@ function normalizeConfigObject(input) {
 
     const out = {}
     if (rawCache.enabled !== undefined && rawCache.enabled !== null) {
-      const enabled = booleanFromFile(rawCache.enabled, 'cache.enabled')
-      if (enabled === undefined) throw new Error('config field "cache.enabled" must be a boolean')
-      out.enabled = enabled
+      out.enabled = booleanFromFile(rawCache.enabled, 'cache.enabled', { prefix: 'config field' })
     }
     if (rawCache.maxEntries !== undefined && rawCache.maxEntries !== null) {
-      const maxEntries = integerFromFile(rawCache.maxEntries, 'cache.maxEntries', { allowZero: true })
-      if (maxEntries === undefined) throw new Error('config field "cache.maxEntries" must be a non-negative integer')
-      out.maxEntries = maxEntries
+      out.maxEntries = integerFromFile(rawCache.maxEntries, 'cache.maxEntries', {
+        allowZero: true,
+        max: MAX_CONFIG_CACHE_ENTRIES,
+        prefix: 'config field',
+      })
     }
     if (rawCache.ttlMs !== undefined && rawCache.ttlMs !== null) {
       // ttlMs uses allowZero:false on purpose: 0 ttl means "instantly expire",
       // which makes the cache useless and is almost never what a user intends.
-      const ttlMs = integerFromFile(rawCache.ttlMs, 'cache.ttlMs', { allowZero: false })
-      if (ttlMs === undefined) throw new Error('config field "cache.ttlMs" must be a positive integer')
-      out.ttlMs = ttlMs
+      out.ttlMs = integerFromFile(rawCache.ttlMs, 'cache.ttlMs', {
+        allowZero: false,
+        max: MAX_CONFIG_CACHE_TTL_MS,
+        prefix: 'config field',
+      })
     }
     cleaned.cache = out
   }
@@ -550,11 +842,493 @@ function normalizeConfigObject(input) {
   return cleaned
 }
 
+const IMAGE_REF_PATTERN = /^vpimg_[A-Za-z0-9_-]{32}$/
+const OWNED_FILE_PATTERN = /^(vpimg_[A-Za-z0-9_-]{32})\.(image|json)$/
+const INBOX_SUPPORTED_IMAGE_MIME_TYPES = new Set([
+  'image/jpeg', 'image/png', 'image/webp', 'image/gif', 'image/bmp', 'image/tiff',
+])
+const MAX_METADATA_BYTES = 16 * 1024
+const ORPHAN_GRACE_MS = 60 * 1000
+const STAGE_LOCK_NAME = '.stage.lock'
+const STAGE_LOCK_STALE_MS = 60 * 1000
+const STAGE_LOCK_HEARTBEAT_MS = 10 * 1000
+const STAGE_LOCK_WAIT_MS = 5 * 1000
+
+function inboxError(message, statusCode, code) {
+  const error = new Error(message)
+  if (statusCode) error.statusCode = statusCode
+  if (code) error.code = code
+  return error
+}
+
+function isDisposableEntryError(error) {
+  return ['VISION_INBOX_INVALID_METADATA', 'VISION_INBOX_INVALID_DATA',
+    'VISION_INBOX_INSECURE_FILE', 'VISION_INBOX_CHANGED'].includes(error?.code)
+}
+
+function assertImageRef(imageRef) {
+  if (typeof imageRef !== 'string' || !IMAGE_REF_PATTERN.test(imageRef)) {
+    throw inboxError('image_ref must be a valid VisionPower Inbox reference', 400, 'VISION_INBOX_INVALID_REF')
+  }
+  return imageRef
+}
+
+async function ensureInboxDir(config) {
+  const dir = config.inbox?.dir
+  if (!dir) throw new Error('VisionPower Inbox directory is not configured')
+  await mkdir(dir, { recursive: true, mode: 0o700 })
+  const dirStat = await lstat(dir)
+  if (dirStat.isSymbolicLink() || !dirStat.isDirectory()) {
+    throw new Error('VisionPower Inbox path must be a real directory, not a symbolic link')
+  }
+  if (process.platform !== 'win32') {
+    const wrongOwner = typeof process.getuid === 'function' && dirStat.uid !== process.getuid()
+    const sharedPermissions = (dirStat.mode & 0o077) !== 0
+    if (wrongOwner || sharedPermissions) {
+      throw new Error('VisionPower Inbox directory must be owned by the current user with mode 0700 or stricter')
+    }
+  }
+  return dir
+}
+
+function sameFile(before, after) {
+  return before.isFile()
+    && after.isFile()
+    && before.dev === after.dev
+    && before.ino === after.ino
+    && before.size === after.size
+    && before.mtimeNs === after.mtimeNs
+    && before.ctimeNs === after.ctimeNs
+}
+
+async function readOwnedFile(filePath, maxBytes, missingMessage) {
+  let before
+  try {
+    before = await lstat(filePath, { bigint: true })
+  } catch (error) {
+    if (error?.code === 'ENOENT') throw inboxError(missingMessage, 404, 'VISION_INBOX_NOT_FOUND')
+    throw error
+  }
+  if (!before.isFile()) {
+    // A symlink or another non-regular entry in the opaque namespace is unsafe
+    // state, not a missing reference. Mark it disposable so Inbox cleanup can
+    // remove the poisoned pair instead of preserving it forever.
+    if (before.isSymbolicLink()) {
+      throw inboxError('Staged image files must be regular owner-only files', 400, 'VISION_INBOX_INSECURE_FILE')
+    }
+    throw inboxError(missingMessage, 404, 'VISION_INBOX_NOT_FOUND')
+  }
+  if (process.platform !== 'win32') {
+    const wrongOwner = typeof process.getuid === 'function' && Number(before.uid) !== process.getuid()
+    const sharedPermissions = (Number(before.mode) & 0o077) !== 0
+    if (wrongOwner || sharedPermissions) {
+      throw inboxError('Staged image files must be owner-only', 400, 'VISION_INBOX_INSECURE_FILE')
+    }
+  }
+  if (before.size <= 0n || before.size > BigInt(maxBytes)) {
+    throw inboxError('Staged image data is invalid or exceeds the configured limit', 400, 'VISION_INBOX_INVALID_DATA')
+  }
+
+  const flags = fsConstants.O_RDONLY | (process.platform === 'win32' ? 0 : fsConstants.O_NOFOLLOW)
+  let handle
+  try {
+    handle = await open(filePath, flags)
+  } catch (error) {
+    if (error?.code === 'ENOENT') throw inboxError(missingMessage, 404, 'VISION_INBOX_NOT_FOUND')
+    if (error?.code === 'ELOOP') {
+      throw inboxError('Staged image changed during read and was rejected', 409, 'VISION_INBOX_CHANGED')
+    }
+    throw error
+  }
+  try {
+    const opened = await handle.stat({ bigint: true })
+    if (!sameFile(before, opened)) {
+      throw inboxError('Staged image changed during read and was rejected', 409, 'VISION_INBOX_CHANGED')
+    }
+    const data = Buffer.allocUnsafeSlow(Number(opened.size))
+    let offset = 0
+    while (offset < data.length) {
+      const { bytesRead } = await handle.read(data, offset, data.length - offset, offset)
+      if (bytesRead === 0) {
+        throw inboxError('Staged image changed during read and was rejected', 409, 'VISION_INBOX_CHANGED')
+      }
+      offset += bytesRead
+    }
+    const after = await handle.stat({ bigint: true })
+    if (!sameFile(opened, after)) {
+      throw inboxError('Staged image changed during read and was rejected', 409, 'VISION_INBOX_CHANGED')
+    }
+    return data
+  } finally {
+    await handle.close()
+  }
+}
+
+function parseMetadata(data, expectedId) {
+  let metadata
+  try {
+    metadata = JSON.parse(data.toString('utf8'))
+  } catch {
+    throw inboxError('Staged image metadata is invalid', 400, 'VISION_INBOX_INVALID_METADATA')
+  }
+  const createdAtMs = Date.parse(metadata?.createdAt)
+  const expiresAtMs = Date.parse(metadata?.expiresAt)
+  if (metadata?.version !== 1
+    || metadata.id !== expectedId
+    || !INBOX_SUPPORTED_IMAGE_MIME_TYPES.has(metadata.mimeType)
+    || !Number.isSafeInteger(metadata.bytes)
+    || metadata.bytes <= 0
+    || !/^[a-f0-9]{64}$/.test(metadata.sha256 || '')
+    || !Number.isFinite(createdAtMs)
+    || !Number.isFinite(expiresAtMs)
+    || expiresAtMs <= createdAtMs) {
+    throw inboxError('Staged image metadata is invalid', 400, 'VISION_INBOX_INVALID_METADATA')
+  }
+  return { ...metadata, createdAtMs, expiresAtMs }
+}
+
+async function removeOwnedFiles(dir, id) {
+  const results = await Promise.allSettled([
+    unlink(join(dir, `${id}.image`)),
+    unlink(join(dir, `${id}.json`)),
+  ])
+  return results.some((result) => result.status === 'fulfilled')
+}
+
+async function readMetadata(dir, id) {
+  const data = await readOwnedFile(
+    join(dir, `${id}.json`),
+    MAX_METADATA_BYTES,
+    'image_ref does not exist or has expired',
+  )
+  return parseMetadata(data, id)
+}
+
+async function cleanupImageInboxUnlocked(config, dir, now) {
+  const entries = await readdir(dir)
+  const metadataIds = new Set()
+
+  for (const entry of entries) {
+    const match = entry.match(OWNED_FILE_PATTERN)
+    if (!match || match[2] !== 'json') continue
+    const id = match[1]
+    metadataIds.add(id)
+    try {
+      const metadata = await readMetadata(dir, id)
+      if (metadata.expiresAtMs <= now) await removeOwnedFiles(dir, id)
+      else {
+        // Metadata is only useful when its paired image is still a regular,
+        // owner-only file of the recorded size. A local process can replace
+        // the image path after staging (for example with a symlink); leaving
+        // that poisoned pair in the Inbox makes it count toward capacity and
+        // causes every later read to fail. Remove deterministic unsafe states
+        // while keeping transient I/O failures for a later sweep.
+        let imageStat
+        try {
+          imageStat = await lstat(join(dir, `${id}.image`), { bigint: true })
+        } catch (imageError) {
+          if (imageError?.code === 'ENOENT') await removeOwnedFiles(dir, id)
+          continue
+        }
+        const wrongOwner = process.platform !== 'win32'
+          && typeof process.getuid === 'function'
+          && Number(imageStat.uid) !== process.getuid()
+        const sharedPermissions = process.platform !== 'win32'
+          && (Number(imageStat.mode) & 0o077) !== 0
+        const invalidImage = !imageStat.isFile()
+          || wrongOwner
+          || sharedPermissions
+          || imageStat.size <= 0n
+          || imageStat.size !== BigInt(metadata.bytes)
+        if (invalidImage) await removeOwnedFiles(dir, id)
+      }
+    } catch (error) {
+      // Files matching our exact random-handle namespace are VisionPower-owned.
+      // Invalid/corrupt metadata cannot be used safely, so remove the pair.
+      if (isDisposableEntryError(error)) {
+        await removeOwnedFiles(dir, id)
+      }
+      // Missing files are ordinary cleanup races. Other errors (EMFILE, EIO,
+      // temporary access failures) are left untouched so a sweep can never
+      // turn a transient read problem into data loss.
+    }
+  }
+
+  // Clean data files left behind if a process died before publishing metadata.
+  // Use lstat (not stat) for consistency with the rest of this module: stat
+  // would follow a symlink and miss a dangling orphan, and we never follow
+  // links inside the inbox namespace. A symlink in the owned namespace is not
+  // something stageImageBuffer can create (it uses open 'wx'), so it is treated
+  // as disposable alongside stale regular files.
+  for (const entry of entries) {
+    const match = entry.match(OWNED_FILE_PATTERN)
+    if (!match || match[2] !== 'image' || metadataIds.has(match[1])) continue
+    const filePath = join(dir, entry)
+    try {
+      const fileStat = await lstat(filePath)
+      if ((fileStat.isFile() || fileStat.isSymbolicLink()) && now - fileStat.mtimeMs > ORPHAN_GRACE_MS) {
+        await unlink(filePath)
+      }
+    } catch {
+      // Concurrent cleanup/staging may already have removed it.
+    }
+  }
+}
+
+async function cleanupImageInbox(config, now = Date.now()) {
+  return withStageLock(config, async (dir) => cleanupImageInboxUnlocked(config, dir, now))
+}
+
+function wait(ms) {
+  return new Promise((resolveWait) => setTimeout(resolveWait, ms))
+}
+
+async function acquireStageLock(dir) {
+  const lockPath = join(dir, STAGE_LOCK_NAME)
+  const deadline = Date.now() + STAGE_LOCK_WAIT_MS
+  for (;;) {
+    try {
+      const handle = await open(lockPath, 'wx', 0o600)
+      return { handle, lockPath }
+    } catch (error) {
+      if (error?.code !== 'EEXIST') throw error
+      try {
+        const lockStat = await lstat(lockPath)
+        if (!lockStat.isFile() || Date.now() - lockStat.mtimeMs > STAGE_LOCK_STALE_MS) {
+          await unlink(lockPath)
+          continue
+        }
+      } catch (statError) {
+        if (statError?.code === 'ENOENT') continue
+      }
+      if (Date.now() >= deadline) {
+        throw inboxError('VisionPower Inbox is busy; retry the upload', 503, 'VISION_INBOX_BUSY')
+      }
+      await wait(25 + Math.floor(Math.random() * 25))
+    }
+  }
+}
+
+function sameLockFile(held, current) {
+  return held.isFile()
+    && current.isFile()
+    && held.dev === current.dev
+    && held.ino === current.ino
+    && held.birthtimeNs === current.birthtimeNs
+}
+
+async function releaseStageLock(lock) {
+  // A stale-lock reclaimer may have replaced the path while this process still
+  // owns the original open handle. Never unlink by pathname alone: doing so
+  // could delete the successor process's fresh lock and admit a third writer.
+  try {
+    const [held, current] = await Promise.all([
+      lock.handle.stat({ bigint: true }),
+      lstat(lock.lockPath, { bigint: true }),
+    ])
+    if (sameLockFile(held, current)) await unlink(lock.lockPath)
+  } catch (error) {
+    if (error?.code !== 'ENOENT') throw error
+  } finally {
+    await lock.handle.close().catch(() => {})
+  }
+}
+
+async function withStageLock(config, task) {
+  const dir = await ensureInboxDir(config)
+  const lock = await acquireStageLock(dir)
+  // Keep a live writer's lease fresh so slow filesystems cannot make it look
+  // like a crashed process. Serialize heartbeat writes to avoid overlapping
+  // FileHandle operations if one touch itself is delayed.
+  let heartbeat = Promise.resolve()
+  const heartbeatTimer = setInterval(() => {
+    heartbeat = heartbeat
+      .then(() => {
+        const now = new Date()
+        return lock.handle.utimes(now, now)
+      })
+      .catch(() => {})
+  }, STAGE_LOCK_HEARTBEAT_MS)
+  heartbeatTimer.unref?.()
+  try {
+    return await task(dir)
+  } finally {
+    clearInterval(heartbeatTimer)
+    await heartbeat
+    // Lock cleanup is best-effort after the task has completed. Reporting a
+    // successful staged write as failed here could make a caller retry and
+    // create a duplicate; an unreleased file is safely reclaimed by the stale
+    // lease path instead.
+    await releaseStageLock(lock).catch(() => {})
+  }
+}
+
+async function listStagedImagesUnlocked(config, dir, now) {
+  await cleanupImageInboxUnlocked(config, dir, now)
+  const entries = await readdir(dir)
+  const result = []
+  for (const entry of entries) {
+    const match = entry.match(OWNED_FILE_PATTERN)
+    if (!match || match[2] !== 'json') continue
+    try {
+      const metadata = await readMetadata(dir, match[1])
+      if (metadata.expiresAtMs > now) {
+        const publicMetadata = { ...metadata }
+        delete publicMetadata.createdAtMs
+        delete publicMetadata.expiresAtMs
+        result.push(publicMetadata)
+      }
+    } catch (error) {
+      // cleanupImageInbox already removes deterministically unsafe entries and
+      // a missing file is an ordinary race. Propagate every other I/O failure:
+      // silently omitting it here could under-count capacity and accept more
+      // staged data while the filesystem is unhealthy.
+      if (error?.code !== 'VISION_INBOX_NOT_FOUND' && !isDisposableEntryError(error)) throw error
+    }
+  }
+  return result.sort((a, b) => b.createdAt.localeCompare(a.createdAt))
+}
+
+async function listStagedImages(config, now = Date.now()) {
+  return withStageLock(config, async (dir) => listStagedImagesUnlocked(config, dir, now))
+}
+
+async function stageImageBuffer(data, mimeType, config, now = Date.now()) {
+  if (!Buffer.isBuffer(data) || data.length <= 0 || data.length > config.maxImageBytes) {
+    throw inboxError('Staged image exceeds the configured per-image limit', 400)
+  }
+  if (!INBOX_SUPPORTED_IMAGE_MIME_TYPES.has(mimeType)) {
+    throw inboxError('Staged image MIME type is not supported', 400)
+  }
+  return withStageLock(config, async (dir) => {
+    const existing = await listStagedImagesUnlocked(config, dir, now)
+    if (existing.length >= config.inbox.maxEntries) {
+      throw inboxError(`VisionPower Inbox is full; max is ${config.inbox.maxEntries} images`, 409, 'VISION_INBOX_FULL')
+    }
+
+    const id = `vpimg_${randomBytes(24).toString('base64url')}`
+    const dataPath = join(dir, `${id}.image`)
+    const metadataPath = join(dir, `${id}.json`)
+    const createdAt = new Date(now).toISOString()
+    const expiresAt = new Date(now + config.inbox.ttlMs).toISOString()
+    const metadata = {
+      version: 1,
+      id,
+      mimeType,
+      bytes: data.length,
+      sha256: createHash('sha256').update(data).digest('hex'),
+      createdAt,
+      expiresAt,
+    }
+
+    let dataCreated = false
+    let metadataCreated = false
+    try {
+      const dataHandle = await open(dataPath, 'wx', 0o600)
+      try {
+        dataCreated = true
+        await dataHandle.writeFile(data)
+        await dataHandle.sync()
+      } finally {
+        await dataHandle.close()
+      }
+
+      const metadataHandle = await open(metadataPath, 'wx', 0o600)
+      try {
+        metadataCreated = true
+        await metadataHandle.writeFile(`${JSON.stringify(metadata, null, 2)}\n`, 'utf8')
+        await metadataHandle.sync()
+      } finally {
+        await metadataHandle.close()
+      }
+      return metadata
+    } catch (error) {
+      if (metadataCreated) await unlink(metadataPath).catch(() => {})
+      if (dataCreated) await unlink(dataPath).catch(() => {})
+      throw error
+    }
+  })
+}
+
+async function readStagedImage(imageRef, config, now = Date.now()) {
+  const id = assertImageRef(imageRef)
+  return withStageLock(config, async (dir) => {
+    await cleanupImageInboxUnlocked(config, dir, now)
+    const metadata = await readMetadata(dir, id)
+    if (metadata.expiresAtMs <= now) {
+      await removeOwnedFiles(dir, id)
+      throw inboxError('image_ref does not exist or has expired', 404, 'VISION_INBOX_NOT_FOUND')
+    }
+    if (metadata.bytes > config.maxImageBytes) {
+      throw inboxError('Staged image exceeds the configured per-image limit', 400, 'VISION_INBOX_INVALID_DATA')
+    }
+    const data = await readOwnedFile(
+      join(dir, `${id}.image`),
+      config.maxImageBytes,
+      'image_ref does not exist or has expired',
+    )
+    const digest = createHash('sha256').update(data).digest('hex')
+    if (data.length !== metadata.bytes || digest !== metadata.sha256) {
+      throw inboxError('Staged image failed integrity verification', 409, 'VISION_INBOX_INTEGRITY')
+    }
+    return { data, mimeType: metadata.mimeType, metadata }
+  })
+}
+
+async function deleteStagedImage(imageRef, config) {
+  const id = assertImageRef(imageRef)
+  return withStageLock(config, async (dir) => removeOwnedFiles(dir, id))
+}
+
 const VISION_RETRYABLE_STATUS = new Set([429, 500, 502, 503, 504])
 const MAX_PROMPT_CHARS = 20_000
+const MAX_RESPONSE_BODY_BYTES = 5 * 1024 * 1024
+const MAX_CACHE_VALUE_BYTES = 1024 * 1024
+const MAX_RETRY_AFTER_MS = 30 * 1000
+const BASE64_WRAP_LINE_CHARS = 64
+const BASE64_WRAP_LINE_BREAK_CHARS = 2
+const BASE64_EDGE_WHITESPACE_CHARS = 1024
+const HTTP_DATE_PATTERNS = [
+  // Preferred IMF-fixdate plus the two obsolete HTTP-date forms recipients
+  // historically accept. Requiring one of these avoids Date.parse's very
+  // permissive interpretation of unrelated strings such as "1.5".
+  /^(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun), \d{2} (?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec) \d{4} \d{2}:\d{2}:\d{2} GMT$/,
+  /^(?:Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday), \d{2}-(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)-\d{2} \d{2}:\d{2}:\d{2} GMT$/,
+  /^(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun) (?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec) {1,2}\d{1,2} \d{2}:\d{2}:\d{2} \d{4}$/,
+]
 const SUPPORTED_IMAGE_MIME_TYPES = new Set([
   'image/jpeg', 'image/png', 'image/webp', 'image/gif', 'image/bmp', 'image/tiff',
 ])
+const IMAGE_SOURCE_KEYS = new Set([
+  'image_path', 'image_url', 'image_base64', 'image_ref', 'image_mime_type',
+])
+const REQUEST_KEYS = new Set([
+  ...IMAGE_SOURCE_KEYS, 'images', 'prompt', 'output_format',
+])
+const NON_PUBLIC_IPV6_ADDRESSES = new BlockList()
+for (const [network, prefix] of [
+  // `::/96` includes the deprecated IPv4-compatible form. Without this wider
+  // block, `::7f00:1` (the hexadecimal form of 127.0.0.1) bypasses the mapped-
+  // IPv4 branch below and can be forwarded as a supposedly public URL.
+  ['::', 96], // IPv4-compatible, unspecified, and loopback
+  ['100::', 64], // discard-only
+  ['64:ff9b::', 96], // well-known NAT64 (encodes an IPv4 in the low 32 bits)
+  ['64:ff9b:1::', 48], // local-use NAT64
+  ['2001::', 32], // Teredo (client IPv4 encoded in the suffix)
+  ['2001:2::', 48], // benchmarking
+  ['2001:10::', 28], // deprecated ORCHID
+  ['2001:20::', 28], // ORCHIDv2
+  ['2001:db8::', 32], // documentation
+  ['2002::', 16], // 6to4 (encodes an IPv4 in bits 16-47)
+  ['3fff::', 20], // documentation
+  ['5f00::', 16], // segment-routing local identifiers
+  ['fc00::', 7], // unique local
+  ['fe80::', 10], // link local
+  ['fec0::', 10], // deprecated site local
+  ['ff00::', 8], // multicast
+]) {
+  NON_PUBLIC_IPV6_ADDRESSES.addSubnet(network, prefix, 'ipv6')
+}
 
 function debugLog(config, message) {
   if (config.debug) {
@@ -566,9 +1340,67 @@ function delay(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms))
 }
 
-function retryDelayMs(attempt) {
+function retryDelayMs(attempt, retryAfterMs) {
+  if (retryAfterMs !== undefined) {
+    return Math.min(retryAfterMs + Math.floor(Math.random() * 250), MAX_RETRY_AFTER_MS)
+  }
   const base = Math.min(500 * 2 ** attempt, 4_000)
   return base + Math.floor(Math.random() * 250)
+}
+
+function parseRetryAfterMs(value, now = Date.now()) {
+  if (!value) return undefined
+  const trimmed = value.trim()
+  if (/^\d+$/.test(trimmed)) {
+    // Retry-After delta-seconds may be much larger than JavaScript's safe
+    // integer range. It is still a syntactically valid value, and our policy is
+    // to cap it rather than silently ignore it and fall back to a short retry.
+    const seconds = Number(trimmed)
+    if (seconds >= MAX_RETRY_AFTER_MS / 1000) return MAX_RETRY_AFTER_MS
+    return seconds * 1000
+  }
+  const datePatternIndex = HTTP_DATE_PATTERNS.findIndex((pattern) => pattern.test(trimmed))
+  if (datePatternIndex === -1) return undefined
+  // ANSI C's asctime form carries no explicit zone, but HTTP defines every
+  // HTTP-date as UTC. Date.parse otherwise treats that form as local time.
+  const timestamp = Date.parse(datePatternIndex === 2 ? `${trimmed} GMT` : trimmed)
+  if (!Number.isFinite(timestamp)) return undefined
+  return Math.min(Math.max(timestamp - now, 0), MAX_RETRY_AFTER_MS)
+}
+
+async function readResponseText(response) {
+  const declaredLength = response.headers.get('content-length')
+  if (declaredLength && /^\d+$/.test(declaredLength)
+    && Number(declaredLength) > MAX_RESPONSE_BODY_BYTES) {
+    await response.body?.cancel().catch(() => {})
+    const error = new Error('Vision model response body is too large; max is 5MB')
+    error.code = 'VISION_RESPONSE_TOO_LARGE'
+    throw error
+  }
+
+  if (!response.body) return ''
+
+  const reader = response.body.getReader()
+  const chunks = []
+  let totalBytes = 0
+  try {
+    for (;;) {
+      const { done, value } = await reader.read()
+      if (done) break
+      totalBytes += value.byteLength
+      if (totalBytes > MAX_RESPONSE_BODY_BYTES) {
+        await reader.cancel().catch(() => {})
+        const error = new Error('Vision model response body is too large; max is 5MB')
+        error.code = 'VISION_RESPONSE_TOO_LARGE'
+        throw error
+      }
+      chunks.push(Buffer.from(value))
+    }
+  } finally {
+    reader.releaseLock()
+  }
+
+  return Buffer.concat(chunks, totalBytes).toString('utf8')
 }
 
 const MIME_BY_EXT = {
@@ -779,6 +1611,7 @@ async function readLocalImageAsBase64(imagePath, config) {
   return {
     base64: data.toString('base64'),
     mimeType: inferImageMimeTypeFromFile(realImagePath, data),
+    byteLength: data.length,
   }
 }
 
@@ -811,7 +1644,10 @@ function ipv4FromMappedIpv6(ipAddress) {
 }
 
 function isPrivateHostname(hostname) {
-  const normalized = hostname.toLowerCase().replace(/^\[|\]$/g, '')
+  // A fully-qualified hostname may end in a root-label dot. Remove it before
+  // checking special-use names so `localhost.` cannot bypass the loopback
+  // guard while still preserving the URL that is eventually forwarded.
+  const normalized = hostname.toLowerCase().replace(/^\[|\]$/g, '').replace(/\.+$/, '')
   if (normalized === 'localhost' || normalized.endsWith('.localhost')) return true
 
   const ipVersion = isIP(normalized)
@@ -824,14 +1660,7 @@ function isPrivateHostname(hostname) {
       return isPrivateIpv4Address(mappedIpv4)
     }
 
-    return normalized === '::'
-      || normalized === '::1'
-      || normalized.startsWith('fc')
-      || normalized.startsWith('fd')
-      || normalized.startsWith('fe8')
-      || normalized.startsWith('fe9')
-      || normalized.startsWith('fea')
-      || normalized.startsWith('feb')
+    return NON_PUBLIC_IPV6_ADDRESSES.check(normalized, 'ipv6')
   }
 
   return false
@@ -858,7 +1687,36 @@ function normalizeImageUrl(imageUrl) {
   return url.toString()
 }
 
+function maxEncodedBase64Chars(maxDecodedBytes) {
+  return Math.ceil(maxDecodedBytes / 3) * 4
+}
+
+function maxRawBase64Chars(maxEncodedChars) {
+  // Accept conventional MIME-style 64-column Base64 with CRLF line endings,
+  // plus a bounded allowance for leading/trailing whitespace. Unbounded
+  // whitespace would let an input allocate a huge normalized copy before the
+  // decoded-byte limit had a chance to reject it.
+  return maxEncodedChars
+    + Math.ceil(maxEncodedChars / BASE64_WRAP_LINE_CHARS) * BASE64_WRAP_LINE_BREAK_CHARS
+    + BASE64_EDGE_WHITESPACE_CHARS
+}
+
+function base64TooLargeError(config) {
+  return new Error(`image_base64 is too large; max is ${Math.round(config.maxImageBytes / 1024 / 1024)}MB`)
+}
+
 function normalizeBase64Image(imageBase64, imageMimeType, config) {
+  if (typeof imageBase64 !== 'string') {
+    throw new Error('image_base64 must be a string')
+  }
+  if (imageMimeType !== undefined
+    && (typeof imageMimeType !== 'string' || !SUPPORTED_IMAGE_MIME_TYPES.has(imageMimeType))) {
+    throw new Error('image_mime_type must be a supported image MIME type')
+  }
+  const maxEncodedChars = maxEncodedBase64Chars(config.maxImageBytes)
+  if (imageBase64.length > maxRawBase64Chars(maxEncodedChars)) {
+    throw base64TooLargeError(config)
+  }
   const trimmed = imageBase64.trim()
   if (trimmed.startsWith('data:')) {
     throw new Error('image_base64 must not include a data: URI prefix')
@@ -868,22 +1726,27 @@ function normalizeBase64Image(imageBase64, imageMimeType, config) {
   if (!normalized) {
     throw new Error('image_base64 must not be empty')
   }
+  if (normalized.length > maxEncodedChars) {
+    throw base64TooLargeError(config)
+  }
   if (!/^[A-Za-z0-9+/]+={0,2}$/.test(normalized) || /=[^=]/.test(normalized) || normalized.length % 4 === 1) {
     throw new Error('image_base64 must be valid standard base64')
   }
 
   const padded = normalized.padEnd(normalized.length + (4 - normalized.length % 4) % 4, '=')
-  const data = Buffer.from(padded, 'base64')
-  const normalizedWithoutPadding = normalized.replace(/=+$/, '')
-  const reencodedWithoutPadding = data.toString('base64').replace(/=+$/, '')
-  if (reencodedWithoutPadding !== normalizedWithoutPadding) {
+  // Every complete quartet is representable. Non-canonical pad bits can only
+  // occur in the final quartet, so validate that small suffix instead of
+  // re-encoding a potentially hundreds-of-megabytes image just for checking.
+  const finalQuartet = padded.slice(-4)
+  if (Buffer.from(finalQuartet, 'base64').toString('base64') !== finalQuartet) {
     throw new Error('image_base64 must be valid standard base64')
   }
+  const data = Buffer.from(padded, 'base64')
   if (data.length <= 0) {
     throw new Error('image_base64 decoded to an empty image')
   }
   if (data.length > config.maxImageBytes) {
-    throw new Error(`image_base64 is too large; max is ${Math.round(config.maxImageBytes / 1024 / 1024)}MB`)
+    throw base64TooLargeError(config)
   }
 
   const detectedMimeType = detectImageMimeType(data)
@@ -895,20 +1758,28 @@ function normalizeBase64Image(imageBase64, imageMimeType, config) {
   }
 
   return {
-    base64: data.toString('base64'),
+    data,
+    // `padded` is already canonical after the final-quartet check above, so
+    // reuse it for the provider data URL and avoid another full-size copy.
+    base64: padded,
     mimeType: detectedMimeType,
+    byteLength: data.length,
   }
 }
 
 function countImageSources(params) {
-  return ['image_path', 'image_url', 'image_base64'].filter((key) => Boolean(params[key])).length
+  return ['image_path', 'image_url', 'image_base64', 'image_ref'].filter((key) => Boolean(params[key])).length
 }
 
-function validateImageSourceFields(input, label) {
+function validateImageSourceFields(input, label, allowedKeys = IMAGE_SOURCE_KEYS) {
   if (input === null || typeof input !== 'object' || Array.isArray(input)) {
     throw new Error(`${label} must be a JSON object`)
   }
-  for (const key of ['image_path', 'image_url', 'image_base64']) {
+  const unknownKey = Object.keys(input).find((key) => !allowedKeys.has(key))
+  if (unknownKey) {
+    throw new Error(`${label} contains an unknown field: ${unknownKey}`)
+  }
+  for (const key of ['image_path', 'image_url', 'image_base64', 'image_ref']) {
     if (input[key] !== undefined && (typeof input[key] !== 'string' || !input[key].trim())) {
       throw new Error(`${label}.${key} must be a non-empty string`)
     }
@@ -920,7 +1791,7 @@ function validateImageSourceFields(input, label) {
 }
 
 function validateDescribeImageParams(params) {
-  validateImageSourceFields(params, 'request')
+  validateImageSourceFields(params, 'request', REQUEST_KEYS)
 
   if (params.images !== undefined) {
     if (!Array.isArray(params.images) || params.images.length === 0) {
@@ -932,6 +1803,9 @@ function validateDescribeImageParams(params) {
   if (params.prompt !== undefined) {
     if (typeof params.prompt !== 'string') {
       throw new Error('prompt must be a string')
+    }
+    if (!params.prompt.trim()) {
+      throw new Error('prompt must not be empty')
     }
     if (params.prompt.trim().length > MAX_PROMPT_CHARS) {
       throw new Error(`prompt must not exceed ${MAX_PROMPT_CHARS} characters`)
@@ -946,7 +1820,7 @@ function validateDescribeImageParams(params) {
 function assertExactlyOneImageSource(params) {
   const sourceCount = countImageSources(params)
   if (sourceCount !== 1) {
-    throw new Error('Provide exactly one of image_path, image_url, or image_base64 for each image')
+    throw new Error('Provide exactly one of image_path, image_url, image_base64, or image_ref for each image')
   }
   if (params.image_mime_type && !params.image_base64) {
     throw new Error('image_mime_type can only be used with image_base64')
@@ -959,22 +1833,51 @@ async function imageBlockFromInput(params, config) {
   if (params.image_path) {
     const image = await readLocalImageAsBase64(params.image_path, config)
     return {
-      type: 'image_url',
-      image_url: { url: `data:${image.mimeType};base64,${image.base64}` },
+      block: {
+        type: 'image_url',
+        image_url: { url: `data:${image.mimeType};base64,${image.base64}` },
+      },
+      byteLength: image.byteLength,
+    }
+  }
+
+  if (params.image_ref) {
+    const image = await readStagedImage(params.image_ref, config)
+    const detectedMimeType = detectImageMimeType(image.data)
+    if (!detectedMimeType || detectedMimeType !== image.mimeType) {
+      throw new Error(`Staged image MIME metadata does not match image content: ${image.mimeType} / ${detectedMimeType || 'unknown'}`)
+    }
+    return {
+      block: {
+        type: 'image_url',
+        image_url: { url: `data:${image.mimeType};base64,${image.data.toString('base64')}` },
+      },
+      byteLength: image.data.length,
     }
   }
 
   if (params.image_url) {
+    const capabilities = resolveModelCapabilities(config.model, config.baseUrl)
+    if (capabilities.supportsPublicImageUrl === false) {
+      throw new Error(`The configured vision model "${config.model}" does not accept public image URLs; use image_base64 or image_ref instead`)
+    }
     return {
-      type: 'image_url',
-      image_url: { url: normalizeImageUrl(params.image_url) },
+      block: {
+        type: 'image_url',
+        image_url: { url: normalizeImageUrl(params.image_url) },
+      },
+      // Public URLs are fetched by the provider rather than buffered locally.
+      byteLength: 0,
     }
   }
 
   const image = normalizeBase64Image(params.image_base64, params.image_mime_type, config)
   return {
-    type: 'image_url',
-    image_url: { url: `data:${image.mimeType};base64,${image.base64}` },
+    block: {
+      type: 'image_url',
+      image_url: { url: `data:${image.mimeType};base64,${image.base64}` },
+    },
+    byteLength: image.byteLength,
   }
 }
 
@@ -990,7 +1893,7 @@ function normalizeImageInputs(params, config) {
     if (params.image_mime_type) {
       throw new Error('image_mime_type can only be used with image_base64')
     }
-    throw new Error('Provide one of image_path, image_url, image_base64, or images[]')
+    throw new Error('Provide one of image_path, image_url, image_base64, image_ref, or images[]')
   }
 
   const images = hasImagesArray ? params.images : [params]
@@ -1002,6 +1905,21 @@ function normalizeImageInputs(params, config) {
     label: `Image ${index + 1}`,
     input: image,
   }))
+}
+
+function stripLeadingReasoningBlock(text) {
+  // Some OpenAI-compatible reasoning gateways prepend one or more closed
+  // <think> blocks to the visible answer. Strip only that leading form, and
+  // only when substantive text follows it. A global regex would corrupt OCR
+  // or transcription results that legitimately contain literal <think> tags.
+  let remaining = text
+  for (;;) {
+    const match = remaining.match(/^\s*<think>[\s\S]*?<\/think>\s*/i)
+    if (!match) return remaining
+    const candidate = remaining.slice(match[0].length)
+    if (!candidate.trim()) return remaining
+    remaining = candidate
+  }
 }
 
 function extractTextContent(data) {
@@ -1016,9 +1934,7 @@ function extractTextContent(data) {
       .join('\n')
   }
   
-  // Strip any <think>...</think> reasoning blocks (including unclosed trailing think blocks)
-  // to keep tool output clean and save host agent context input tokens.
-  return text.replace(/<think>[\s\S]*?(?:<\/think>|$)\n?/gi, '')
+  return stripLeadingReasoningBlock(text).trim()
 }
 
 function extractUpstreamErrorMessage(bodyText) {
@@ -1104,12 +2020,20 @@ async function fetchVisionCompletion(requestBody, config) {
         body: JSON.stringify(requestBody),
         signal: controller.signal,
       })
-      const bodyText = await response.text()
-      result = { ok: response.ok, status: response.status, bodyText }
+      const bodyText = await readResponseText(response)
+      result = {
+        ok: response.ok,
+        status: response.status,
+        bodyText,
+        retryAfterMs: parseRetryAfterMs(response.headers.get('retry-after')),
+      }
     } catch (error) {
       if (error?.name === 'AbortError') {
         throw new Error(`Vision model request timed out after ${Math.round(config.requestTimeoutMs / 1000)}s`)
       }
+      // Retrying an already oversized response only repeats the same memory and
+      // bandwidth pressure. Surface this deterministic safety failure directly.
+      if (error?.code === 'VISION_RESPONSE_TOO_LARGE') throw error
       if (attempt < config.maxRetries) {
         const wait = retryDelayMs(attempt)
         debugLog(config, `request error: ${error?.message ?? error}; retry ${attempt + 1}/${config.maxRetries} in ${wait}ms`)
@@ -1125,7 +2049,7 @@ async function fetchVisionCompletion(requestBody, config) {
       return result.bodyText
     }
     if (VISION_RETRYABLE_STATUS.has(result.status) && attempt < config.maxRetries) {
-      const wait = retryDelayMs(attempt)
+      const wait = retryDelayMs(attempt, result.retryAfterMs)
       debugLog(config, `upstream ${result.status}; retry ${attempt + 1}/${config.maxRetries} in ${wait}ms`)
       await delay(wait)
       continue
@@ -1153,7 +2077,8 @@ function computeCacheKey(requestBody, config) {
   hash.update(`base_url=${config.baseUrl}\n`)
   hash.update(`api_key=${config.apiKey}\n`)
   hash.update(`model=${requestBody.model}\n`)
-  hash.update(`max_tokens=${requestBody.max_tokens}\n`)
+  hash.update(`max_tokens=${requestBody.max_tokens ?? ''}\n`)
+  hash.update(`max_completion_tokens=${requestBody.max_completion_tokens ?? ''}\n`)
   // Hash every message (system + user), keyed by role, so a system message
   // change or a role swap can never collide with a different user payload.
   for (const message of requestBody.messages ?? []) {
@@ -1174,7 +2099,15 @@ function computeCacheKey(requestBody, config) {
   return hash.digest('hex')
 }
 
+function trimResultCache(maxEntries) {
+  while (resultCache.size > maxEntries) {
+    const oldestKey = resultCache.keys().next().value
+    resultCache.delete(oldestKey)
+  }
+}
+
 function readResultCache(key, config) {
+  trimResultCache(config.cache?.enabled ? (config.cache.maxEntries ?? 0) : 0)
   if (!config.cache?.enabled || !key) return undefined
   const entry = resultCache.get(key)
   if (!entry) return undefined
@@ -1191,12 +2124,14 @@ function readResultCache(key, config) {
 
 function writeResultCache(key, text, config) {
   if (!config.cache?.enabled || !key) return
+  const valueBytes = Buffer.byteLength(text, 'utf8')
+  if (valueBytes > MAX_CACHE_VALUE_BYTES) {
+    debugLog(config, `cache skip: result is ${valueBytes} bytes (max ${MAX_CACHE_VALUE_BYTES})`)
+    return
+  }
   resultCache.set(key, { text, expiresAt: Date.now() + config.cache.ttlMs })
   // Evict oldest entries once over capacity (Map preserves insertion order).
-  while (resultCache.size > config.cache.maxEntries) {
-    const oldestKey = resultCache.keys().next().value
-    resultCache.delete(oldestKey)
-  }
+  trimResultCache(config.cache.maxEntries)
 }
 
 // 防止 prompt injection：视觉模型观察到的内容（尤其是 OCR 出的文字）属于
@@ -1326,6 +2261,68 @@ function requestWithoutSystemRole(requestBody) {
   }
 }
 
+function isUnsupportedTokenParameterError(error, parameter) {
+  const message = error instanceof Error ? error.message : String(error)
+  if (!/Vision model API request failed \((?:400|422)\):/i.test(message)) return false
+  const parameterPattern = new RegExp(`\\b${parameter}\\b`, 'i')
+  const unsupportedPattern = /unsupported|not[ _-]*(?:supported|allowed|permitted)|unknown|unrecognized|unrecognised|unexpected|invalid[ _-]*(?:parameter|field|request[ _-]*argument)|use[\s\S]{0,80}instead/i
+  return parameterPattern.test(message) && unsupportedPattern.test(message)
+}
+
+function isUnsupportedMaxTokensError(error) {
+  return isUnsupportedTokenParameterError(error, 'max_tokens')
+}
+
+function requestWithMaxCompletionTokens(requestBody) {
+  if (requestBody.max_tokens === undefined) return null
+  const compatible = { ...requestBody, max_completion_tokens: requestBody.max_tokens }
+  delete compatible.max_tokens
+  return compatible
+}
+
+function isUnsupportedMaxCompletionTokensError(error) {
+  return isUnsupportedTokenParameterError(error, 'max_completion_tokens')
+}
+
+function requestWithMaxTokens(requestBody) {
+  if (requestBody.max_completion_tokens === undefined) return null
+  const compatible = { ...requestBody, max_tokens: requestBody.max_completion_tokens }
+  delete compatible.max_completion_tokens
+  return compatible
+}
+
+async function fetchVisionCompletionCompatible(requestBody, config) {
+  try {
+    return await fetchVisionCompletion(requestBody, config)
+  } catch (error) {
+    const compatible = requestBody.max_tokens !== undefined && isUnsupportedMaxTokensError(error)
+      ? requestWithMaxCompletionTokens(requestBody)
+      : requestBody.max_completion_tokens !== undefined && isUnsupportedMaxCompletionTokensError(error)
+        ? requestWithMaxTokens(requestBody)
+        : null
+    if (!compatible) throw error
+    const target = compatible.max_completion_tokens === undefined ? 'max_tokens' : 'max_completion_tokens'
+    debugLog(config, `provider rejected token parameter; retrying once with ${target}`)
+    return fetchVisionCompletion(compatible, config)
+  }
+}
+
+function buildProviderRequestBody(config, messages) {
+  const capabilities = resolveModelCapabilities(config.model, config.baseUrl)
+  let requestBody = { model: config.model, messages }
+  if (capabilities.tokenParameter === 'max_completion_tokens') {
+    requestBody.max_completion_tokens = config.maxTokens
+  } else {
+    // `auto` intentionally starts with the most broadly implemented OpenAI
+    // compatible field and relies on the narrow explicit-error fallback above.
+    requestBody.max_tokens = config.maxTokens
+  }
+  if (capabilities.supportsSystemRole === false) {
+    requestBody = requestWithoutSystemRole(requestBody) ?? requestBody
+  }
+  return { requestBody, capabilities }
+}
+
 async function describeImage(params, config) {
   validateDescribeImageParams(params)
   const images = normalizeImageInputs(params, config)
@@ -1343,19 +2340,26 @@ async function describeImage(params, config) {
       ? `${prompt}\n\nAnalyze the images in the order provided. Refer to them exactly as Image 1, Image 2, and so on. Return a JSON ARRAY (not a single object) with one entry per image, in the same order, each following the required shape.`
       : `${prompt}\n\nAnalyze the images in the order provided. Refer to them exactly as Image 1, Image 2, and so on. Return your answer in the same order, with a separate section for each image.`)
     : prompt
-  // Resolve every image source in parallel so multi-image calls overlap disk I/O.
-  const imageBlocks = await Promise.all(
-    images.map((image) => imageBlockFromInput(image.input, config)),
-  )
+  // Resolve byte-backed images one at a time and enforce a request-wide cap.
+  // Parallel reads would maximize disk overlap but can transiently allocate all
+  // configured images before the process has a chance to reject the total.
+  const imageBlocks = []
+  let totalImageBytes = 0
+  for (const image of images) {
+    const resolved = await imageBlockFromInput(image.input, config)
+    totalImageBytes += resolved.byteLength
+    if (totalImageBytes > config.maxTotalImageBytes) {
+      throw new Error(`Total local/Base64 image data is too large; max is ${Math.round(config.maxTotalImageBytes / 1024 / 1024)}MB`)
+    }
+    imageBlocks.push(resolved.block)
+  }
   const requestContent = images.flatMap((image, index) => [
     { type: 'text', text: `${image.label}:` },
     imageBlocks[index],
   ])
   requestContent.push({ type: 'text', text: orderedPrompt })
 
-  const requestBody = {
-    model: config.model,
-    messages: [
+  const { requestBody, capabilities } = buildProviderRequestBody(config, [
       {
         role: 'system',
         content: buildSystemMessage(structured),
@@ -1364,26 +2368,24 @@ async function describeImage(params, config) {
         role: 'user',
         content: requestContent,
       },
-    ],
-    max_tokens: config.maxTokens,
-  }
+    ])
 
   const cacheKey = computeCacheKey(requestBody, config)
   const cached = readResultCache(cacheKey, config)
   if (cached !== undefined) return cached
 
   const startedAt = Date.now()
-  debugLog(config, `requesting model=${config.model} images=${images.length} format=${structured ? 'structured' : 'text'}`)
+  debugLog(config, `requesting provider=${capabilities.provider} model=${config.model} images=${images.length} format=${structured ? 'structured' : 'text'}`)
   let bodyText
   try {
-    bodyText = await fetchVisionCompletion(requestBody, config)
+    bodyText = await fetchVisionCompletionCompatible(requestBody, config)
   } catch (error) {
     const compatibilityRequest = isUnsupportedSystemRoleError(error)
       ? requestWithoutSystemRole(requestBody)
       : null
     if (!compatibilityRequest) throw error
     debugLog(config, 'provider rejected system role; retrying once with safety instruction in user content')
-    bodyText = await fetchVisionCompletion(compatibilityRequest, config)
+    bodyText = await fetchVisionCompletionCompatible(compatibilityRequest, config)
   }
 
   let data
@@ -1409,24 +2411,58 @@ async function describeImage(params, config) {
   return result
 }
 
-async function testModelConnection(config) {
+const VISUAL_PROBE_IMAGE_BASE64 = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII='
+
+async function testModelConnection(config, { testVision = true } = {}) {
   if (!config.apiKey) {
     throw new Error('API key is not configured.')
   }
-  const requestBody = {
-    model: config.model,
-    messages: [
-      { role: 'user', content: 'hi' }
-    ],
-    // Reasoning models (e.g. MiniMax-M3) spend tokens on a hidden
-    // reasoning_content pass before emitting any visible content. A tiny fixed
-    // budget gets entirely consumed by reasoning, the response is truncated
-    // (finish_reason: "length") with an empty content, and a healthy endpoint
-    // is wrongly reported as "no text content". Reuse the configured maxTokens
-    // (default 2048) so reasoning has room to finish and produce a real reply.
-    max_tokens: config.maxTokens,
+  if (testVision) {
+    const { requestBody } = buildProviderRequestBody(config, [
+      { role: 'system', content: buildSystemMessage(false) },
+      {
+        role: 'user',
+        content: [
+          { type: 'text', text: 'Look at this 1x1 probe image and reply with one short word: OK.' },
+          { type: 'image_url', image_url: { url: `data:image/png;base64,${VISUAL_PROBE_IMAGE_BASE64}` } },
+        ],
+      },
+    ])
+    let bodyText
+    try {
+      bodyText = await fetchVisionCompletionCompatible(requestBody, config)
+    } catch (error) {
+      const compatibilityRequest = isUnsupportedSystemRoleError(error)
+        ? requestWithoutSystemRole(requestBody)
+        : null
+      if (!compatibilityRequest) throw error
+      bodyText = await fetchVisionCompletionCompatible(compatibilityRequest, config)
+    }
+    let data
+    try {
+      data = JSON.parse(bodyText)
+    } catch {
+      throw new Error('Model returned a non-JSON response')
+    }
+    if (data?.error?.message) {
+      throw new Error(`API error: ${data.error.message}`)
+    }
+    const content = extractTextContent(data)
+    if (content) return `Visual connection verified: ${content}`
+    const message = data?.choices?.[0]?.message
+    const hasReasoning = typeof message?.reasoning_content === 'string'
+      ? message.reasoning_content.trim() !== ''
+      : Array.isArray(message?.reasoning_details)
+        && message.reasoning_details.some((detail) => typeof detail?.text === 'string' && detail.text.trim())
+    if (hasReasoning) {
+      return '(visual connection verified; reasoning model produced no visible reply within the token budget)'
+    }
+    throw new Error('Model returned no text content for the visual probe')
   }
-  const bodyText = await fetchVisionCompletion(requestBody, config)
+  const { requestBody } = buildProviderRequestBody(config, [
+      { role: 'user', content: 'hi' }
+    ])
+  const bodyText = await fetchVisionCompletionCompatible(requestBody, config)
   let data
   try {
     data = JSON.parse(bodyText)
@@ -1462,63 +2498,158 @@ const HELP = `VisionPower — understand images with a vision model.
 Usage:
   node describe_image.mjs --image-path <absolute path> [--prompt <text>] [--output-format text|structured]
   node describe_image.mjs --image-url <https url> [--prompt <text>] [--output-format text|structured]
+  node describe_image.mjs --image-ref <vpimg_...> [--prompt <text>] [--output-format text|structured]
   node describe_image.mjs request.json
+  node describe_image.mjs --input request.json
   echo '<json request>' | node describe_image.mjs
 
-The request JSON supports image_path / image_url / image_base64 / images[] / prompt / output_format.
+The request JSON supports image_path / image_url / image_base64 / image_ref / images[] / prompt / output_format.
 Configure the API key in ~/.visionpower/config.json ({"apiKey":"...","model":"..."})
 or via the VISIONPOWER_API_KEY environment variable. See SKILL.md for first-time setup.`
+
+const MAX_SKILL_REQUEST_BYTES = 96 * 1024 * 1024
+const SKILL_VALUE_FLAGS = new Set([
+  'input', 'image-path', 'image-url', 'image-base64', 'image-ref',
+  'mime', 'prompt', 'output-format',
+])
+const SKILL_BOOLEAN_FLAGS = new Set(['help'])
 
 function parseSkillArgs(argv) {
   const flags = {}
   const positionals = []
   for (let i = 0; i < argv.length; i += 1) {
     const arg = argv[i]
-    if (!arg.startsWith('--')) { positionals.push(arg); continue }
-    const eq = arg.indexOf('=')
-    if (eq !== -1) { flags[arg.slice(2, eq)] = arg.slice(eq + 1); continue }
-    const key = arg.slice(2)
-    const next = argv[i + 1]
-    if (key === 'help' || next === undefined || next.startsWith('--')) {
-      flags[key] = true
-    } else {
-      flags[key] = next
-      i += 1
+    if (arg === '-h') {
+      if (flags.help !== undefined) throw new Error('Duplicate option: --help')
+      flags.help = true
+      continue
     }
+    if (arg === '--') {
+      positionals.push(...argv.slice(i + 1))
+      break
+    }
+    if (!arg.startsWith('--')) {
+      if (arg.startsWith('-')) throw new Error(`Unknown option: ${arg}`)
+      positionals.push(arg)
+      continue
+    }
+    const eq = arg.indexOf('=')
+    const key = arg.slice(2, eq === -1 ? undefined : eq)
+    if (!SKILL_VALUE_FLAGS.has(key) && !SKILL_BOOLEAN_FLAGS.has(key)) {
+      throw new Error(`Unknown option: --${key}`)
+    }
+    if (flags[key] !== undefined) throw new Error(`Duplicate option: --${key}`)
+    if (SKILL_BOOLEAN_FLAGS.has(key)) {
+      if (eq !== -1) throw new Error(`Option --${key} does not take a value`)
+      flags[key] = true
+      continue
+    }
+    if (eq !== -1) {
+      const value = arg.slice(eq + 1)
+      if (!value) throw new Error(`Option --${key} requires a value`)
+      flags[key] = value
+      continue
+    }
+    const next = argv[i + 1]
+    if (next === undefined || next.startsWith('--')) {
+      throw new Error(`Option --${key} requires a value`)
+    }
+    flags[key] = next
+    i += 1
   }
+  if (positionals.length > 1) throw new Error('Provide at most one request JSON file')
   return { flags, positionals }
 }
 
 async function readSkillStdin() {
   if (process.stdin.isTTY) return ''
   const chunks = []
-  for await (const chunk of process.stdin) chunks.push(chunk)
+  let totalBytes = 0
+  for await (const chunk of process.stdin) {
+    const data = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)
+    totalBytes += data.length
+    if (totalBytes > MAX_SKILL_REQUEST_BYTES) {
+      throw new Error('Request JSON exceeds the 96MB safety limit')
+    }
+    chunks.push(data)
+  }
   return Buffer.concat(chunks).toString('utf8')
+}
+
+async function readSkillRequestFile(filePath) {
+  // Open with O_NOFOLLOW on POSIX so a symlink swap cannot redirect the read,
+  // mirroring readImageViaFd's hardening. The file path comes from the agent
+  // (possibly via prompt injection), so reject symlinks rather than follow them.
+  const noFollow = process.platform !== 'win32' ? fsConstants.O_NOFOLLOW : 0
+  let handle
+  try {
+    handle = await open(filePath, fsConstants.O_RDONLY | noFollow)
+  } catch (error) {
+    if (error?.code === 'ELOOP') throw new Error('Request JSON path must be a regular file, not a symbolic link')
+    throw error
+  }
+  try {
+    const fileStat = await handle.stat()
+    if (!fileStat.isFile()) throw new Error('Request JSON path must be a regular file')
+    if (fileStat.size > MAX_SKILL_REQUEST_BYTES) {
+      throw new Error('Request JSON exceeds the 96MB safety limit')
+    }
+    const data = Buffer.allocUnsafe(fileStat.size)
+    let offset = 0
+    while (offset < data.length) {
+      const { bytesRead } = await handle.read(data, offset, data.length - offset, offset)
+      if (bytesRead === 0) break
+      offset += bytesRead
+    }
+    return data.subarray(0, offset).toString('utf8')
+  } finally {
+    await handle.close()
+  }
+}
+
+// Parse the request JSON without letting V8 echo file content back through the
+// error message: a malformed or hijacked request file (e.g. an attacker tricks
+// the agent into running `describe_image.mjs ~/.ssh/id_rsa`) would otherwise
+// leak its leading bytes to stderr, where the agent can read and exfiltrate it.
+function parseSkillRequestJson(raw) {
+  try {
+    return JSON.parse(raw)
+  } catch {
+    throw new Error('Request is not valid JSON')
+  }
 }
 
 async function resolveSkillRequest(argv) {
   const { flags, positionals } = parseSkillArgs(argv)
   if (flags.help) return { help: true }
 
+  if (flags.input && positionals.length) {
+    throw new Error('Provide the request JSON file either positionally or with --input, not both')
+  }
   const fileArg = flags.input || positionals[0]
   if (fileArg) {
-    return { request: JSON.parse(await readFile(fileArg, 'utf8')) }
+    const inlineFlags = [...SKILL_VALUE_FLAGS].filter((key) => key !== 'input' && flags[key] !== undefined)
+    if (inlineFlags.length) {
+      throw new Error('Do not combine a request JSON file with inline image, prompt, MIME, or output options')
+    }
+    return { request: parseSkillRequestJson(await readSkillRequestFile(fileArg)) }
   }
 
   const request = {}
   if (flags['image-path']) request.image_path = flags['image-path']
   if (flags['image-url']) request.image_url = flags['image-url']
   if (flags['image-base64']) request.image_base64 = flags['image-base64']
+  if (flags['image-ref']) request.image_ref = flags['image-ref']
   if (flags.mime) request.image_mime_type = flags.mime
   if (flags.prompt) request.prompt = flags.prompt
   if (flags['output-format']) request.output_format = flags['output-format']
 
-  if (request.image_path || request.image_url || request.image_base64) {
+  if (request.image_path || request.image_url || request.image_base64 || request.image_ref) {
     return { request }
   }
 
   const raw = (await readSkillStdin()).trim()
-  if (raw) return { request: JSON.parse(raw) }
+  if (raw) return { request: parseSkillRequestJson(raw) }
   return { request }
 }
 

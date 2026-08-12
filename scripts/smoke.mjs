@@ -5,6 +5,7 @@ import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { Client } from '@modelcontextprotocol/sdk/client/index.js'
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js'
+import { stageImageBuffer } from '../src/image-inbox.js'
 
 const transport = new StdioClientTransport({
   command: process.execPath,
@@ -28,6 +29,13 @@ try {
   const names = tools.tools.map((tool) => tool.name)
   if (!names.includes('describe_image')) {
     throw new Error(`describe_image tool missing; got ${names.join(', ')}`)
+  }
+  const describeTool = tools.tools.find((tool) => tool.name === 'describe_image')
+  if (describeTool?.annotations?.openWorldHint !== true
+    || describeTool?.annotations?.readOnlyHint === true
+    || describeTool?.annotations?.destructiveHint === false
+    || describeTool?.annotations?.idempotentHint === true) {
+    throw new Error(`describe_image annotations make an unsafe behavior claim: ${JSON.stringify(describeTool?.annotations)}`)
   }
 
   const result = await client.callTool({
@@ -72,20 +80,76 @@ const tempDir = mkdtempSync(join(tmpdir(), 'visionpower-smoke-'))
 try {
   const mockFetchPath = join(tempDir, 'mock-fetch.mjs')
   const statePath = join(tempDir, 'skill-state.json')
+  const inboxDir = join(tempDir, 'inbox')
+  const stagedImage = await stageImageBuffer(
+    Buffer.from('GIF89a', 'ascii'),
+    'image/gif',
+    {
+      maxImageBytes: 20 * 1024 * 1024,
+      inbox: { dir: inboxDir, ttlMs: 30 * 60 * 1000, maxEntries: 4 },
+    },
+  )
   writeFileSync(mockFetchPath, `
-globalThis.fetch = async () => new Response(
-  JSON.stringify({ choices: [{ message: { content: 'mocked skill ok' } }] }),
-  { status: 200, headers: { 'content-type': 'application/json' } },
-)
+globalThis.fetch = async (_url, options) => {
+  const body = JSON.parse(options.body)
+  const structured = body.messages?.[0]?.role === 'system'
+    && /Return ONLY JSON/i.test(body.messages[0].content)
+  const content = structured
+    ? '{"answer":"structured MCP ok","observations":["mocked"]}'
+    : 'mocked skill ok'
+  return new Response(
+    JSON.stringify({ choices: [{ message: { content } }] }),
+    { status: 200, headers: { 'content-type': 'application/json' } },
+  )
+}
 `)
+
+  // Structured mode remains backward-compatible text while exposing native
+  // structuredContent for MCP clients that can consume it directly.
+  const structuredTransport = new StdioClientTransport({
+    command: process.execPath,
+    args: ['--import', pathToFileURL(mockFetchPath).href, 'src/index.js'],
+    env: {
+      ...process.env,
+      VISIONPOWER_API_KEY: 'test-key',
+      VISIONPOWER_MODEL: 'test-model',
+      VISIONPOWER_BASE_URL: 'https://api.example.com/v1',
+      VISIONPOWER_CONFIG: join(tempDir, 'absent-mcp-config.json'),
+      VISIONPOWER_INBOX_DIR: inboxDir,
+    },
+  })
+  const structuredClient = new Client({
+    name: 'visionpower-structured-smoke-test',
+    version: '2.5.0',
+  })
+  try {
+    await structuredClient.connect(structuredTransport)
+    const structuredResult = await structuredClient.callTool({
+      name: 'describe_image',
+      arguments: {
+        image_ref: stagedImage.id,
+        output_format: 'structured',
+      },
+    })
+    if (structuredResult.isError || structuredResult.structuredContent?.answer !== 'structured MCP ok') {
+      throw new Error(`Expected native structuredContent; got ${JSON.stringify(structuredResult)}`)
+    }
+    const textEnvelope = JSON.parse(structuredResult.content?.[0]?.text || '{}')
+    if (textEnvelope.answer !== 'structured MCP ok') {
+      throw new Error(`Expected backward-compatible JSON text; got ${JSON.stringify(textEnvelope)}`)
+    }
+    console.log('Smoke test passed: structured MCP output includes structuredContent.')
+  } finally {
+    await structuredClient.close()
+  }
 
   const skillSuccess = await new Promise((resolve, reject) => {
     const child = spawn(process.execPath, [
       '--import',
       pathToFileURL(mockFetchPath).href,
       'VisionPower-Skill/describe_image.mjs',
-      '--image-base64',
-      Buffer.from('GIF89a', 'ascii').toString('base64'),
+      '--image-ref',
+      stagedImage.id,
     ], {
       env: {
         ...process.env,
@@ -94,6 +158,7 @@ globalThis.fetch = async () => new Response(
         VISIONPOWER_BASE_URL: 'https://api.example.com/v1',
         VISIONPOWER_CONFIG: join(tempDir, 'absent-config.json'),
         VISIONPOWER_SKILL_STATE: statePath,
+        VISIONPOWER_INBOX_DIR: inboxDir,
       },
       stdio: ['ignore', 'pipe', 'pipe'],
     })

@@ -1,14 +1,60 @@
 import { realpathSync, constants as fsConstants } from 'node:fs'
 import { lstat, open, realpath } from 'node:fs/promises'
 import { createHash } from 'node:crypto'
-import { isIP } from 'node:net'
+import { BlockList, isIP } from 'node:net'
 import { extname, isAbsolute, resolve, sep } from 'node:path'
+import { resolveModelCapabilities } from './config.js'
+import { readStagedImage } from './image-inbox.js'
 
 const VISION_RETRYABLE_STATUS = new Set([429, 500, 502, 503, 504])
 const MAX_PROMPT_CHARS = 20_000
+const MAX_RESPONSE_BODY_BYTES = 5 * 1024 * 1024
+const MAX_CACHE_VALUE_BYTES = 1024 * 1024
+const MAX_RETRY_AFTER_MS = 30 * 1000
+const BASE64_WRAP_LINE_CHARS = 64
+const BASE64_WRAP_LINE_BREAK_CHARS = 2
+const BASE64_EDGE_WHITESPACE_CHARS = 1024
+const HTTP_DATE_PATTERNS = [
+  // Preferred IMF-fixdate plus the two obsolete HTTP-date forms recipients
+  // historically accept. Requiring one of these avoids Date.parse's very
+  // permissive interpretation of unrelated strings such as "1.5".
+  /^(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun), \d{2} (?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec) \d{4} \d{2}:\d{2}:\d{2} GMT$/,
+  /^(?:Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday), \d{2}-(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)-\d{2} \d{2}:\d{2}:\d{2} GMT$/,
+  /^(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun) (?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec) {1,2}\d{1,2} \d{2}:\d{2}:\d{2} \d{4}$/,
+]
 const SUPPORTED_IMAGE_MIME_TYPES = new Set([
   'image/jpeg', 'image/png', 'image/webp', 'image/gif', 'image/bmp', 'image/tiff',
 ])
+const IMAGE_SOURCE_KEYS = new Set([
+  'image_path', 'image_url', 'image_base64', 'image_ref', 'image_mime_type',
+])
+const REQUEST_KEYS = new Set([
+  ...IMAGE_SOURCE_KEYS, 'images', 'prompt', 'output_format',
+])
+const NON_PUBLIC_IPV6_ADDRESSES = new BlockList()
+for (const [network, prefix] of [
+  // `::/96` includes the deprecated IPv4-compatible form. Without this wider
+  // block, `::7f00:1` (the hexadecimal form of 127.0.0.1) bypasses the mapped-
+  // IPv4 branch below and can be forwarded as a supposedly public URL.
+  ['::', 96], // IPv4-compatible, unspecified, and loopback
+  ['100::', 64], // discard-only
+  ['64:ff9b::', 96], // well-known NAT64 (encodes an IPv4 in the low 32 bits)
+  ['64:ff9b:1::', 48], // local-use NAT64
+  ['2001::', 32], // Teredo (client IPv4 encoded in the suffix)
+  ['2001:2::', 48], // benchmarking
+  ['2001:10::', 28], // deprecated ORCHID
+  ['2001:20::', 28], // ORCHIDv2
+  ['2001:db8::', 32], // documentation
+  ['2002::', 16], // 6to4 (encodes an IPv4 in bits 16-47)
+  ['3fff::', 20], // documentation
+  ['5f00::', 16], // segment-routing local identifiers
+  ['fc00::', 7], // unique local
+  ['fe80::', 10], // link local
+  ['fec0::', 10], // deprecated site local
+  ['ff00::', 8], // multicast
+]) {
+  NON_PUBLIC_IPV6_ADDRESSES.addSubnet(network, prefix, 'ipv6')
+}
 
 function debugLog(config, message) {
   if (config.debug) {
@@ -20,9 +66,67 @@ function delay(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms))
 }
 
-function retryDelayMs(attempt) {
+function retryDelayMs(attempt, retryAfterMs) {
+  if (retryAfterMs !== undefined) {
+    return Math.min(retryAfterMs + Math.floor(Math.random() * 250), MAX_RETRY_AFTER_MS)
+  }
   const base = Math.min(500 * 2 ** attempt, 4_000)
   return base + Math.floor(Math.random() * 250)
+}
+
+export function parseRetryAfterMs(value, now = Date.now()) {
+  if (!value) return undefined
+  const trimmed = value.trim()
+  if (/^\d+$/.test(trimmed)) {
+    // Retry-After delta-seconds may be much larger than JavaScript's safe
+    // integer range. It is still a syntactically valid value, and our policy is
+    // to cap it rather than silently ignore it and fall back to a short retry.
+    const seconds = Number(trimmed)
+    if (seconds >= MAX_RETRY_AFTER_MS / 1000) return MAX_RETRY_AFTER_MS
+    return seconds * 1000
+  }
+  const datePatternIndex = HTTP_DATE_PATTERNS.findIndex((pattern) => pattern.test(trimmed))
+  if (datePatternIndex === -1) return undefined
+  // ANSI C's asctime form carries no explicit zone, but HTTP defines every
+  // HTTP-date as UTC. Date.parse otherwise treats that form as local time.
+  const timestamp = Date.parse(datePatternIndex === 2 ? `${trimmed} GMT` : trimmed)
+  if (!Number.isFinite(timestamp)) return undefined
+  return Math.min(Math.max(timestamp - now, 0), MAX_RETRY_AFTER_MS)
+}
+
+async function readResponseText(response) {
+  const declaredLength = response.headers.get('content-length')
+  if (declaredLength && /^\d+$/.test(declaredLength)
+    && Number(declaredLength) > MAX_RESPONSE_BODY_BYTES) {
+    await response.body?.cancel().catch(() => {})
+    const error = new Error('Vision model response body is too large; max is 5MB')
+    error.code = 'VISION_RESPONSE_TOO_LARGE'
+    throw error
+  }
+
+  if (!response.body) return ''
+
+  const reader = response.body.getReader()
+  const chunks = []
+  let totalBytes = 0
+  try {
+    for (;;) {
+      const { done, value } = await reader.read()
+      if (done) break
+      totalBytes += value.byteLength
+      if (totalBytes > MAX_RESPONSE_BODY_BYTES) {
+        await reader.cancel().catch(() => {})
+        const error = new Error('Vision model response body is too large; max is 5MB')
+        error.code = 'VISION_RESPONSE_TOO_LARGE'
+        throw error
+      }
+      chunks.push(Buffer.from(value))
+    }
+  } finally {
+    reader.releaseLock()
+  }
+
+  return Buffer.concat(chunks, totalBytes).toString('utf8')
 }
 
 const MIME_BY_EXT = {
@@ -233,6 +337,7 @@ export async function readLocalImageAsBase64(imagePath, config) {
   return {
     base64: data.toString('base64'),
     mimeType: inferImageMimeTypeFromFile(realImagePath, data),
+    byteLength: data.length,
   }
 }
 
@@ -265,7 +370,10 @@ function ipv4FromMappedIpv6(ipAddress) {
 }
 
 function isPrivateHostname(hostname) {
-  const normalized = hostname.toLowerCase().replace(/^\[|\]$/g, '')
+  // A fully-qualified hostname may end in a root-label dot. Remove it before
+  // checking special-use names so `localhost.` cannot bypass the loopback
+  // guard while still preserving the URL that is eventually forwarded.
+  const normalized = hostname.toLowerCase().replace(/^\[|\]$/g, '').replace(/\.+$/, '')
   if (normalized === 'localhost' || normalized.endsWith('.localhost')) return true
 
   const ipVersion = isIP(normalized)
@@ -278,14 +386,7 @@ function isPrivateHostname(hostname) {
       return isPrivateIpv4Address(mappedIpv4)
     }
 
-    return normalized === '::'
-      || normalized === '::1'
-      || normalized.startsWith('fc')
-      || normalized.startsWith('fd')
-      || normalized.startsWith('fe8')
-      || normalized.startsWith('fe9')
-      || normalized.startsWith('fea')
-      || normalized.startsWith('feb')
+    return NON_PUBLIC_IPV6_ADDRESSES.check(normalized, 'ipv6')
   }
 
   return false
@@ -312,7 +413,36 @@ function normalizeImageUrl(imageUrl) {
   return url.toString()
 }
 
-function normalizeBase64Image(imageBase64, imageMimeType, config) {
+function maxEncodedBase64Chars(maxDecodedBytes) {
+  return Math.ceil(maxDecodedBytes / 3) * 4
+}
+
+function maxRawBase64Chars(maxEncodedChars) {
+  // Accept conventional MIME-style 64-column Base64 with CRLF line endings,
+  // plus a bounded allowance for leading/trailing whitespace. Unbounded
+  // whitespace would let an input allocate a huge normalized copy before the
+  // decoded-byte limit had a chance to reject it.
+  return maxEncodedChars
+    + Math.ceil(maxEncodedChars / BASE64_WRAP_LINE_CHARS) * BASE64_WRAP_LINE_BREAK_CHARS
+    + BASE64_EDGE_WHITESPACE_CHARS
+}
+
+function base64TooLargeError(config) {
+  return new Error(`image_base64 is too large; max is ${Math.round(config.maxImageBytes / 1024 / 1024)}MB`)
+}
+
+export function normalizeBase64Image(imageBase64, imageMimeType, config) {
+  if (typeof imageBase64 !== 'string') {
+    throw new Error('image_base64 must be a string')
+  }
+  if (imageMimeType !== undefined
+    && (typeof imageMimeType !== 'string' || !SUPPORTED_IMAGE_MIME_TYPES.has(imageMimeType))) {
+    throw new Error('image_mime_type must be a supported image MIME type')
+  }
+  const maxEncodedChars = maxEncodedBase64Chars(config.maxImageBytes)
+  if (imageBase64.length > maxRawBase64Chars(maxEncodedChars)) {
+    throw base64TooLargeError(config)
+  }
   const trimmed = imageBase64.trim()
   if (trimmed.startsWith('data:')) {
     throw new Error('image_base64 must not include a data: URI prefix')
@@ -322,22 +452,27 @@ function normalizeBase64Image(imageBase64, imageMimeType, config) {
   if (!normalized) {
     throw new Error('image_base64 must not be empty')
   }
+  if (normalized.length > maxEncodedChars) {
+    throw base64TooLargeError(config)
+  }
   if (!/^[A-Za-z0-9+/]+={0,2}$/.test(normalized) || /=[^=]/.test(normalized) || normalized.length % 4 === 1) {
     throw new Error('image_base64 must be valid standard base64')
   }
 
   const padded = normalized.padEnd(normalized.length + (4 - normalized.length % 4) % 4, '=')
-  const data = Buffer.from(padded, 'base64')
-  const normalizedWithoutPadding = normalized.replace(/=+$/, '')
-  const reencodedWithoutPadding = data.toString('base64').replace(/=+$/, '')
-  if (reencodedWithoutPadding !== normalizedWithoutPadding) {
+  // Every complete quartet is representable. Non-canonical pad bits can only
+  // occur in the final quartet, so validate that small suffix instead of
+  // re-encoding a potentially hundreds-of-megabytes image just for checking.
+  const finalQuartet = padded.slice(-4)
+  if (Buffer.from(finalQuartet, 'base64').toString('base64') !== finalQuartet) {
     throw new Error('image_base64 must be valid standard base64')
   }
+  const data = Buffer.from(padded, 'base64')
   if (data.length <= 0) {
     throw new Error('image_base64 decoded to an empty image')
   }
   if (data.length > config.maxImageBytes) {
-    throw new Error(`image_base64 is too large; max is ${Math.round(config.maxImageBytes / 1024 / 1024)}MB`)
+    throw base64TooLargeError(config)
   }
 
   const detectedMimeType = detectImageMimeType(data)
@@ -349,20 +484,28 @@ function normalizeBase64Image(imageBase64, imageMimeType, config) {
   }
 
   return {
-    base64: data.toString('base64'),
+    data,
+    // `padded` is already canonical after the final-quartet check above, so
+    // reuse it for the provider data URL and avoid another full-size copy.
+    base64: padded,
     mimeType: detectedMimeType,
+    byteLength: data.length,
   }
 }
 
 function countImageSources(params) {
-  return ['image_path', 'image_url', 'image_base64'].filter((key) => Boolean(params[key])).length
+  return ['image_path', 'image_url', 'image_base64', 'image_ref'].filter((key) => Boolean(params[key])).length
 }
 
-function validateImageSourceFields(input, label) {
+function validateImageSourceFields(input, label, allowedKeys = IMAGE_SOURCE_KEYS) {
   if (input === null || typeof input !== 'object' || Array.isArray(input)) {
     throw new Error(`${label} must be a JSON object`)
   }
-  for (const key of ['image_path', 'image_url', 'image_base64']) {
+  const unknownKey = Object.keys(input).find((key) => !allowedKeys.has(key))
+  if (unknownKey) {
+    throw new Error(`${label} contains an unknown field: ${unknownKey}`)
+  }
+  for (const key of ['image_path', 'image_url', 'image_base64', 'image_ref']) {
     if (input[key] !== undefined && (typeof input[key] !== 'string' || !input[key].trim())) {
       throw new Error(`${label}.${key} must be a non-empty string`)
     }
@@ -374,7 +517,7 @@ function validateImageSourceFields(input, label) {
 }
 
 function validateDescribeImageParams(params) {
-  validateImageSourceFields(params, 'request')
+  validateImageSourceFields(params, 'request', REQUEST_KEYS)
 
   if (params.images !== undefined) {
     if (!Array.isArray(params.images) || params.images.length === 0) {
@@ -386,6 +529,9 @@ function validateDescribeImageParams(params) {
   if (params.prompt !== undefined) {
     if (typeof params.prompt !== 'string') {
       throw new Error('prompt must be a string')
+    }
+    if (!params.prompt.trim()) {
+      throw new Error('prompt must not be empty')
     }
     if (params.prompt.trim().length > MAX_PROMPT_CHARS) {
       throw new Error(`prompt must not exceed ${MAX_PROMPT_CHARS} characters`)
@@ -400,7 +546,7 @@ function validateDescribeImageParams(params) {
 function assertExactlyOneImageSource(params) {
   const sourceCount = countImageSources(params)
   if (sourceCount !== 1) {
-    throw new Error('Provide exactly one of image_path, image_url, or image_base64 for each image')
+    throw new Error('Provide exactly one of image_path, image_url, image_base64, or image_ref for each image')
   }
   if (params.image_mime_type && !params.image_base64) {
     throw new Error('image_mime_type can only be used with image_base64')
@@ -413,22 +559,51 @@ async function imageBlockFromInput(params, config) {
   if (params.image_path) {
     const image = await readLocalImageAsBase64(params.image_path, config)
     return {
-      type: 'image_url',
-      image_url: { url: `data:${image.mimeType};base64,${image.base64}` },
+      block: {
+        type: 'image_url',
+        image_url: { url: `data:${image.mimeType};base64,${image.base64}` },
+      },
+      byteLength: image.byteLength,
+    }
+  }
+
+  if (params.image_ref) {
+    const image = await readStagedImage(params.image_ref, config)
+    const detectedMimeType = detectImageMimeType(image.data)
+    if (!detectedMimeType || detectedMimeType !== image.mimeType) {
+      throw new Error(`Staged image MIME metadata does not match image content: ${image.mimeType} / ${detectedMimeType || 'unknown'}`)
+    }
+    return {
+      block: {
+        type: 'image_url',
+        image_url: { url: `data:${image.mimeType};base64,${image.data.toString('base64')}` },
+      },
+      byteLength: image.data.length,
     }
   }
 
   if (params.image_url) {
+    const capabilities = resolveModelCapabilities(config.model, config.baseUrl)
+    if (capabilities.supportsPublicImageUrl === false) {
+      throw new Error(`The configured vision model "${config.model}" does not accept public image URLs; use image_base64 or image_ref instead`)
+    }
     return {
-      type: 'image_url',
-      image_url: { url: normalizeImageUrl(params.image_url) },
+      block: {
+        type: 'image_url',
+        image_url: { url: normalizeImageUrl(params.image_url) },
+      },
+      // Public URLs are fetched by the provider rather than buffered locally.
+      byteLength: 0,
     }
   }
 
   const image = normalizeBase64Image(params.image_base64, params.image_mime_type, config)
   return {
-    type: 'image_url',
-    image_url: { url: `data:${image.mimeType};base64,${image.base64}` },
+    block: {
+      type: 'image_url',
+      image_url: { url: `data:${image.mimeType};base64,${image.base64}` },
+    },
+    byteLength: image.byteLength,
   }
 }
 
@@ -444,7 +619,7 @@ function normalizeImageInputs(params, config) {
     if (params.image_mime_type) {
       throw new Error('image_mime_type can only be used with image_base64')
     }
-    throw new Error('Provide one of image_path, image_url, image_base64, or images[]')
+    throw new Error('Provide one of image_path, image_url, image_base64, image_ref, or images[]')
   }
 
   const images = hasImagesArray ? params.images : [params]
@@ -456,6 +631,21 @@ function normalizeImageInputs(params, config) {
     label: `Image ${index + 1}`,
     input: image,
   }))
+}
+
+function stripLeadingReasoningBlock(text) {
+  // Some OpenAI-compatible reasoning gateways prepend one or more closed
+  // <think> blocks to the visible answer. Strip only that leading form, and
+  // only when substantive text follows it. A global regex would corrupt OCR
+  // or transcription results that legitimately contain literal <think> tags.
+  let remaining = text
+  for (;;) {
+    const match = remaining.match(/^\s*<think>[\s\S]*?<\/think>\s*/i)
+    if (!match) return remaining
+    const candidate = remaining.slice(match[0].length)
+    if (!candidate.trim()) return remaining
+    remaining = candidate
+  }
 }
 
 function extractTextContent(data) {
@@ -470,9 +660,7 @@ function extractTextContent(data) {
       .join('\n')
   }
   
-  // Strip any <think>...</think> reasoning blocks (including unclosed trailing think blocks)
-  // to keep tool output clean and save host agent context input tokens.
-  return text.replace(/<think>[\s\S]*?(?:<\/think>|$)\n?/gi, '')
+  return stripLeadingReasoningBlock(text).trim()
 }
 
 function extractUpstreamErrorMessage(bodyText) {
@@ -558,12 +746,20 @@ async function fetchVisionCompletion(requestBody, config) {
         body: JSON.stringify(requestBody),
         signal: controller.signal,
       })
-      const bodyText = await response.text()
-      result = { ok: response.ok, status: response.status, bodyText }
+      const bodyText = await readResponseText(response)
+      result = {
+        ok: response.ok,
+        status: response.status,
+        bodyText,
+        retryAfterMs: parseRetryAfterMs(response.headers.get('retry-after')),
+      }
     } catch (error) {
       if (error?.name === 'AbortError') {
         throw new Error(`Vision model request timed out after ${Math.round(config.requestTimeoutMs / 1000)}s`)
       }
+      // Retrying an already oversized response only repeats the same memory and
+      // bandwidth pressure. Surface this deterministic safety failure directly.
+      if (error?.code === 'VISION_RESPONSE_TOO_LARGE') throw error
       if (attempt < config.maxRetries) {
         const wait = retryDelayMs(attempt)
         debugLog(config, `request error: ${error?.message ?? error}; retry ${attempt + 1}/${config.maxRetries} in ${wait}ms`)
@@ -579,7 +775,7 @@ async function fetchVisionCompletion(requestBody, config) {
       return result.bodyText
     }
     if (VISION_RETRYABLE_STATUS.has(result.status) && attempt < config.maxRetries) {
-      const wait = retryDelayMs(attempt)
+      const wait = retryDelayMs(attempt, result.retryAfterMs)
       debugLog(config, `upstream ${result.status}; retry ${attempt + 1}/${config.maxRetries} in ${wait}ms`)
       await delay(wait)
       continue
@@ -607,7 +803,8 @@ function computeCacheKey(requestBody, config) {
   hash.update(`base_url=${config.baseUrl}\n`)
   hash.update(`api_key=${config.apiKey}\n`)
   hash.update(`model=${requestBody.model}\n`)
-  hash.update(`max_tokens=${requestBody.max_tokens}\n`)
+  hash.update(`max_tokens=${requestBody.max_tokens ?? ''}\n`)
+  hash.update(`max_completion_tokens=${requestBody.max_completion_tokens ?? ''}\n`)
   // Hash every message (system + user), keyed by role, so a system message
   // change or a role swap can never collide with a different user payload.
   for (const message of requestBody.messages ?? []) {
@@ -628,7 +825,15 @@ function computeCacheKey(requestBody, config) {
   return hash.digest('hex')
 }
 
+function trimResultCache(maxEntries) {
+  while (resultCache.size > maxEntries) {
+    const oldestKey = resultCache.keys().next().value
+    resultCache.delete(oldestKey)
+  }
+}
+
 function readResultCache(key, config) {
+  trimResultCache(config.cache?.enabled ? (config.cache.maxEntries ?? 0) : 0)
   if (!config.cache?.enabled || !key) return undefined
   const entry = resultCache.get(key)
   if (!entry) return undefined
@@ -645,12 +850,14 @@ function readResultCache(key, config) {
 
 function writeResultCache(key, text, config) {
   if (!config.cache?.enabled || !key) return
+  const valueBytes = Buffer.byteLength(text, 'utf8')
+  if (valueBytes > MAX_CACHE_VALUE_BYTES) {
+    debugLog(config, `cache skip: result is ${valueBytes} bytes (max ${MAX_CACHE_VALUE_BYTES})`)
+    return
+  }
   resultCache.set(key, { text, expiresAt: Date.now() + config.cache.ttlMs })
   // Evict oldest entries once over capacity (Map preserves insertion order).
-  while (resultCache.size > config.cache.maxEntries) {
-    const oldestKey = resultCache.keys().next().value
-    resultCache.delete(oldestKey)
-  }
+  trimResultCache(config.cache.maxEntries)
 }
 
 // 防止 prompt injection：视觉模型观察到的内容（尤其是 OCR 出的文字）属于
@@ -780,6 +987,68 @@ function requestWithoutSystemRole(requestBody) {
   }
 }
 
+function isUnsupportedTokenParameterError(error, parameter) {
+  const message = error instanceof Error ? error.message : String(error)
+  if (!/Vision model API request failed \((?:400|422)\):/i.test(message)) return false
+  const parameterPattern = new RegExp(`\\b${parameter}\\b`, 'i')
+  const unsupportedPattern = /unsupported|not[ _-]*(?:supported|allowed|permitted)|unknown|unrecognized|unrecognised|unexpected|invalid[ _-]*(?:parameter|field|request[ _-]*argument)|use[\s\S]{0,80}instead/i
+  return parameterPattern.test(message) && unsupportedPattern.test(message)
+}
+
+function isUnsupportedMaxTokensError(error) {
+  return isUnsupportedTokenParameterError(error, 'max_tokens')
+}
+
+function requestWithMaxCompletionTokens(requestBody) {
+  if (requestBody.max_tokens === undefined) return null
+  const compatible = { ...requestBody, max_completion_tokens: requestBody.max_tokens }
+  delete compatible.max_tokens
+  return compatible
+}
+
+function isUnsupportedMaxCompletionTokensError(error) {
+  return isUnsupportedTokenParameterError(error, 'max_completion_tokens')
+}
+
+function requestWithMaxTokens(requestBody) {
+  if (requestBody.max_completion_tokens === undefined) return null
+  const compatible = { ...requestBody, max_tokens: requestBody.max_completion_tokens }
+  delete compatible.max_completion_tokens
+  return compatible
+}
+
+async function fetchVisionCompletionCompatible(requestBody, config) {
+  try {
+    return await fetchVisionCompletion(requestBody, config)
+  } catch (error) {
+    const compatible = requestBody.max_tokens !== undefined && isUnsupportedMaxTokensError(error)
+      ? requestWithMaxCompletionTokens(requestBody)
+      : requestBody.max_completion_tokens !== undefined && isUnsupportedMaxCompletionTokensError(error)
+        ? requestWithMaxTokens(requestBody)
+        : null
+    if (!compatible) throw error
+    const target = compatible.max_completion_tokens === undefined ? 'max_tokens' : 'max_completion_tokens'
+    debugLog(config, `provider rejected token parameter; retrying once with ${target}`)
+    return fetchVisionCompletion(compatible, config)
+  }
+}
+
+function buildProviderRequestBody(config, messages) {
+  const capabilities = resolveModelCapabilities(config.model, config.baseUrl)
+  let requestBody = { model: config.model, messages }
+  if (capabilities.tokenParameter === 'max_completion_tokens') {
+    requestBody.max_completion_tokens = config.maxTokens
+  } else {
+    // `auto` intentionally starts with the most broadly implemented OpenAI
+    // compatible field and relies on the narrow explicit-error fallback above.
+    requestBody.max_tokens = config.maxTokens
+  }
+  if (capabilities.supportsSystemRole === false) {
+    requestBody = requestWithoutSystemRole(requestBody) ?? requestBody
+  }
+  return { requestBody, capabilities }
+}
+
 export async function describeImage(params, config) {
   validateDescribeImageParams(params)
   const images = normalizeImageInputs(params, config)
@@ -797,19 +1066,26 @@ export async function describeImage(params, config) {
       ? `${prompt}\n\nAnalyze the images in the order provided. Refer to them exactly as Image 1, Image 2, and so on. Return a JSON ARRAY (not a single object) with one entry per image, in the same order, each following the required shape.`
       : `${prompt}\n\nAnalyze the images in the order provided. Refer to them exactly as Image 1, Image 2, and so on. Return your answer in the same order, with a separate section for each image.`)
     : prompt
-  // Resolve every image source in parallel so multi-image calls overlap disk I/O.
-  const imageBlocks = await Promise.all(
-    images.map((image) => imageBlockFromInput(image.input, config)),
-  )
+  // Resolve byte-backed images one at a time and enforce a request-wide cap.
+  // Parallel reads would maximize disk overlap but can transiently allocate all
+  // configured images before the process has a chance to reject the total.
+  const imageBlocks = []
+  let totalImageBytes = 0
+  for (const image of images) {
+    const resolved = await imageBlockFromInput(image.input, config)
+    totalImageBytes += resolved.byteLength
+    if (totalImageBytes > config.maxTotalImageBytes) {
+      throw new Error(`Total local/Base64 image data is too large; max is ${Math.round(config.maxTotalImageBytes / 1024 / 1024)}MB`)
+    }
+    imageBlocks.push(resolved.block)
+  }
   const requestContent = images.flatMap((image, index) => [
     { type: 'text', text: `${image.label}:` },
     imageBlocks[index],
   ])
   requestContent.push({ type: 'text', text: orderedPrompt })
 
-  const requestBody = {
-    model: config.model,
-    messages: [
+  const { requestBody, capabilities } = buildProviderRequestBody(config, [
       {
         role: 'system',
         content: buildSystemMessage(structured),
@@ -818,26 +1094,24 @@ export async function describeImage(params, config) {
         role: 'user',
         content: requestContent,
       },
-    ],
-    max_tokens: config.maxTokens,
-  }
+    ])
 
   const cacheKey = computeCacheKey(requestBody, config)
   const cached = readResultCache(cacheKey, config)
   if (cached !== undefined) return cached
 
   const startedAt = Date.now()
-  debugLog(config, `requesting model=${config.model} images=${images.length} format=${structured ? 'structured' : 'text'}`)
+  debugLog(config, `requesting provider=${capabilities.provider} model=${config.model} images=${images.length} format=${structured ? 'structured' : 'text'}`)
   let bodyText
   try {
-    bodyText = await fetchVisionCompletion(requestBody, config)
+    bodyText = await fetchVisionCompletionCompatible(requestBody, config)
   } catch (error) {
     const compatibilityRequest = isUnsupportedSystemRoleError(error)
       ? requestWithoutSystemRole(requestBody)
       : null
     if (!compatibilityRequest) throw error
     debugLog(config, 'provider rejected system role; retrying once with safety instruction in user content')
-    bodyText = await fetchVisionCompletion(compatibilityRequest, config)
+    bodyText = await fetchVisionCompletionCompatible(compatibilityRequest, config)
   }
 
   let data
@@ -863,24 +1137,58 @@ export async function describeImage(params, config) {
   return result
 }
 
-export async function testModelConnection(config) {
+const VISUAL_PROBE_IMAGE_BASE64 = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII='
+
+export async function testModelConnection(config, { testVision = true } = {}) {
   if (!config.apiKey) {
     throw new Error('API key is not configured.')
   }
-  const requestBody = {
-    model: config.model,
-    messages: [
-      { role: 'user', content: 'hi' }
-    ],
-    // Reasoning models (e.g. MiniMax-M3) spend tokens on a hidden
-    // reasoning_content pass before emitting any visible content. A tiny fixed
-    // budget gets entirely consumed by reasoning, the response is truncated
-    // (finish_reason: "length") with an empty content, and a healthy endpoint
-    // is wrongly reported as "no text content". Reuse the configured maxTokens
-    // (default 2048) so reasoning has room to finish and produce a real reply.
-    max_tokens: config.maxTokens,
+  if (testVision) {
+    const { requestBody } = buildProviderRequestBody(config, [
+      { role: 'system', content: buildSystemMessage(false) },
+      {
+        role: 'user',
+        content: [
+          { type: 'text', text: 'Look at this 1x1 probe image and reply with one short word: OK.' },
+          { type: 'image_url', image_url: { url: `data:image/png;base64,${VISUAL_PROBE_IMAGE_BASE64}` } },
+        ],
+      },
+    ])
+    let bodyText
+    try {
+      bodyText = await fetchVisionCompletionCompatible(requestBody, config)
+    } catch (error) {
+      const compatibilityRequest = isUnsupportedSystemRoleError(error)
+        ? requestWithoutSystemRole(requestBody)
+        : null
+      if (!compatibilityRequest) throw error
+      bodyText = await fetchVisionCompletionCompatible(compatibilityRequest, config)
+    }
+    let data
+    try {
+      data = JSON.parse(bodyText)
+    } catch {
+      throw new Error('Model returned a non-JSON response')
+    }
+    if (data?.error?.message) {
+      throw new Error(`API error: ${data.error.message}`)
+    }
+    const content = extractTextContent(data)
+    if (content) return `Visual connection verified: ${content}`
+    const message = data?.choices?.[0]?.message
+    const hasReasoning = typeof message?.reasoning_content === 'string'
+      ? message.reasoning_content.trim() !== ''
+      : Array.isArray(message?.reasoning_details)
+        && message.reasoning_details.some((detail) => typeof detail?.text === 'string' && detail.text.trim())
+    if (hasReasoning) {
+      return '(visual connection verified; reasoning model produced no visible reply within the token budget)'
+    }
+    throw new Error('Model returned no text content for the visual probe')
   }
-  const bodyText = await fetchVisionCompletion(requestBody, config)
+  const { requestBody } = buildProviderRequestBody(config, [
+      { role: 'user', content: 'hi' }
+    ])
+  const bodyText = await fetchVisionCompletionCompatible(requestBody, config)
   let data
   try {
     data = JSON.parse(bodyText)

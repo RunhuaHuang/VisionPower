@@ -6,3 +6,5 @@ pnpm-debug.log*
 yarn-debug.log*
 yarn-error.log*
 .playwright-mcp/
+output/
+软著申请材料/

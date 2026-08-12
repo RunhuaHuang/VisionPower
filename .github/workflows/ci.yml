@@ -1,5 +1,8 @@
 name: CI
 
+permissions:
+  contents: read
+
 # Runs the static gate, unit tests, and smoke test on every push and pull
 # request to main. This is the last line of defense against bugs that slip
 # past local checks — e.g. a used-but-unimported symbol (`homedir is not
@@ -12,22 +15,53 @@ on:
     branches: [main]
 
 jobs:
-  test:
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, windows-latest]
-    runs-on: ${{ matrix.os }}
+  skill-node18:
+    name: Standalone Skill (Node 18.14.1)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
     steps:
       - uses: actions/checkout@v5
 
       - uses: actions/setup-node@v5
         with:
-          node-version: '20'
+          node-version: '18.14.1'
+
+      - name: Verify standalone Skill syntax and request path
+        shell: bash
+        run: |
+          node VisionPower-Skill/describe_image.mjs --help >/dev/null
+          set +e
+          output="$(VISIONPOWER_CONFIG="$RUNNER_TEMP/visionpower-skill-node18.json" VISIONPOWER_API_KEY='' OPENAI_API_KEY='' node VisionPower-Skill/describe_image.mjs --image-base64 R0lGODlh 2>&1)"
+          status=$?
+          set -e
+          test "$status" -ne 0
+          printf '%s\n' "$output"
+          grep -Fq 'API key is not configured' <<< "$output"
+
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        node: ['20.19', '24']
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: ${{ matrix.node }}
           cache: 'npm'
 
       - name: Install dependencies
         run: npm ci
+
+      - name: Audit production dependencies
+        run: npm audit --omit=dev --audit-level=moderate
+
+      - name: Verify registry signatures
+        run: npm audit signatures
 
       - name: Lint (static check — catches undefined references)
         run: npm run lint
@@ -37,3 +71,6 @@ jobs:
 
       - name: Smoke test (MCP server + skill script end-to-end)
         run: npm run smoke
+
+      - name: Verify npm package can be assembled
+        run: npm pack --dry-run

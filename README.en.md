@@ -20,13 +20,15 @@ It is **not tied to any single model**: it defaults to Qwen-VL via Alibaba Cloud
 ## ✨ Features
 
 - 🧩 **One capability, two forms** — the same core works as the MCP tool `describe_image` or as a self-contained Skill (one zero-dependency script, download and run).
-- 🖼️ **Four input sources** — local `image_path`, public `image_url`, `image_base64`, and an ordered `images[]` array.
+- 🖼️ **Five input forms** — local `image_path`, public `image_url`, `image_base64`, short-lived `image_ref`, and an ordered `images[]` array; `image_url` support depends on the provider/model, and Kimi vision models require Base64 or `image_ref`.
+- 📥 **Secure Image Inbox** — the WebUI can stage a browser-uploaded image in an owner-only local directory and return a random `image_ref`; it expires after 30 minutes by default and bridges hosts that block attachments before the agent sees them.
 - 🎨 **Six image formats** — JPEG / PNG / WEBP / GIF / BMP / TIFF, forwarded as raw bytes; gives an actionable "convert and retry" hint instead of an opaque error when a model rejects a format.
 - 🔢 **Ordered multi-image analysis** — auto-labels images as `Image 1 / Image 2 / …` and asks the model to answer in the same order.
+- 🧱 **Native structured results** — `structured` mode keeps backward-compatible JSON text and also returns MCP-native `structuredContent` to capable clients.
 - 🔌 **Model-agnostic** — any OpenAI-compatible vision provider; switch by changing two env vars.
 - 🔒 **Security first** — path allowlist, file magic-byte verification, private/SSRF guard, strict base64 and input schema validation. See [Security](#-security-by-design).
 - 🔁 **Resilient** — automatic retries on upstream throttling / 5xx / network blips (exponential backoff), with a timeout that also covers reading the response body so requests never hang.
-- 🪶 **Minimal dependencies** — only the official MCP SDK and zod at runtime; no native modules, no image libraries.
+- 🪶 **Minimal dependencies** — the MCP/WebUI's direct runtime dependencies are only the official MCP SDK, zod, and locally served Alpine.js; there are no native modules or image libraries. The standalone Skill remains dependency-free.
 - 🌐 **China-friendly** — built-in npmmirror and local-install paths for unreliable networks.
 
 ---
@@ -80,7 +82,7 @@ The two forms are **functionally equivalent** — they differ only in how the ag
 > **We strongly recommend running this server as an MCP server**. Compared to the Skill format, MCP is more standardized, stable, and loads flawlessly across all major agent hosts (like Claude Desktop, Cursor, and Cline). You can activate it with a single copy-paste using the configuration block below.
 
 ### Requirements
-- Node.js 18+
+- Node.js 20.19.0+ (MCP / WebUI; the standalone Skill still supports 18.14.1+)
 - An API Key for a vision-capable OpenAI-compatible model (e.g. Alibaba Cloud Model Studio, OpenAI API, etc.).
 
 ### Option 1: Configure via the WebUI Console
@@ -102,13 +104,13 @@ npx -y --package visionpower@latest visionpower --webui
 >
 > ![WebUI CONFIG console](docs/images/webui-config.png)
 >
-> **`CONFIG`** — Pick a model preset (18 built-in presets covering China and global endpoints: Qwen3-VL / MiniMax-M3 / GLM-4.6V / Kimi K2.7 Code / Doubao / Gemini / GPT-4o, or Custom), paste your API Key, and optionally tune advanced params (max image bytes, timeout, cache, debug mode). After picking a preset you can still edit the model name to use another model on the same provider. The status badge in the top-right reads `LIVE` once configured. Click **▸ COMMIT CONFIG** to save (or hit **⚡ TEST CONNECTION** first to verify the key).
+> **`CONFIG`** — Pick a model preset (20+ built-in presets covering China and global endpoints: Qwen3-VL / Qwen3.7 / MiniMax-M3 / GLM / Kimi K3 / Doubao / Gemini / GPT-5.6, or Custom), paste your API Key, and optionally tune advanced params (max image bytes, timeout, cache, debug mode). After picking a preset you can still edit the model name to use another model on the same provider. The status badge in the top-right reads `LIVE` once configured. Click **▸ COMMIT CONFIG** to save; **⚡ TEST VISION CONNECTION** sends a built-in 1×1 PNG probe to verify the credential, model, visual input path, and actual response chain.
 
 3. After saving, switch to **`PLAYGROUND`** to verify the model works right away — no need to wire up Claude/Cursor first:
 
 > ![WebUI PLAYGROUND](docs/images/webui-playground.png)
 >
-> Upload or drop an image (JPG/PNG/WEBP/GIF/BMP/TIFF), type a prompt, click **▸ ANALYZE IMAGE**, and the model's description appears on the right. Above is a real run on a Q3 revenue dashboard.
+> Upload or drop an image (JPG/PNG/WEBP/GIF/BMP/TIFF), type a prompt, click **▸ ANALYZE IMAGE**, and the model's description appears on the right. If a host blocks attachments before the agent sees them, click **STAGE TO INBOX**, copy the generated `image_ref`, and pass that reference to MCP/the Skill. The image stays only in a private local directory; expired entries are lazily cleaned when the Inbox is written or accessed, with no background timer.
 
 4. Finally, open **`PATCH BAY`** to generate the MCP config for each host client in one click:
 
@@ -174,7 +176,7 @@ Vision Model API Key: [Paste your API key here]
 Default Model: qwen3-vl-flash
 
 [Steps]
-1. Check the environment: run `node --version` and confirm the version is >= 18. If Node.js is not installed or the version is too old, tell me to install Node.js 18+ first (https://nodejs.org) and stop here until I confirm.
+1. Check the environment: run `node --version` and confirm the version is >= 20.19.0. If Node.js is not installed or the version is too old, tell me to install Node.js 20.19.0+ first (https://nodejs.org) and stop here until I confirm.
 
 2. Smoke test: run the following command to confirm npx can pull and execute VisionPower:
    npx -y --package visionpower@latest visionpower --version
@@ -199,7 +201,7 @@ Default Model: qwen3-vl-flash
 
 ## Use as a Skill
 
-The Skill form is a **self-contained, zero-install, zero-dependency** folder, [`VisionPower-Skill/`](./VisionPower-Skill): it holds `SKILL.md` and a script `describe_image.mjs` that runs with plain Node. **No CLI to install, no `npm install`** — download this one folder and it works; all it needs is Node 18+ and an API key. Ideal for agents **with code execution** such as Codex and Claude Code.
+The Skill form is a **self-contained, zero-install, zero-dependency** folder, [`VisionPower-Skill/`](./VisionPower-Skill): it holds `SKILL.md` and a script `describe_image.mjs` that runs with plain Node. **No CLI to install, no `npm install`** — download this one folder and it works; all it needs is Node 18.14.1+ and an API key. Ideal for agents **with code execution** such as Codex and Claude Code.
 
 > The folder is named `VisionPower-Skill` (easy to recognize on download), but the skill itself is named `visionpower` (see `name:` in `SKILL.md`). So install it to `~/.claude/skills/visionpower/` to keep the install directory name and the skill name aligned.
 
@@ -217,10 +219,10 @@ Please install the VisionPower Skill for me.
    mkdir -p ~/.claude/skills/visionpower
    cp VisionPower-Skill/SKILL.md VisionPower-Skill/describe_image.mjs ~/.claude/skills/visionpower/
 
-3. Confirm Node 18+ (node --version), then verify with
+3. Confirm Node 18.14.1+ (node --version), then verify with
    node ~/.claude/skills/visionpower/describe_image.mjs --help
 
-4. Then ask me which vision model to use (default qwen3-vl-flash; also qwen3-vl-plus or gpt-4o),
+4. Then ask me which vision model to use (default qwen3-vl-flash; also qwen3.7-flash, kimi-k3, or gpt-5.6),
    ask me for my API key, and save it to the persistent config file ~/.visionpower/config.json
    (mode 600), shaped {"apiKey":"...","model":"..."} (for OpenAI add "baseUrl":"https://api.openai.com/v1").
    Do not echo the full key back to me.
@@ -242,10 +244,10 @@ Please install the VisionPower Skill for me.
 
    Project-level: place them at `<your-project>/.claude/skills/visionpower/`. For other agents, drop them into their skills directory — even without an auto-loading mechanism you can simply tell the agent to "read this SKILL.md and run describe_image.mjs as described".
 
-2. Confirm Node 18+ and save the API key to a **persistent config file** (read automatically on every run — configure once, works forever):
+2. Confirm Node 18.14.1+ and save the API key to a **persistent config file** (read automatically on every run — configure once, works forever):
 
    ```bash
-   node --version            # needs v18+
+   node --version            # needs v18.14.1+
    mkdir -p ~/.visionpower
    cat > ~/.visionpower/config.json <<'JSON'
    { "apiKey": "your-api-key", "model": "qwen3-vl-flash" }
@@ -280,7 +282,7 @@ flowchart TB
     API --> CORE
 ```
 
-Both forms share the same core logic (`src/vision-core.js` + `src/config.js`): the MCP server imports it directly, while the Skill's `describe_image.mjs` is **auto-bundled** from the same core by `npm run build:skill` into a single zero-dependency script (a test verifies the two never drift). The core just does "validate + normalize + forward" — it never caches images and never fetches `image_url` itself (the upstream model does).
+Both forms share the same core logic (`src/vision-core.js` + `src/config.js` + `src/image-inbox.js`): the MCP server imports it directly, while the Skill's `describe_image.mjs` is **auto-bundled** from the same core by `npm run build:skill` into a single zero-dependency script (a test verifies the two never drift). Normal analysis never writes image bytes to disk and VisionPower never fetches `image_url` itself (the provider does). An image is persisted only when the user explicitly stages it in the WebUI Inbox; expired entries are lazily cleaned when the Inbox is written or accessed, with no background timer.
 
 ---
 
@@ -291,19 +293,22 @@ Both forms share the same core logic (`src/vision-core.js` + `src/config.js`): t
 | Parameter | Type | Description |
 | --- | --- | --- |
 | `image_path` | string | **Absolute path** to a local image file. |
-| `image_url` | string | **Publicly reachable** `http`/`https` image URL. |
+| `image_url` | string | **Publicly reachable** `http`/`https` image URL; support depends on the provider/model, and Kimi K2.6, K2.7 Code, and K3 reject public URLs. |
 | `image_base64` | string | Standard base64 **without** a `data:` prefix. |
+| `image_ref` | string | Short-lived opaque reference created by the WebUI Image Inbox (`vpimg_...`), for hosts that cannot pass an attachment through to the agent. |
 | `image_mime_type` | enum | `image/jpeg`, `image/png`, `image/webp`, `image/gif`, `image/bmp`, `image/tiff`; only with `image_base64`. Auto-detected from bytes if omitted. |
-| `images` | array | Ordered array of images, each item a combination of the four fields above. **Do not combine with the top-level single-image fields.** |
+| `images` | array | Ordered array of images; each item selects one of the four image sources above. **Do not combine with the top-level single-image fields.** |
 | `prompt` | string | A specific question or instruction; leave empty for a full description. |
 | `output_format` | enum | `text` (default) returns free-form text; `structured` returns a JSON envelope with a `formatValid` discriminator for programmatic consumption. |
 
-> Provide exactly one of `image_path` / `image_url` / `image_base64` (one per item for multi-image calls).
+> Provide exactly one of `image_path` / `image_url` / `image_base64` / `image_ref` (one per item for multi-image calls). `image_mime_type` is only valid with `image_base64`.
+
+> **Provider/model differences**: VisionPower rejects `image_url` before the network call when a known capability explicitly disallows it. Moonshot Kimi K2.6, K2.7 Code, and K3 accept Base64/data URLs or `image_ref`; follow the selected provider's documentation for other compatible endpoints.
 
 > **Image format support is model-dependent**: VisionPower verifies the real format of local/Base64 images and forwards the original bytes **without transcoding**. For example, Qwen3-VL can receive TIFF directly, while a model that rejects TIFF/BMP produces an actionable error suggesting another vision model or an external PNG/JPEG conversion. Multi-page TIFF handling is also provider-dependent; when every page must be analyzed, export the pages as separate images and submit them with `images[]`.
 
 <details open>
-<summary><b>Examples: local / URL / Base64 / multiple</b></summary>
+<summary><b>Examples: local / URL / Base64 / Inbox reference / multiple</b></summary>
 
 ```json
 { "image_path": "/absolute/path/to/image.png", "prompt": "Read the text in this screenshot and summarize it." }
@@ -315,6 +320,10 @@ Both forms share the same core logic (`src/vision-core.js` + `src/config.js`): t
 
 ```json
 { "image_base64": "...", "image_mime_type": "image/png", "prompt": "Extract all visible text." }
+```
+
+```json
+{ "image_ref": "vpimg_0123456789abcdefghijklmnopqrstuv", "prompt": "Read the staged image." }
 ```
 
 ```json
@@ -331,7 +340,7 @@ For multi-image calls, VisionPower labels images as `Image 1`, `Image 2`, … an
 
 </details>
 
-**Output contract**: In `text` mode, VisionPower prefixes the answer with an **[VisionPower] untrusted-source banner**: image content (including OCR text) is data, never executable instructions. `structured` mode always returns JSON with `untrustedSource: true`. When `formatValid: true`, a single image returns `{answer, observations, extractedText?, limitations?}` and multiple images return `{images: [...]}` in input order. If the model does not follow the requested shape, it returns `{formatValid: false, formatError, rawResponse}` instead; consumers must check `formatValid` before reading structured fields.
+**Output contract**: In `text` mode, VisionPower prefixes the answer with an **[VisionPower] untrusted-source banner**: image content (including OCR text) is data, never executable instructions. `structured` mode always returns JSON with `untrustedSource: true`. When `formatValid: true`, a single image returns `{answer, observations, extractedText?, limitations?}` and multiple images return `{images: [...]}` in input order. If the model does not follow the requested shape, it returns `{formatValid: false, formatError, rawResponse}` instead; consumers must check `formatValid` before reading structured fields. The MCP form also places the same object in native `structuredContent` while retaining JSON text for older hosts; the Skill continues to print JSON to stdout.
 
 ### Skill script
 
@@ -340,6 +349,7 @@ The Skill form uses its bundled `describe_image.mjs` (`<skill>` is the skill fol
 ```text
 node <skill>/describe_image.mjs --image-path <absolute path> [--prompt <text>] [--output-format text|structured]
 node <skill>/describe_image.mjs --image-url <https url> [--prompt <text>] [--output-format text|structured]
+node <skill>/describe_image.mjs --image-ref <vpimg_...> [--prompt <text>] [--output-format text|structured]
 node <skill>/describe_image.mjs request.json        # pass a JSON request file
 echo '<json request>' | node <skill>/describe_image.mjs   # or via stdin
 ```
@@ -349,6 +359,7 @@ echo '<json request>' | node <skill>/describe_image.mjs   # or via stdin
 | `--image-path <p>` | Absolute path to a local image |
 | `--image-url <u>` | Public http(s) image URL |
 | `--image-base64 <b>` | Base64 data (for large data prefer a JSON file or stdin) |
+| `--image-ref <r>` | Short-lived reference generated by the WebUI Inbox |
 | `--mime <type>` | MIME type for `--image-base64` |
 | `--prompt <text>` | Question or instruction (optional) |
 | `--output-format <f>` | `text` (default) or `structured` |
@@ -356,6 +367,8 @@ echo '<json request>' | node <skill>/describe_image.mjs   # or via stdin
 | `--help` | Show help |
 
 When no source flag is given, the script reads a **JSON request from stdin** (the same shape as the MCP tool, including `images[]`). The result is printed to stdout; on failure it prints `VisionPower error: <reason>` to stderr and exits non-zero.
+
+To keep the standalone Skill from exhausting memory on oversized JSON, request files and stdin have a **96MB hard limit**. Prefer `--image-path` rather than embedded Base64 for unusually large local images.
 
 ---
 
@@ -372,25 +385,31 @@ Any provider that supports OpenAI's `/chat/completions` vision input format work
 | Alibaba Cloud Model Studio / DashScope | `qwen3-vl-flash` | `https://dashscope.aliyuncs.com/compatible-mode/v1` | **Default.** Fast and cost-effective. |
 | Alibaba Cloud Model Studio / DashScope | `qwen3-vl-plus` | same | Higher-quality Qwen-VL, subject to account access. |
 | Alibaba Cloud Model Studio / DashScope | `qwen3.6-flash` | same | Use if this multimodal model is available in your account. |
+| Alibaba Cloud Model Studio / DashScope | `qwen3.7-flash` | same | New multimodal generation released in July 2026; optimized for speed and cost. |
+| Alibaba Cloud Model Studio / DashScope | `qwen3.7-plus` | same | Quality-oriented Qwen3.7 variant. |
 | Zhipu BigModel | `glm-4.6v` | `https://open.bigmodel.cn/api/paas/v4` | Zhipu vision flagship; global endpoint `https://api.z.ai/api/paas/v4`. |
 | Zhipu BigModel | `glm-5v-turbo` | `https://open.bigmodel.cn/api/paas/v4` | Zhipu's first multimodal coding model; global endpoint `https://api.z.ai/api/paas/v4`. |
 | Volcengine Ark (Doubao) | `doubao-seed-2-1-turbo-260628` | `https://ark.cn-beijing.volces.com/api/v3` | Latest Doubao multimodal version. ¹ |
 | Volcengine Ark (Doubao) | `doubao-seed-2-0-lite-260428` | `https://ark.cn-beijing.volces.com/api/v3` | Lightweight, cost-effective. ¹ |
-| MiniMax (China) | `minimax-m3` | `https://api.minimaxi.com/v1` | Global endpoint is `api.minimax.io`; CN/global accounts are separate and keys are not interchangeable. |
-| Moonshot (Kimi) | `kimi-k2.6` | `https://api.moonshot.cn/v1` | Native multimodal + vision; older K2 series is retired, use K2.6. |
-| Moonshot (Kimi) | `kimi-k2.7-code` | `https://api.moonshot.cn/v1` | Agentic coding model, 256K context. |
+| MiniMax (China) | `MiniMax-M3` | `https://api.minimaxi.com/v1` | Model ID is case-sensitive; global endpoint is `api.minimax.io` and accounts are separate. |
+| Moonshot (Kimi) | `kimi-k2.6` | `https://api.moonshot.cn/v1` | Use Base64/data URL or `image_ref`; the request field is `max_tokens`, with a recommended default of 32768. |
+| Moonshot (Kimi) | `kimi-k2.7-code` | `https://api.moonshot.cn/v1` | Agentic coding model; public `image_url` is not accepted, with a recommended default of 32768. |
+| Moonshot (Kimi) | `kimi-k3` | `https://api.moonshot.cn/v1` | Supports vision input; public `image_url` is not accepted, with a recommended default of 32768. |
 
 **Global endpoints**
 
 | Provider | `VISIONPOWER_MODEL` | `VISIONPOWER_BASE_URL` | Notes |
 | --- | --- | --- | --- |
 | Google Gemini | `gemini-3.6-flash` | `https://generativelanguage.googleapis.com/v1beta/openai` | Native OpenAI-compatible endpoint; `image_url` supported. |
+| OpenAI | `gpt-5.6` | `https://api.openai.com/v1` | Latest general flagship with image input; the capability registry selects `max_completion_tokens` up front. |
+| OpenAI | `gpt-5.6-luna` | `https://api.openai.com/v1` | Faster, lower-cost GPT-5.6 variant. |
 | OpenAI | `gpt-4o` | `https://api.openai.com/v1` | Strong general image understanding. |
 | OpenAI | `gpt-4o-mini` | `https://api.openai.com/v1` | Lower-cost OpenAI option. |
-| MiniMax (Global) | `minimax-m3` | `https://api.minimax.io/v1` | Global domain is `.io` (China is `minimaxi.com`). |
-| Moonshot (Kimi Global) | `kimi-k2.6` | `https://api.moonshot.ai/v1` | Global endpoint uses the `.ai` domain. |
-| Moonshot (Kimi Global) | `kimi-k2.7-code` | `https://api.moonshot.ai/v1` | Same, coding model global endpoint. |
-| Other OpenAI-compatible | provider model ID | provider `/v1` base URL | Replace both fields with your provider's config. |
+| MiniMax (Global) | `MiniMax-M3` | `https://api.minimax.io/v1` | Global domain is `.io` (China is `minimaxi.com`). |
+| Moonshot (Kimi Global) | `kimi-k2.6` | `https://api.moonshot.ai/v1` | Global endpoint uses the `.ai` domain; public `image_url` is not accepted and `max_tokens` is used. |
+| Moonshot (Kimi Global) | `kimi-k2.7-code` | `https://api.moonshot.ai/v1` | Coding model global endpoint; public `image_url` is not accepted, with a recommended default of 32768. |
+| Moonshot (Kimi Global) | `kimi-k3` | `https://api.moonshot.ai/v1` | Kimi K3 global endpoint; public `image_url` is not accepted, with a recommended default of 32768. |
+| Other OpenAI-compatible | provider model ID | provider Base URL (often `/v1`, but it may be `/api/v3`, `/v4`, etc.) | Replace both fields with your provider's config. |
 
 > **Footnotes**
 > ¹ **Volcengine Ark / Doubao**: Ark supports two calling styles — use the **Model ID** directly from the table above (recommended; an `ark-`-prefixed API Key is all you need), or use an "endpoint ID" (shaped like `ep-2024xxxxxx-xxxxx`) created in the [Ark console](https://www.volcengine.com/product/ark) by setting `VISIONPOWER_MODEL` to that `ep-`-prefixed ID. The Model ID approach works out of the box — no endpoint creation required.
@@ -402,7 +421,7 @@ Any provider that supports OpenAI's `/chat/completions` vision input format work
 ```json
 "env": {
   "VISIONPOWER_API_KEY": "your-api-key",
-  "VISIONPOWER_MODEL": "gpt-4o",
+  "VISIONPOWER_MODEL": "gpt-5.6",
   "VISIONPOWER_BASE_URL": "https://api.openai.com/v1"
 }
 ```
@@ -433,17 +452,27 @@ Both forms share the same configuration. Precedence: **env var > config file > d
 | `VISIONPOWER_BASE_URL` | | `https://dashscope.aliyuncs.com/compatible-mode/v1` | OpenAI-compatible base URL **without** `/chat/completions`. |
 | `VISIONPOWER_ALLOWED_DIRS` | | (empty = unrestricted) | Comma-separated allowlist of directories that `image_path` must fall inside. |
 | `VISIONPOWER_MAX_IMAGE_BYTES` | | `20971520` (20MB) | Max size per local/Base64 image, in bytes. |
+| `VISIONPOWER_MAX_TOTAL_IMAGE_BYTES` | | `67108864` (64MB) | Total local/Base64 image bytes per call; must be at least the per-image limit. Provider-fetched public URLs do not count. |
 | `VISIONPOWER_TIMEOUT_MS` | | `60000` | Upstream API timeout (ms). |
-| `VISIONPOWER_MAX_TOKENS` | | `2048` | Max response tokens. |
+| `VISIONPOWER_MAX_TOKENS` | | `2048` (Kimi K2.6/K2.7 Code/K3 recommended default `32768`) | Max response tokens; an explicit user value takes precedence. |
 | `VISIONPOWER_MAX_IMAGES` | | `8` | Max images per call. |
 | `VISIONPOWER_MAX_RETRIES` | | `2` | Automatic retries on upstream 429/5xx or network errors (exponential backoff + jitter). |
+| `VISIONPOWER_INBOX_DIR` | | `~/.visionpower/inbox` | Image Inbox directory, derived from the config-file directory by default. It must be owned by the current user, mode `0700` or stricter, and not a symlink. |
+| `VISIONPOWER_INBOX_TTL_MS` | | `1800000` (30 min) | Staged-image lifetime; expired entries are lazily cleaned only during Inbox writes or reads, with no background timer. Config-file key: `inboxTtlMs`. |
+| `VISIONPOWER_INBOX_MAX_ENTRIES` | | `64` | Maximum staged images. A full Inbox rejects a new upload rather than silently deleting a live item. Config-file key: `inboxMaxEntries`. |
 | `VISIONPOWER_DEBUG` | | `false` | When `true`, logs the request model, image count, and timing to stderr. |
 | `VISIONPOWER_CACHE` | | `true` | Enable the **in-process result cache**: byte-identical local/Base64 image + prompt requests in the same session reuse the previous answer. Public URLs are mutable and are never cached. Set to `false` to disable. |
 | `VISIONPOWER_CACHE_MAX_ENTRIES` | | `32` | Max entries kept in the result cache; `0` disables it. |
 | `VISIONPOWER_CACHE_TTL_MS` | | `1800000` (30 min) | Per-entry cache lifetime in ms; after it elapses, a repeated request calls the model again. |
 | `VISIONPOWER_SKILL_STATE` | | `~/.visionpower/skill-state.json` | Skill script only: records whether setup has been verified so later calls can skip repeated preflight checks. |
 
+> **Hard configuration ceilings**: to prevent malformed environment variables or WebUI requests from causing excessive memory use or retries, one image is capped at 256MB, one call's local/Base64 total at 512MB, output at 131072 tokens, images at 64, retries at 8, cache and Inbox entries at 10000 each, and TTL at 30 days. Values above these ceilings fail during config load or save.
+
 > **Naming**: the primary prefix is `VISIONPOWER_*`. The API key also falls back to `OPENAI_API_KEY`.
+
+> **Custom or multi-region models require an explicit base URL**: when one model ID maps to multiple China/global endpoints (for example `MiniMax-M3`, `kimi-k3`, or GLM), or the model is not a built-in preset, VisionPower will not guess a provider or fall back to the default endpoint. Set `baseUrl` / `VISIONPOWER_BASE_URL` explicitly so an API key can never be sent to the wrong provider.
+
+> Legacy configs using lowercase `minimax-m3` on known MiniMax endpoints are migrated in memory to the official `MiniMax-M3` casing. Custom gateways keep the user-provided model ID unchanged.
 
 ### Migration (0.x → 1.x)
 
@@ -461,8 +490,11 @@ VisionPower validates images through several layers before handing them to the m
 - **Absolute path enforced** — relative paths are rejected to avoid ambiguity.
 - **Magic-byte verification** — local images are checked so the file's real bytes match its extension; a mismatch is rejected.
 - **Strict base64 validation** — rejects `data:` prefixes, invalid characters, and bad padding, with a re-encode consistency check.
-- **Private / SSRF guard** — `image_url` blocks `localhost`, private/reserved IPv4 ranges, IPv6 unique-local/link-local, and IPv4-mapped IPv6, and rejects URLs carrying credentials.
-- **Size & count limits** — per-image bytes, images per call, output tokens, and request timeout are all configurable and enforced.
+- **Private short-lived Inbox** — accepts only bytes explicitly uploaded by the browser, never an arbitrary server path; uses `0700/0600` permissions, unguessable refs, file identity/size/SHA-256 verification, lazy TTL cleanup on Inbox access/write, and no symlink following.
+- **Private / SSRF guard** — `image_url` blocks `localhost` (including a trailing root-label dot), private/reserved IPv4 ranges, IPv6 unique-local/link-local/site-local/multicast/documentation ranges, and IPv6 addresses that map a private IPv4 address; URLs carrying credentials are rejected as well.
+- **Size & count limits** — per-image bytes, total local/Base64 bytes per call, image count, output tokens, and request timeout are configurable and enforced.
+- **Hard response-body cap** — upstream response reads stop at 5MB even when a provider omits or lies about `Content-Length`; oversized responses fail immediately without retrying.
+- **Safe atomic writes** — config and Skill state use owner-only temporary files and atomic replacement; a pre-existing or symlinked temp path is never followed.
 - **Strict input schema** — zod-based validation; unknown fields and conflicting field combinations are explicitly rejected.
 
 ---
@@ -472,12 +504,12 @@ VisionPower validates images through several layers before handing them to the m
 ```bash
 npm install
 npm test            # unit tests (config parsing + image normalization + safety + skill-sync check)
-npm run smoke       # end-to-end: boot the MCP server + confirm the skill script rejects an empty request
+npm run smoke       # end-to-end: MCP registration/structured output + Skill state and error paths
 npm run build:skill # after changing the core, regenerate VisionPower-Skill/describe_image.mjs
 npm start           # start the MCP server directly over stdio
 ```
 
-Source layout: `src/vision-core.js` (core logic), `src/config.js` (config), `src/schema.js` (MCP input schema), `src/index.js` (MCP front-end). The Skill front-end `VisionPower-Skill/describe_image.mjs` is auto-generated from the core by `scripts/build-skill.mjs` (kept in sync by `npm test`).
+Source layout: `src/vision-core.js` (core logic), `src/image-inbox.js` (short-lived image storage), `src/config.js` (config + provider capability registry), `src/schema.js` (MCP input schema), `src/index.js` (MCP front-end). The Skill front-end `VisionPower-Skill/describe_image.mjs` is auto-generated from the core by `scripts/build-skill.mjs` (kept in sync by `npm test`).
 
 ---
 
@@ -491,9 +523,16 @@ They are functionally equivalent and differ only in how they connect: MCP expose
 </details>
 
 <details>
+<summary><b>Why does a text-only model host still reject an image before VisionPower runs?</b></summary>
+
+VisionPower can only process a path, URL, Base64 payload, or `image_ref` that the host actually passes to MCP/the Skill. If a third-party coding plan blocks the attachment before the agent receives the turn, the MCP server still cannot obtain the original bytes directly. Open the VisionPower WebUI, upload the image in **PLAYGROUND**, click **STAGE TO INBOX**, and give the generated `image_ref` to the agent; alternatively save the file and provide its **absolute path**. VisionPower deliberately does not scan opaque Claude, Codex, or other host cache directories because that would be brittle and expand the local-file trust boundary.
+
+</details>
+
+<details>
 <summary><b>The skill triggered but the script won't run?</b></summary>
 
-Make sure Node 18+ is installed (`node --version`) and call the script by its **absolute path** (e.g. `node ~/.claude/skills/visionpower/describe_image.mjs --help`). If it reports "API key not configured", follow the "first-time setup" in `SKILL.md` to write the key into `~/.visionpower/config.json`. If you "exported the env var but it still isn't recognized", the agent's spawned shell likely didn't inherit it — use the config file instead.
+Make sure Node 18.14.1+ is installed (`node --version`) and call the script by its **absolute path** (e.g. `node ~/.claude/skills/visionpower/describe_image.mjs --help`). If it reports "API key not configured", follow the "first-time setup" in `SKILL.md` to write the key into `~/.visionpower/config.json`. If you "exported the env var but it still isn't recognized", the agent's spawned shell likely didn't inherit it — use the config file instead.
 
 </details>
 

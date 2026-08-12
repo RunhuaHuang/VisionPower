@@ -1,6 +1,6 @@
 {
   "name": "visionpower",
-  "version": "2.4.2",
+  "version": "2.5.0",
   "description": "VisionPower: a portable image understanding MCP server for Codex, Claude Desktop, Cursor, and other agents.",
   "type": "module",
   "bin": {
@@ -12,6 +12,7 @@
     "docs/images",
     "README.md",
     "README.en.md",
+    "CHANGELOG.md",
     "LICENSE"
   ],
   "scripts": {
@@ -36,15 +37,15 @@
   "author": "Runhua",
   "license": "MIT",
   "engines": {
-    "node": ">=18"
+    "node": ">=20.19.0"
   },
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.29.0",
-    "alpinejs": "^3.15.12",
+    "@modelcontextprotocol/sdk": "^1.30.0",
+    "alpinejs": "^3.16.0",
     "zod": "^4.0.0"
   },
   "devDependencies": {
-    "eslint": "^9.39.5",
-    "globals": "^14.0.0"
+    "eslint": "^10.8.1",
+    "globals": "^17.9.0"
   }
 }

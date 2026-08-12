@@ -6,8 +6,9 @@ import * as z from 'zod/v4'
 
 export const imageSourceSchemaShape = {
   image_path: z.string().trim().min(1).optional().describe('Absolute path to a local raster image file. Use this when the image is available on disk.'),
-  image_url: z.string().trim().min(1).optional().describe('Public http(s) URL of an image that the configured vision model provider can access.'),
+  image_url: z.string().trim().min(1).optional().describe('Public http(s) URL of an image; support depends on the configured provider/model. Use image_base64 or image_ref when URL input is unavailable.'),
   image_base64: z.string().trim().min(1).optional().describe('Base64-encoded image data without a data: URI prefix.'),
+  image_ref: z.string().trim().regex(/^vpimg_[A-Za-z0-9_-]{32}$/).optional().describe('Short-lived opaque reference created by the VisionPower WebUI Inbox. Use this when a text-only host cannot pass an attachment through to the agent.'),
   image_mime_type: z.enum(['image/jpeg', 'image/png', 'image/webp', 'image/gif', 'image/bmp', 'image/tiff']).optional().describe('MIME type for image_base64. If omitted, VisionPower detects it from image bytes.'),
 }
 
