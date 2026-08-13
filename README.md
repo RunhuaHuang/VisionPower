@@ -267,6 +267,76 @@ node <skill>/describe_image.mjs --image-path /absolute/path/to/image.png --promp
 
 ---
 
+## 作为 dsh (DeepSeek Harness) Cordis 插件使用
+
+VisionPower 还提供 **DeepSeek Harness (dsh) 的原生 Cordis 插件**：随本包一起发布（子路径 `visionpower/dsh`），把 `describe_image` 注册为 dsh 的一等原生工具——同进程直调内核，无 MCP 子进程、无冷启动超时，并支持协作式取消（dsh 取消调用时立即中止上游请求）。
+
+安装后只需在 profile 的 `cordis.patch.yml` 里挂一行：
+
+```yaml
+- insert:
+    - id: visionpower
+      name: 'visionpower/dsh'
+      config:            # 全部可选，不写则沿用 ~/.visionpower/config.json 与环境变量
+        timeoutMs: 120000
+```
+
+### 交给 dsh 自动安装（推荐）
+
+把下面这段提示词发给你的 dsh（需要 pnpm 可用），它会自动完成**安装（GitHub 源）→ 挂载 cordis 插件 → 验证 → 打开 WebUI 配置控制台**全流程：
+
+```text
+请帮我完成 VisionPower 在 dsh（DeepSeek Harness）上的完整安装与配置，最后打开 VisionPower 的本地配置控制台（WebUI）让我填写视觉模型与 API Key。按以下步骤执行：
+
+【0. 前置检查】
+- 执行 node --version，确认 >= 20.19.0；不满足则告知我先安装新版 Node.js 后停止。
+- 执行 pnpm --version；若找不到 pnpm，先 corepack enable pnpm；若 /usr/local/bin 不可写，则在 PATH 中的用户目录（如 ~/.npm-global/bin）放一个指向 corepack pnpm 的 shim，确认 pnpm --version 可用后再继续。
+
+【1. 安装 visionpower（从 GitHub）】
+优先执行：
+  dsh plugin --profile web add github:RunhuaHuang/visionpower
+若 git 协议安装失败，回退为：
+  git clone https://github.com/RunhuaHuang/visionpower.git ~/visionpower
+  dsh plugin --profile web add file:~/visionpower
+（目标 profile 默认为 web；用户若指定其他 profile 名则相应替换。）
+严格禁止：不要手动安装 @deepseek-ai/cordis、@deepseek-ai/dsh-tools、@deepseek-ai/schemastery，也不要开启 autoInstallPeers——它们是可选 peer 依赖，必须经 dsh 内置软链回退解析，否则会遮蔽内置副本，导致所有工具调用报 "Cannot read properties of undefined (reading 'prepare')"。
+
+【2. 挂载 cordis 插件】
+在 ~/.dsh/profiles/web/cordis.patch.yml 中 insert 一行（保留文件原有注释与内容；写入 ~/.dsh 若被沙箱拒绝，用 sandbox_permissions 提权重试一次，用户会看到确认提示）：
+  - insert:
+      - id: visionpower
+        name: 'visionpower/dsh'
+        config:            # 全部可选
+          timeoutMs: 120000
+想让所有 profile 生效则改写到 $DSH_HOME/cordis.patch.yml。
+
+【3. 验证组合】
+执行 dsh --profile web --dump-config，确认输出包含 id: visionpower、name: visionpower/dsh 行；如有报错，回读第 1、2 步修正。
+
+【4. 打开 WebUI 配置控制台】
+用后台任务启动（不要阻塞当前会话）：
+  ~/.dsh/profiles/web/node_modules/.bin/visionpower --webui
+（若该路径不存在，兜底：npx -y --package visionpower@latest visionpower --webui）
+启动成功后，把地址 http://127.0.0.1:17900 交给用户，并说明：
+- 在 CONFIG 页选择视觉模型预设（如 qwen3-vl-flash），粘贴 API Key，按需调整超时等高级项，点「保存并应用配置」；
+- 在 PLAYGROUND 页上传一张图片试测；
+- 配置会写入 ~/.visionpower/config.json（0600 权限），插件每次调用实时读取，改完无需重启 WebUI。
+
+【5. 收尾】
+- 告知用户：WebUI 随时可用同一条命令再次启动；cordis 插件需要在配置完成后重启 dsh web 才生效（web 的 HMR 关闭），重启后新会话里即可使用原生 describe_image 工具，可直接传入无扩展名图片路径（JPEG/PNG/WEBP/GIF/BMP/TIFF 六种格式按内容自动识别）。
+- 可选自检：把第 2 步的 insert 行写进一个临时 patch 文件（如 /tmp/visionpower-dsh-smoke.yml），执行
+  dsh --profile headless --patch /tmp/visionpower-dsh-smoke.yml "调用 describe_image 分析一张测试图片并总结内容"
+  能返回正常描述即链路全部打通。
+```
+
+本地开发（未发布前）可跳过 GitHub 安装，直接 `dsh plugin --profile web add file:/path/to/VisionPower`，其余步骤不变。
+
+> ⚠️ 安装陷阱：插件对 `@deepseek-ai/*` 内置包的依赖是**可选 peer 依赖**，普通安装不会带入 profile。dsh 会从安装目录软链这些内置包到 `$DSH_HOME/profiles/node_modules` 作回退。**不要手动安装它们，也不要开启 `autoInstallPeers`**，否则会遮蔽该回退，引发工具调度器 Symbol 错位（所有工具调用报 `Cannot read properties of undefined (reading 'prepare')`）。
+
+插件源码与工具说明见仓库 `src/dsh/index.js` 与 `src/dsh/README.md`。
+
+---
+
 ## 🧩 工作原理
 
 ```mermaid

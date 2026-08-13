@@ -66,8 +66,31 @@ function debugLog(config, message) {
   }
 }
 
-function delay(ms) {
-  return new Promise((resolve) => setTimeout(resolve, ms))
+// Cooperative cancellation sentinel shared by every call path that observes an
+// external AbortSignal (the dsh plugin forwards its tool-call signal here).
+// The name matters: harness tool runtimes conventionally map AbortError to an
+// ABORTED result instead of a generic failure.
+function abortError() {
+  const error = new Error('Vision model request was aborted')
+  error.name = 'AbortError'
+  return error
+}
+
+function delay(ms, signal) {
+  if (signal?.aborted) return Promise.reject(abortError())
+  return new Promise((resolve, reject) => {
+    const onAbort = () => {
+      clearTimeout(timer)
+      reject(abortError())
+    }
+    const timer = setTimeout(() => {
+      signal?.removeEventListener('abort', onAbort)
+      resolve()
+    }, ms)
+    if (signal && !signal.aborted) {
+      signal.addEventListener('abort', onAbort, { once: true })
+    }
+  })
 }
 
 function retryDelayMs(attempt, retryAfterMs) {
@@ -213,13 +236,19 @@ function detectImageMimeType(data) {
 function inferImageMimeTypeFromFile(filePath, data) {
   const ext = extname(filePath).toLowerCase()
   const expectedMimeType = MIME_BY_EXT[ext]
-  if (!expectedMimeType) {
-    throw new Error(`Unsupported image extension: ${ext || 'unknown'}`)
+  // Extensionless files — content-addressed agent attachments (e.g. dsh stores
+  // dragged images under their sha256 with no name suffix) — skip the
+  // extension gate but MUST still pass the magic-byte detection below: only
+  // genuine raster bytes of a supported format are ever forwarded. Non-empty
+  // unknown extensions stay rejected, and named files must still match their
+  // declared format, so nothing about the safety boundary is loosened.
+  if (!expectedMimeType && ext !== '') {
+    throw new Error(`Unsupported image extension: ${ext}`)
   }
 
   const detectedMimeType = detectImageMimeType(data)
   if (!detectedMimeType) throw new Error('File content is not a supported raster image')
-  if (detectedMimeType !== expectedMimeType) {
+  if (expectedMimeType && detectedMimeType !== expectedMimeType) {
     throw new Error(`Image extension does not match file content: ${ext} / ${detectedMimeType}`)
   }
 
@@ -827,14 +856,26 @@ function unsupportedImageFormatMessage(requestBody, config, result) {
   return `The configured vision model "${config.model}" rejected ${imageFormat} input. VisionPower forwarded the original image without conversion. Try a vision model that supports this format, or convert the image to PNG/JPEG and retry. Upstream message: ${conciseUpstreamMessage}`
 }
 
-async function fetchVisionCompletion(requestBody, config) {
+async function fetchVisionCompletion(requestBody, config, signal) {
   const url = `${config.baseUrl}/chat/completions`
+  if (signal?.aborted) throw abortError()
 
   for (let attempt = 0; ; attempt += 1) {
     const controller = new AbortController()
     // The timeout covers both establishing the request and reading the full
     // response body, so a stalled body download still aborts cleanly.
     const timeout = setTimeout(() => controller.abort(), config.requestTimeoutMs)
+    // External cooperative cancellation (e.g. the dsh tool-call signal).
+    // Tracked separately from the internal timeout so the two abort causes
+    // never collapse into the same error message.
+    let externalAbort = signal?.aborted ?? false
+    const onExternalAbort = () => {
+      externalAbort = true
+      controller.abort()
+    }
+    if (signal && !signal.aborted) {
+      signal.addEventListener('abort', onExternalAbort, { once: true })
+    }
 
     let result
     try {
@@ -855,6 +896,7 @@ async function fetchVisionCompletion(requestBody, config) {
         retryAfterMs: parseRetryAfterMs(response.headers.get('retry-after')),
       }
     } catch (error) {
+      if (externalAbort || signal?.aborted) throw abortError()
       if (error?.name === 'AbortError') {
         throw new Error(`Vision model request timed out after ${Math.round(config.requestTimeoutMs / 1000)}s`)
       }
@@ -864,12 +906,13 @@ async function fetchVisionCompletion(requestBody, config) {
       if (attempt < config.maxRetries) {
         const wait = retryDelayMs(attempt)
         debugLog(config, `request error: ${error?.message ?? error}; retry ${attempt + 1}/${config.maxRetries} in ${wait}ms`)
-        await delay(wait)
+        await delay(wait, signal)
         continue
       }
       throw error
     } finally {
       clearTimeout(timeout)
+      signal?.removeEventListener('abort', onExternalAbort)
     }
 
     if (result.ok) {
@@ -878,7 +921,7 @@ async function fetchVisionCompletion(requestBody, config) {
     if (VISION_RETRYABLE_STATUS.has(result.status) && attempt < config.maxRetries) {
       const wait = retryDelayMs(attempt, result.retryAfterMs)
       debugLog(config, `upstream ${result.status}; retry ${attempt + 1}/${config.maxRetries} in ${wait}ms`)
-      await delay(wait)
+      await delay(wait, signal)
       continue
     }
     const formatError = unsupportedImageFormatMessage(requestBody, config, result)
@@ -1118,10 +1161,13 @@ function requestWithMaxTokens(requestBody) {
   return compatible
 }
 
-async function fetchVisionCompletionCompatible(requestBody, config) {
+async function fetchVisionCompletionCompatible(requestBody, config, signal) {
   try {
-    return await fetchVisionCompletion(requestBody, config)
+    return await fetchVisionCompletion(requestBody, config, signal)
   } catch (error) {
+    // Cooperative cancellation is never a compatibility problem — surface it
+    // immediately instead of feeding it to the token-parameter fallback.
+    if (error?.name === 'AbortError') throw error
     const compatible = requestBody.max_tokens !== undefined && isUnsupportedMaxTokensError(error)
       ? requestWithMaxCompletionTokens(requestBody)
       : requestBody.max_completion_tokens !== undefined && isUnsupportedMaxCompletionTokensError(error)
@@ -1130,7 +1176,7 @@ async function fetchVisionCompletionCompatible(requestBody, config) {
     if (!compatible) throw error
     const target = compatible.max_completion_tokens === undefined ? 'max_tokens' : 'max_completion_tokens'
     debugLog(config, `provider rejected token parameter; retrying once with ${target}`)
-    return fetchVisionCompletion(compatible, config)
+    return fetchVisionCompletion(compatible, config, signal)
   }
 }
 
@@ -1150,7 +1196,8 @@ function buildProviderRequestBody(config, messages) {
   return { requestBody, capabilities }
 }
 
-export async function describeImage(params, config) {
+export async function describeImage(params, config, signal) {
+  if (signal?.aborted) throw abortError()
   validateDescribeImageParams(params)
   const images = normalizeImageInputs(params, config)
   if (!config.apiKey) {
@@ -1205,14 +1252,15 @@ export async function describeImage(params, config) {
   debugLog(config, `requesting provider=${capabilities.provider} model=${config.model} images=${images.length} format=${structured ? 'structured' : 'text'}`)
   let bodyText
   try {
-    bodyText = await fetchVisionCompletionCompatible(requestBody, config)
+    bodyText = await fetchVisionCompletionCompatible(requestBody, config, signal)
   } catch (error) {
+    if (error?.name === 'AbortError') throw error
     const compatibilityRequest = isUnsupportedSystemRoleError(error)
       ? requestWithoutSystemRole(requestBody)
       : null
     if (!compatibilityRequest) throw error
     debugLog(config, 'provider rejected system role; retrying once with safety instruction in user content')
-    bodyText = await fetchVisionCompletionCompatible(compatibilityRequest, config)
+    bodyText = await fetchVisionCompletionCompatible(compatibilityRequest, config, signal)
   }
 
   let data

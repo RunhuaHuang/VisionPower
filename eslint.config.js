@@ -30,6 +30,7 @@ export default [
       'node_modules/**',
       'package-lock.json',
       'VisionPower-Skill/**',
+      'src/dsh/core.bundle.js',
     ],
   },
 ]

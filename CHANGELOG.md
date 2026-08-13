@@ -1,5 +1,23 @@
 # Changelog
 
+## 2.6.0 — 2026-08-13
+
+- Added a native DeepSeek Harness (dsh) Cordis plugin, shipped as the
+  `visionpower/dsh` subpath of the main package: a first-class `describe_image`
+  tool with in-process execution, composition-level config overrides, and
+  cooperative cancellation through the dsh tool-call signal.
+- Accepted extensionless image paths — content-addressed agent attachments are
+  identified purely by magic bytes across all six formats — while keeping the
+  extension allowlist and the extension/content match check for named files.
+- Threaded an optional AbortSignal through the core so callers can cancel
+  upstream requests and retry backoff immediately instead of waiting for the
+  request timeout.
+- Built the dsh plugin core bundle from the canonical core sources through a
+  shared bundling helper, and extended the test suite to keep the MCP server,
+  the standalone Skill, and the dsh bundle in lockstep.
+- Documented the dsh installation flow (including the guided agent prompt and
+  the WebUI configuration console) in the main README and `src/dsh/README.md`.
+
 ## 2.5.0 — 2026-08-10
 
 - Added a secure, short-lived Image Inbox in the local WebUI and the new

@@ -7,6 +7,7 @@ import { request as httpRequest } from 'node:http'
 import { fileURLToPath } from 'node:url'
 import { Script } from 'node:vm'
 import { buildSkillScript } from './build-skill.mjs'
+import { buildDshCoreBundle } from './build-dsh.mjs'
 import { DEFAULT_VISION_BASE_URL, getConfigFilePath, getInboxDir, getSkillStateFilePath, getDefaultBaseUrlForModel, loadVisionConfig, markSkillConfigNeedsSetup, markSkillConfigVerified, normalizeConfigObject, resolveModelCapabilities, saveVisionConfig } from '../src/config.js'
 import { toolInputSchema } from '../src/schema.js'
 import { describeImage, normalizeBase64Image, parseRetryAfterMs, resolvePublicImageUrl } from '../src/vision-core.js'
@@ -15,6 +16,9 @@ import { WEBUI_HTML } from '../src/webui/index-html.js'
 import { deleteStagedImage, listStagedImages, readStagedImage, stageImageBuffer } from '../src/image-inbox.js'
 
 const pngBytes = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])
+const jpegBytes = Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10])
+const webpBytes = Buffer.concat([Buffer.from('RIFF', 'ascii'), Buffer.from([0x00, 0x00, 0x00, 0x00]), Buffer.from('WEBP', 'ascii')])
+const bmpBytes = Buffer.concat([Buffer.from('BM', 'ascii'), Buffer.alloc(12)])
 const gifBytes = Buffer.from('GIF89a', 'ascii')
 const littleEndianTiffBytes = Buffer.from([0x49, 0x49, 0x2a, 0x00, 0x08, 0x00, 0x00, 0x00])
 const bigEndianTiffBytes = Buffer.from([0x4d, 0x4d, 0x00, 0x2a, 0x00, 0x00, 0x00, 0x08])
@@ -360,6 +364,96 @@ try {
     () => describeImage({ image_base64: malformedBigTiffBytes.toString('base64') }, testConfig()),
     /not a supported raster image/,
   )
+
+  // --- Extensionless files (content-addressed agent attachments) ------------
+  // dsh stores dragged images under their sha256 with no name suffix; the
+  // extension gate must not reject them. Every supported format must be
+  // identified purely by magic bytes and forwarded with the right MIME type.
+  const extensionlessCases = [
+    ['png', pngBytes, /^data:image\/png;base64,/],
+    ['jpeg', jpegBytes, /^data:image\/jpeg;base64,/],
+    ['webp', webpBytes, /^data:image\/webp;base64,/],
+    ['gif', gifBytes, /^data:image\/gif;base64,/],
+    ['bmp', bmpBytes, /^data:image\/bmp;base64,/],
+    ['tiff', littleEndianTiffBytes, /^data:image\/tiff;base64,/],
+  ]
+  for (const [label, bytes, mimePattern] of extensionlessCases) {
+    const extensionlessPath = join(tempDir, `attachment-${label}-noext`)
+    writeFileSync(extensionlessPath, bytes)
+    await withMockFetch(async (calls) => {
+      const result = await describeImage({ image_path: extensionlessPath }, testConfig())
+      assert.equal(stripBanner(result), 'ok')
+      const forwarded = userContent(calls[0]).find((part) => part.type === 'image_url').image_url.url
+      assert.match(forwarded, mimePattern, `extensionless ${label} must be forwarded as ${mimePattern}`)
+    })
+  }
+
+  // Magic bytes, not the missing name, remain the boundary: extensionless
+  // non-image content is still rejected before any provider call.
+  const extensionlessTextPath = join(tempDir, 'attachment-text-noext')
+  writeFileSync(extensionlessTextPath, 'plain text, not an image')
+  await assertRejectsMessage(
+    () => describeImage({ image_path: extensionlessTextPath }, testConfig()),
+    /not a supported raster image/,
+  )
+
+  // A non-empty unknown extension stays rejected even when the bytes are a
+  // valid supported image: only the extensionless case is exempted.
+  const unknownExtensionPath = join(tempDir, 'attachment.bin')
+  writeFileSync(unknownExtensionPath, pngBytes)
+  await assertRejectsMessage(
+    () => describeImage({ image_path: unknownExtensionPath }, testConfig()),
+    /Unsupported image extension: \.bin/,
+  )
+
+  // --- Cooperative cancellation via the external AbortSignal -----------------
+  // A pre-aborted signal rejects before any provider call; an in-flight abort
+  // cancels the upstream request instead of waiting for the request timeout.
+  {
+    let fetchCalls = 0
+    const originalFetch = globalThis.fetch
+    globalThis.fetch = (url, options) => {
+      fetchCalls += 1
+      return new Promise((resolve, reject) => {
+        options.signal.addEventListener('abort', () => {
+          const error = new Error('aborted by signal')
+          error.name = 'AbortError'
+          reject(error)
+        }, { once: true })
+      })
+    }
+    try {
+      const preAborted = new AbortController()
+      preAborted.abort()
+      await assert.rejects(
+        describeImage({ image_path: pngPath }, testConfig(), preAborted.signal),
+        (error) => error?.name === 'AbortError',
+        'a pre-aborted signal must reject with AbortError without calling the provider',
+      )
+      assert.equal(fetchCalls, 0, 'pre-aborted call must not reach the provider')
+
+      const controller = new AbortController()
+      const hanging = describeImage(
+        { image_path: pngPath },
+        testConfig({ requestTimeoutMs: 60_000 }),
+        controller.signal,
+      )
+      const deadline = Date.now() + 2_000
+      while (fetchCalls === 0 && Date.now() < deadline) {
+        await new Promise((resolve) => setTimeout(resolve, 5))
+      }
+      assert.equal(fetchCalls, 1, 'provider request must start before the abort')
+      controller.abort()
+      await assert.rejects(
+        hanging,
+        (error) => error?.name === 'AbortError',
+        'an in-flight abort must surface as AbortError, not as a timeout',
+      )
+      assert.equal(fetchCalls, 1, 'an aborted call must not retry')
+    } finally {
+      globalThis.fetch = originalFetch
+    }
+  }
 
   await withMockFetch(async (calls) => {
     const result = await describeImage({
@@ -1122,6 +1216,16 @@ try {
     generatedSkill,
     committedSkill.replace(/\r\n?/g, '\n'),
     'VisionPower-Skill/describe_image.mjs is out of date; run `npm run build:skill`',
+  )
+
+  // --- The generated dsh core bundle stays in sync with the core ---
+  const generatedDshBundle = await buildDshCoreBundle()
+  const committedDshBundle = readFileSync(new URL('../src/dsh/core.bundle.js', import.meta.url), 'utf8')
+  assert.ok(!generatedDshBundle.includes('\r'), 'generated dsh bundle must use LF line endings on every platform')
+  assert.equal(
+    generatedDshBundle,
+    committedDshBundle.replace(/\r\n?/g, '\n'),
+    'src/dsh/core.bundle.js is out of date; run `npm run build:dsh`',
   )
 
   // --- The generated skill CLI must actually run end-to-end (regression) ---

@@ -6,6 +6,14 @@
   "bin": {
     "visionpower": "src/index.js"
   },
+  "exports": {
+    "./core": "./src/vision-core.js",
+    "./config": "./src/config.js",
+    "./schema": "./src/schema.js",
+    "./dsh": "./src/dsh/index.js",
+    "./src/*": "./src/*",
+    "./package.json": "./package.json"
+  },
   "files": [
     "src",
     "VisionPower-Skill",
@@ -18,6 +26,7 @@
   "scripts": {
     "start": "node src/index.js",
     "build:skill": "node scripts/build-skill.mjs --write",
+    "build:dsh": "node scripts/build-dsh.mjs --write",
     "dev:webui": "node src/index.js --webui",
     "lint": "eslint .",
     "smoke": "node scripts/smoke.mjs",
@@ -28,6 +37,9 @@
     "model-context-protocol",
     "skill",
     "agent-skill",
+    "dsh",
+    "deepseek-harness",
+    "cordis",
     "vision",
     "ocr",
     "image-understanding",
@@ -43,6 +55,22 @@
     "@modelcontextprotocol/sdk": "^1.30.0",
     "alpinejs": "^3.16.0",
     "zod": "^4.0.0"
+  },
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "^4.0.1",
+    "@deepseek-ai/dsh-tools": "^0.1.0-rc.6",
+    "@deepseek-ai/schemastery": ">=3.18.1 <4"
+  },
+  "peerDependenciesMeta": {
+    "@deepseek-ai/cordis": {
+      "optional": true
+    },
+    "@deepseek-ai/dsh-tools": {
+      "optional": true
+    },
+    "@deepseek-ai/schemastery": {
+      "optional": true
+    }
   },
   "devDependencies": {
     "eslint": "^10.8.1",
