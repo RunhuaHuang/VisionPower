@@ -17,6 +17,7 @@
   "files": [
     "src",
     "VisionPower-Skill",
+    "scripts/patch-dsh.mjs",
     "docs/images",
     "README.md",
     "README.en.md",

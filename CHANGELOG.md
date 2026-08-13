@@ -1,5 +1,15 @@
 # Changelog
 
+## 2.6.1 — 2026-08-13
+
+- Added `scripts/patch-dsh.mjs` (also shipped in the npm package): a
+  cross-platform, idempotent patcher that removes DeepSeek Harness's
+  server-side image rejection so text-only model routes admit image messages
+  (images are dropped on the wire and recognition is delegated to the harness
+  tool layer, e.g. this package's `describe_image`). Auto-discovers every dsh
+  install, verifies syntax of touched files, self-tests its anchors, and fails
+  loudly on version drift.
+
 ## 2.6.0 — 2026-08-13
 
 - Added a native DeepSeek Harness (dsh) Cordis plugin, shipped as the
