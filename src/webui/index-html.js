@@ -285,6 +285,10 @@ code-block{display:block;background:var(--code-bg);color:var(--code-text);font-f
             <input type="number" min="1" x-model.number="config.inboxMaxEntries" />
           </div>
         </div>
+        <div class="form-group">
+          <label class="label" x-text="i18n[lang].inboxMaxBytesLabel"></label>
+          <input type="number" min="1" x-model.number="config.inboxMaxBytes" />
+        </div>
         <div class="mono" style="font-size:var(--fs-mono-xs);color:var(--text-muted);margin-top:calc(-1 * var(--space-sm));margin-bottom:var(--space-md)" x-text="i18n[lang].inboxHint"></div>
 
         <div class="grid-2">
@@ -550,14 +554,15 @@ function consoleApp() {
         allowedDirsHint: '留空表示不限制，可访问任意本地路径；填写后仅允许访问这些目录下的图片。',
         maxImageBytesLabel: '单张图片大小限制 (Bytes)',
         maxTotalImageBytesLabel: '单次本地/Base64 图片总上限 (Bytes)',
-        maxTotalImageBytesHint: '默认 64MB；公网 URL 由模型服务商读取，不计入本地缓冲上限。',
+        maxTotalImageBytesHint: '默认 64MB；公网 URL 会安全下载到本机并计入此上限。',
         timeoutLabel: '请求超时时间 (毫秒)',
         maxTokensLabel: '最大输出 Token 数 (Max Tokens)',
         maxImagesLabel: '单次最大分析图片数',
         maxRetriesLabel: '失败自动重试次数',
         inboxTtlLabel: '图片 Inbox 有效期 TTL (毫秒)',
         inboxMaxLabel: '图片 Inbox 最大条目数',
-        inboxHint: '用于纯文本宿主的附件桥接；图片仅保存到本机私有目录，到期自动清理。',
+        inboxMaxBytesLabel: '图片 Inbox 总存储上限 (Bytes)',
+        inboxHint: '用于纯文本宿主的附件桥接；图片仅保存到本机私有目录，到期自动清理，并受总存储上限保护。',
         debugTitle: '调试模式 (Debug Mode)',
         debugDesc: '在标准错误输出 (process.stderr) 中打印详细调试日志',
         cacheTitle: '启用缓存 (Cache)',
@@ -635,14 +640,15 @@ function consoleApp() {
         allowedDirsHint: 'Leave empty for no restriction (any local path is accessible); when set, only images under these directories are allowed.',
         maxImageBytesLabel: 'Max Image Bytes',
         maxTotalImageBytesLabel: 'Max Total Local/Base64 Image Bytes',
-        maxTotalImageBytesHint: 'Default 64MB. Public URLs are provider-fetched and do not count toward this local buffer cap.',
+        maxTotalImageBytesHint: 'Default 64MB. Public URLs are safely downloaded locally and count toward this buffer cap.',
         timeoutLabel: 'Request Timeout (ms)',
         maxTokensLabel: 'Max Tokens',
         maxImagesLabel: 'Max Images',
         maxRetriesLabel: 'Max Retries',
         inboxTtlLabel: 'Image Inbox TTL (ms)',
         inboxMaxLabel: 'Image Inbox Max Entries',
-        inboxHint: 'Attachment bridge for text-only hosts. Images stay in a private local directory and expire automatically.',
+        inboxMaxBytesLabel: 'Image Inbox Total Storage Limit (bytes)',
+        inboxHint: 'Attachment bridge for text-only hosts. Images stay in a private local directory, expire automatically, and are protected by a total storage limit.',
         debugTitle: 'Debug Mode',
         debugDesc: 'Print debug information to process.stderr',
         cacheTitle: 'Cache Enabled',
@@ -765,6 +771,7 @@ function consoleApp() {
           maxRetries: data.maxRetries !== undefined ? data.maxRetries : 2,
           inboxTtlMs: data.inboxTtlMs !== undefined ? data.inboxTtlMs : 1800000,
           inboxMaxEntries: data.inboxMaxEntries !== undefined ? data.inboxMaxEntries : 64,
+          inboxMaxBytes: data.inboxMaxBytes !== undefined ? data.inboxMaxBytes : 67108864,
           debug: !!data.debug,
           cache: {
             enabled: data.cache ? !!data.cache.enabled : true,

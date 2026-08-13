@@ -9,7 +9,10 @@ import { readdir, chmod, lstat, mkdir, rename, unlink, writeFile, open, realpath
 import { basename, dirname, join, resolve, extname, isAbsolute, sep } from 'node:path'
 import { homedir } from 'node:os'
 import { createHash, randomBytes } from 'node:crypto'
+import { lookup } from 'node:dns/promises'
 import { BlockList, isIP } from 'node:net'
+import { request as httpRequest } from 'node:http'
+import { request as httpsRequest } from 'node:https'
 
 const DEFAULT_VISION_BASE_URL = 'https://dashscope.aliyuncs.com/compatible-mode/v1'
 const DEFAULT_VISION_MODEL = 'qwen3-vl-flash'
@@ -24,6 +27,11 @@ const DEFAULT_CACHE_MAX_ENTRIES = 32
 const DEFAULT_CACHE_TTL_MS = 30 * 60 * 1000
 const DEFAULT_INBOX_TTL_MS = 30 * 60 * 1000
 const DEFAULT_INBOX_MAX_ENTRIES = 64
+// The Inbox persists browser uploads on disk, unlike maxTotalImageBytes which
+// only caps one model request. Keep its default budget aligned with a normal
+// request and put a separate hard ceiling on it so entry-count settings cannot
+// turn a local upload bridge into unbounded disk consumption.
+const DEFAULT_INBOX_MAX_BYTES = 64 * 1024 * 1024
 // Hard safety ceilings keep a malformed environment/config value from turning
 // the WebUI request limit or image buffers into an effectively unbounded
 // allocation. These are intentionally generous compared with the defaults.
@@ -36,6 +44,7 @@ const MAX_CONFIG_CACHE_ENTRIES = 10_000
 const MAX_CONFIG_CACHE_TTL_MS = 30 * 24 * 60 * 60 * 1000
 const MAX_CONFIG_INBOX_TTL_MS = 30 * 24 * 60 * 60 * 1000
 const MAX_CONFIG_INBOX_ENTRIES = 10_000
+const MAX_CONFIG_INBOX_BYTES = 512 * 1024 * 1024
 const MAX_CONFIG_FILE_BYTES = 1024 * 1024
 const MAX_API_KEY_BYTES = 16 * 1024
 const MAX_MODEL_CHARS = 256
@@ -531,6 +540,12 @@ function loadVisionConfig(env = process.env) {
     throw new Error(`${source} must not exceed ${MAX_REQUEST_TIMEOUT_MS}`)
   }
 
+  const maxImageBytes = parsePositiveInteger(
+    readEnvValue(env, ['VISIONPOWER_MAX_IMAGE_BYTES']),
+    integerFromFile(file.maxImageBytes, 'maxImageBytes', { max: MAX_CONFIG_IMAGE_BYTES }) ?? DEFAULT_MAX_IMAGE_BYTES,
+    MAX_CONFIG_IMAGE_BYTES,
+  )
+
   const config = {
     apiKey,
     model,
@@ -538,11 +553,7 @@ function loadVisionConfig(env = process.env) {
     allowedDirs: allowedDirsEnv.value
       ? parseAllowedDirs(allowedDirsEnv)
       : (allowedDirsFromFile(file.allowedDirs) ?? []),
-    maxImageBytes: parsePositiveInteger(
-      readEnvValue(env, ['VISIONPOWER_MAX_IMAGE_BYTES']),
-      integerFromFile(file.maxImageBytes, 'maxImageBytes', { max: MAX_CONFIG_IMAGE_BYTES }) ?? DEFAULT_MAX_IMAGE_BYTES,
-      MAX_CONFIG_IMAGE_BYTES,
-    ),
+    maxImageBytes,
     maxTotalImageBytes: parsePositiveInteger(
       readEnvValue(env, ['VISIONPOWER_MAX_TOTAL_IMAGE_BYTES']),
       integerFromFile(file.maxTotalImageBytes, 'maxTotalImageBytes', { max: MAX_CONFIG_TOTAL_IMAGE_BYTES }) ?? DEFAULT_MAX_TOTAL_IMAGE_BYTES,
@@ -580,10 +591,19 @@ function loadVisionConfig(env = process.env) {
         integerFromFile(file.inboxMaxEntries, 'inboxMaxEntries', { max: MAX_CONFIG_INBOX_ENTRIES }) ?? DEFAULT_INBOX_MAX_ENTRIES,
         MAX_CONFIG_INBOX_ENTRIES,
       ),
+      maxBytes: parsePositiveInteger(
+        readEnvValue(env, ['VISIONPOWER_INBOX_MAX_BYTES']),
+        integerFromFile(file.inboxMaxBytes, 'inboxMaxBytes', { max: MAX_CONFIG_INBOX_BYTES })
+          ?? Math.max(DEFAULT_INBOX_MAX_BYTES, maxImageBytes),
+        MAX_CONFIG_INBOX_BYTES,
+      ),
     },
   }
   if (config.maxTotalImageBytes < config.maxImageBytes) {
     throw new Error('VISIONPOWER_MAX_TOTAL_IMAGE_BYTES must be greater than or equal to VISIONPOWER_MAX_IMAGE_BYTES')
+  }
+  if (config.inbox.maxBytes < config.maxImageBytes) {
+    throw new Error('VISIONPOWER_INBOX_MAX_BYTES must be greater than or equal to VISIONPOWER_MAX_IMAGE_BYTES')
   }
   return config
 }
@@ -701,7 +721,7 @@ function saveVisionConfig(config, env = process.env) {
 const ALLOWED_CONFIG_KEYS = new Set([
   'apiKey', 'model', 'baseUrl', 'allowedDirs',
   'maxImageBytes', 'maxTotalImageBytes', 'timeoutMs', 'maxTokens', 'maxImages', 'maxRetries',
-  'inboxTtlMs', 'inboxMaxEntries', 'debug', 'cache',
+  'inboxTtlMs', 'inboxMaxEntries', 'inboxMaxBytes', 'debug', 'cache',
 ])
 
 // Validates and normalizes a config object coming from the WebUI before it is
@@ -772,6 +792,7 @@ function normalizeConfigObject(input) {
     { key: 'maxRetries', label: 'maxRetries', allowZero: true, max: MAX_CONFIG_RETRIES },
     { key: 'inboxTtlMs', label: 'inboxTtlMs', allowZero: false, max: MAX_CONFIG_INBOX_TTL_MS },
     { key: 'inboxMaxEntries', label: 'inboxMaxEntries', allowZero: false, max: MAX_CONFIG_INBOX_ENTRIES },
+    { key: 'inboxMaxBytes', label: 'inboxMaxBytes', allowZero: false, max: MAX_CONFIG_INBOX_BYTES },
   ]
   for (const { key, label, allowZero, max } of numericFields) {
     if (cleaned[key] !== undefined && cleaned[key] !== null) {
@@ -794,6 +815,15 @@ function normalizeConfigObject(input) {
   const effectiveMaxTotalImageBytes = cleaned.maxTotalImageBytes ?? DEFAULT_MAX_TOTAL_IMAGE_BYTES
   if (effectiveMaxTotalImageBytes < effectiveMaxImageBytes) {
     throw new Error('maxTotalImageBytes must be greater than or equal to maxImageBytes')
+  }
+  // Preserve an intuitive one-setting path: increasing a per-image limit
+  // should not make a configuration invalid merely because the Inbox's
+  // implicit default was smaller. An explicit Inbox budget still takes
+  // precedence and must be large enough to store one permitted upload.
+  const effectiveInboxMaxBytes = cleaned.inboxMaxBytes
+    ?? Math.max(DEFAULT_INBOX_MAX_BYTES, effectiveMaxImageBytes)
+  if (effectiveInboxMaxBytes < effectiveMaxImageBytes) {
+    throw new Error('inboxMaxBytes must be greater than or equal to maxImageBytes')
   }
 
   // The same replacement semantics apply to model/baseUrl. A custom or
@@ -987,7 +1017,8 @@ function parseMetadata(data, expectedId) {
   return { ...metadata, createdAtMs, expiresAtMs }
 }
 
-async function removeOwnedFiles(dir, id) {
+async function removeOwnedFiles(dir, id, assertLock = undefined) {
+  if (assertLock) await assertLock()
   const results = await Promise.allSettled([
     unlink(join(dir, `${id}.image`)),
     unlink(join(dir, `${id}.json`)),
@@ -1004,7 +1035,7 @@ async function readMetadata(dir, id) {
   return parseMetadata(data, id)
 }
 
-async function cleanupImageInboxUnlocked(config, dir, now) {
+async function cleanupImageInboxUnlocked(config, dir, now, assertLock = undefined) {
   const entries = await readdir(dir)
   const metadataIds = new Set()
 
@@ -1015,7 +1046,7 @@ async function cleanupImageInboxUnlocked(config, dir, now) {
     metadataIds.add(id)
     try {
       const metadata = await readMetadata(dir, id)
-      if (metadata.expiresAtMs <= now) await removeOwnedFiles(dir, id)
+      if (metadata.expiresAtMs <= now) await removeOwnedFiles(dir, id, assertLock)
       else {
         // Metadata is only useful when its paired image is still a regular,
         // owner-only file of the recorded size. A local process can replace
@@ -1027,7 +1058,7 @@ async function cleanupImageInboxUnlocked(config, dir, now) {
         try {
           imageStat = await lstat(join(dir, `${id}.image`), { bigint: true })
         } catch (imageError) {
-          if (imageError?.code === 'ENOENT') await removeOwnedFiles(dir, id)
+          if (imageError?.code === 'ENOENT') await removeOwnedFiles(dir, id, assertLock)
           continue
         }
         const wrongOwner = process.platform !== 'win32'
@@ -1040,13 +1071,14 @@ async function cleanupImageInboxUnlocked(config, dir, now) {
           || sharedPermissions
           || imageStat.size <= 0n
           || imageStat.size !== BigInt(metadata.bytes)
-        if (invalidImage) await removeOwnedFiles(dir, id)
+        if (invalidImage) await removeOwnedFiles(dir, id, assertLock)
       }
     } catch (error) {
+      if (error?.code === 'VISION_INBOX_LOCK_LOST') throw error
       // Files matching our exact random-handle namespace are VisionPower-owned.
       // Invalid/corrupt metadata cannot be used safely, so remove the pair.
       if (isDisposableEntryError(error)) {
-        await removeOwnedFiles(dir, id)
+        await removeOwnedFiles(dir, id, assertLock)
       }
       // Missing files are ordinary cleanup races. Other errors (EMFILE, EIO,
       // temporary access failures) are left untouched so a sweep can never
@@ -1067,16 +1099,25 @@ async function cleanupImageInboxUnlocked(config, dir, now) {
     try {
       const fileStat = await lstat(filePath)
       if ((fileStat.isFile() || fileStat.isSymbolicLink()) && now - fileStat.mtimeMs > ORPHAN_GRACE_MS) {
+        if (assertLock) await assertLock()
         await unlink(filePath)
       }
-    } catch {
+    } catch (error) {
+      if (error?.code === 'VISION_INBOX_LOCK_LOST') throw error
       // Concurrent cleanup/staging may already have removed it.
     }
   }
 }
 
+function inboxMaxBytes(config) {
+  // Configs created before the aggregate Inbox budget was introduced still
+  // work safely: one image is always allowed and old programmatic callers do
+  // not receive a surprising TypeError.
+  return config.inbox?.maxBytes ?? config.maxImageBytes
+}
+
 async function cleanupImageInbox(config, now = Date.now()) {
-  return withStageLock(config, async (dir) => cleanupImageInboxUnlocked(config, dir, now))
+  return withStageLock(config, async (dir, assertLock) => cleanupImageInboxUnlocked(config, dir, now, assertLock))
 }
 
 function wait(ms) {
@@ -1093,9 +1134,23 @@ async function acquireStageLock(dir) {
     } catch (error) {
       if (error?.code !== 'EEXIST') throw error
       try {
-        const lockStat = await lstat(lockPath)
-        if (!lockStat.isFile() || Date.now() - lockStat.mtimeMs > STAGE_LOCK_STALE_MS) {
-          await unlink(lockPath)
+        const lockStat = await lstat(lockPath, { bigint: true })
+        if (!lockStat.isFile() || Date.now() - Number(lockStat.mtimeMs) > STAGE_LOCK_STALE_MS) {
+          // This is a lease lock. Never unlink an observed pathname directly:
+          // it may be replaced between lstat() and unlink(). Atomic rename
+          // revokes whatever lock currently occupies the canonical name;
+          // every holder fences its critical writes with assertStageLockOwnership
+          // below, so a live process that lost a stale lease cannot publish.
+          const quarantinePath = `${lockPath}.stale.${process.pid}.${Date.now()}.${randomBytes(8).toString('hex')}`
+          try {
+            await rename(lockPath, quarantinePath)
+          } catch (renameError) {
+            if (renameError?.code === 'ENOENT' || renameError?.code === 'EEXIST') continue
+            throw renameError
+          }
+          await unlink(quarantinePath).catch((quarantineError) => {
+            if (quarantineError?.code !== 'ENOENT') throw quarantineError
+          })
           continue
         }
       } catch (statError) {
@@ -1115,6 +1170,22 @@ function sameLockFile(held, current) {
     && held.dev === current.dev
     && held.ino === current.ino
     && held.birthtimeNs === current.birthtimeNs
+}
+
+async function assertStageLockOwnership(lock) {
+  let current
+  try {
+    current = await lstat(lock.lockPath, { bigint: true })
+  } catch (error) {
+    if (error?.code === 'ENOENT') {
+      throw inboxError('VisionPower Inbox lock lease was lost; retry the upload', 503, 'VISION_INBOX_LOCK_LOST')
+    }
+    throw error
+  }
+  const held = await lock.handle.stat({ bigint: true })
+  if (!sameLockFile(held, current)) {
+    throw inboxError('VisionPower Inbox lock lease was lost; retry the upload', 503, 'VISION_INBOX_LOCK_LOST')
+  }
 }
 
 async function releaseStageLock(lock) {
@@ -1143,15 +1214,17 @@ async function withStageLock(config, task) {
   let heartbeat = Promise.resolve()
   const heartbeatTimer = setInterval(() => {
     heartbeat = heartbeat
-      .then(() => {
+      .then(async () => {
+        await assertStageLockOwnership(lock)
         const now = new Date()
-        return lock.handle.utimes(now, now)
+        await lock.handle.utimes(now, now)
       })
       .catch(() => {})
   }, STAGE_LOCK_HEARTBEAT_MS)
   heartbeatTimer.unref?.()
   try {
-    return await task(dir)
+    await assertStageLockOwnership(lock)
+    return await task(dir, () => assertStageLockOwnership(lock))
   } finally {
     clearInterval(heartbeatTimer)
     await heartbeat
@@ -1163,8 +1236,8 @@ async function withStageLock(config, task) {
   }
 }
 
-async function listStagedImagesUnlocked(config, dir, now) {
-  await cleanupImageInboxUnlocked(config, dir, now)
+async function listStagedImagesUnlocked(config, dir, now, assertLock = undefined) {
+  await cleanupImageInboxUnlocked(config, dir, now, assertLock)
   const entries = await readdir(dir)
   const result = []
   for (const entry of entries) {
@@ -1190,7 +1263,7 @@ async function listStagedImagesUnlocked(config, dir, now) {
 }
 
 async function listStagedImages(config, now = Date.now()) {
-  return withStageLock(config, async (dir) => listStagedImagesUnlocked(config, dir, now))
+  return withStageLock(config, async (dir, assertLock) => listStagedImagesUnlocked(config, dir, now, assertLock))
 }
 
 async function stageImageBuffer(data, mimeType, config, now = Date.now()) {
@@ -1200,10 +1273,15 @@ async function stageImageBuffer(data, mimeType, config, now = Date.now()) {
   if (!INBOX_SUPPORTED_IMAGE_MIME_TYPES.has(mimeType)) {
     throw inboxError('Staged image MIME type is not supported', 400)
   }
-  return withStageLock(config, async (dir) => {
-    const existing = await listStagedImagesUnlocked(config, dir, now)
+  return withStageLock(config, async (dir, assertLock) => {
+    const existing = await listStagedImagesUnlocked(config, dir, now, assertLock)
     if (existing.length >= config.inbox.maxEntries) {
       throw inboxError(`VisionPower Inbox is full; max is ${config.inbox.maxEntries} images`, 409, 'VISION_INBOX_FULL')
+    }
+    const maxBytes = inboxMaxBytes(config)
+    const usedBytes = existing.reduce((total, image) => total + image.bytes, 0)
+    if (data.length > maxBytes || usedBytes > maxBytes - data.length) {
+      throw inboxError(`VisionPower Inbox is full; max storage is ${maxBytes} bytes`, 409, 'VISION_INBOX_FULL')
     }
 
     const id = `vpimg_${randomBytes(24).toString('base64url')}`
@@ -1224,6 +1302,10 @@ async function stageImageBuffer(data, mimeType, config, now = Date.now()) {
     let dataCreated = false
     let metadataCreated = false
     try {
+      // The data file is private and unpublished until metadata exists. Fence
+      // the write anyway; should this lease have been revoked, cleanup removes
+      // only this random orphan and it can never become a visible Inbox item.
+      await assertLock()
       const dataHandle = await open(dataPath, 'wx', 0o600)
       try {
         dataCreated = true
@@ -1233,6 +1315,9 @@ async function stageImageBuffer(data, mimeType, config, now = Date.now()) {
         await dataHandle.close()
       }
 
+      // Metadata is the publication point. A holder that lost its lease must
+      // never publish after a successor admitted a new operation.
+      await assertLock()
       const metadataHandle = await open(metadataPath, 'wx', 0o600)
       try {
         metadataCreated = true
@@ -1241,6 +1326,10 @@ async function stageImageBuffer(data, mimeType, config, now = Date.now()) {
       } finally {
         await metadataHandle.close()
       }
+      // Close the lease window around the publication point. If a process was
+      // paused long enough for a successor to reclaim its stale lock, remove
+      // this operation's private random pair before returning a reference.
+      await assertLock()
       return metadata
     } catch (error) {
       if (metadataCreated) await unlink(metadataPath).catch(() => {})
@@ -1252,11 +1341,11 @@ async function stageImageBuffer(data, mimeType, config, now = Date.now()) {
 
 async function readStagedImage(imageRef, config, now = Date.now()) {
   const id = assertImageRef(imageRef)
-  return withStageLock(config, async (dir) => {
-    await cleanupImageInboxUnlocked(config, dir, now)
+  return withStageLock(config, async (dir, assertLock) => {
+    await cleanupImageInboxUnlocked(config, dir, now, assertLock)
     const metadata = await readMetadata(dir, id)
     if (metadata.expiresAtMs <= now) {
-      await removeOwnedFiles(dir, id)
+      await removeOwnedFiles(dir, id, assertLock)
       throw inboxError('image_ref does not exist or has expired', 404, 'VISION_INBOX_NOT_FOUND')
     }
     if (metadata.bytes > config.maxImageBytes) {
@@ -1277,7 +1366,7 @@ async function readStagedImage(imageRef, config, now = Date.now()) {
 
 async function deleteStagedImage(imageRef, config) {
   const id = assertImageRef(imageRef)
-  return withStageLock(config, async (dir) => removeOwnedFiles(dir, id))
+  return withStageLock(config, async (dir, assertLock) => removeOwnedFiles(dir, id, assertLock))
 }
 
 const VISION_RETRYABLE_STATUS = new Set([429, 500, 502, 503, 504])
@@ -1285,6 +1374,7 @@ const MAX_PROMPT_CHARS = 20_000
 const MAX_RESPONSE_BODY_BYTES = 5 * 1024 * 1024
 const MAX_CACHE_VALUE_BYTES = 1024 * 1024
 const MAX_RETRY_AFTER_MS = 30 * 1000
+const MAX_REMOTE_IMAGE_REDIRECTS = 3
 const BASE64_WRAP_LINE_CHARS = 64
 const BASE64_WRAP_LINE_BREAK_CHARS = 2
 const BASE64_EDGE_WHITESPACE_CHARS = 1024
@@ -1666,7 +1756,7 @@ function isPrivateHostname(hostname) {
   return false
 }
 
-function normalizeImageUrl(imageUrl) {
+function parsePublicImageUrl(imageUrl) {
   let url
   try {
     url = new URL(imageUrl)
@@ -1684,7 +1774,108 @@ function normalizeImageUrl(imageUrl) {
     throw new Error('image_url must be publicly reachable; use image_path for local images')
   }
 
-  return url.toString()
+  return url
+}
+
+function assertPublicAddress(address) {
+  if (typeof address?.address !== 'string' || ![4, 6].includes(address.family) || isPrivateHostname(address.address)) {
+    throw new Error('image_url must resolve only to publicly reachable addresses; use image_path for local images')
+  }
+}
+
+// Resolve every hostname before downloading, rather than handing a mutable URL
+// to the model provider. This fails closed for DNS errors and mixed public /
+// private answers, and the chosen address is pinned in the actual HTTP request
+// below so a DNS rebinding response cannot redirect the local process to a
+// different destination after this check.
+async function resolvePublicImageUrl(imageUrl, lookupAddresses = lookup) {
+  const url = parsePublicImageUrl(imageUrl)
+  if (isIP(url.hostname)) {
+    assertPublicAddress({ address: url.hostname, family: isIP(url.hostname) })
+    return { url, addresses: [{ address: url.hostname, family: isIP(url.hostname) }] }
+  }
+
+  let addresses
+  try {
+    addresses = await lookupAddresses(url.hostname, { all: true, verbatim: true })
+  } catch {
+    throw new Error('image_url hostname could not be resolved to a public address')
+  }
+  if (!Array.isArray(addresses) || addresses.length === 0) {
+    throw new Error('image_url hostname could not be resolved to a public address')
+  }
+  addresses.forEach(assertPublicAddress)
+  return { url, addresses }
+}
+
+function requestRemoteImage(url, address, timeoutMs) {
+  const request = url.protocol === 'https:' ? httpsRequest : httpRequest
+  return new Promise((resolveRequest, rejectRequest) => {
+    const req = request(url, {
+      lookup: (_hostname, _options, callback) => callback(null, address.address, address.family),
+      headers: { Accept: 'image/*' },
+    }, (response) => resolveRequest(response))
+    req.setTimeout(timeoutMs, () => req.destroy(new Error('image_url download timed out')))
+    req.once('error', rejectRequest)
+    req.end()
+  })
+}
+
+async function downloadPublicImage(imageUrl, config) {
+  let nextUrl = imageUrl
+  for (let redirectCount = 0; redirectCount <= MAX_REMOTE_IMAGE_REDIRECTS; redirectCount += 1) {
+    const { url, addresses } = await resolvePublicImageUrl(nextUrl)
+    // Pin a randomly selected verified address for each request. Choosing a
+    // single address avoids Node re-resolving a hostname after validation;
+    // every answer was checked above, so normal dual-stack hosts remain safe.
+    const address = addresses[Math.floor(Math.random() * addresses.length)]
+    const response = await requestRemoteImage(url, address, config.requestTimeoutMs)
+    const status = response.statusCode ?? 0
+    if ([301, 302, 303, 307, 308].includes(status)) {
+      const location = response.headers.location
+      response.resume()
+      if (!location) throw new Error('image_url redirect is missing a Location header')
+      if (redirectCount === MAX_REMOTE_IMAGE_REDIRECTS) {
+        throw new Error(`image_url exceeded the ${MAX_REMOTE_IMAGE_REDIRECTS}-redirect limit`)
+      }
+      try {
+        nextUrl = new URL(location, url).toString()
+      } catch {
+        throw new Error('image_url redirect location is invalid')
+      }
+      continue
+    }
+    if (status < 200 || status >= 300) {
+      response.resume()
+      throw new Error(`image_url download failed (${status})`)
+    }
+
+    const declaredLength = response.headers['content-length']
+    if (typeof declaredLength === 'string' && /^\d+$/.test(declaredLength) && Number(declaredLength) > config.maxImageBytes) {
+      response.resume()
+      throw imageTooLargeError(config, 'image_url')
+    }
+    const chunks = []
+    let totalBytes = 0
+    const data = await new Promise((resolveData, rejectData) => {
+      response.on('data', (chunk) => {
+        totalBytes += chunk.length
+        if (totalBytes > config.maxImageBytes) {
+          response.destroy()
+          rejectData(imageTooLargeError(config, 'image_url'))
+          return
+        }
+        chunks.push(chunk)
+      })
+      response.once('end', () => resolveData(Buffer.concat(chunks, totalBytes)))
+      response.once('error', rejectData)
+      response.once('aborted', () => rejectData(new Error('image_url download was aborted')))
+    })
+    const mimeType = detectImageMimeType(data)
+    if (!mimeType) throw new Error('image_url content is not a supported raster image')
+    return { data, mimeType, byteLength: data.length }
+  }
+  throw new Error('image_url redirect limit reached')
 }
 
 function maxEncodedBase64Chars(maxDecodedBytes) {
@@ -1701,8 +1892,8 @@ function maxRawBase64Chars(maxEncodedChars) {
     + BASE64_EDGE_WHITESPACE_CHARS
 }
 
-function base64TooLargeError(config) {
-  return new Error(`image_base64 is too large; max is ${Math.round(config.maxImageBytes / 1024 / 1024)}MB`)
+function imageTooLargeError(config, source = 'image_base64') {
+  return new Error(`${source} is too large; max is ${Math.round(config.maxImageBytes / 1024 / 1024)}MB`)
 }
 
 function normalizeBase64Image(imageBase64, imageMimeType, config) {
@@ -1715,7 +1906,7 @@ function normalizeBase64Image(imageBase64, imageMimeType, config) {
   }
   const maxEncodedChars = maxEncodedBase64Chars(config.maxImageBytes)
   if (imageBase64.length > maxRawBase64Chars(maxEncodedChars)) {
-    throw base64TooLargeError(config)
+    throw imageTooLargeError(config)
   }
   const trimmed = imageBase64.trim()
   if (trimmed.startsWith('data:')) {
@@ -1727,7 +1918,7 @@ function normalizeBase64Image(imageBase64, imageMimeType, config) {
     throw new Error('image_base64 must not be empty')
   }
   if (normalized.length > maxEncodedChars) {
-    throw base64TooLargeError(config)
+    throw imageTooLargeError(config)
   }
   if (!/^[A-Za-z0-9+/]+={0,2}$/.test(normalized) || /=[^=]/.test(normalized) || normalized.length % 4 === 1) {
     throw new Error('image_base64 must be valid standard base64')
@@ -1746,7 +1937,7 @@ function normalizeBase64Image(imageBase64, imageMimeType, config) {
     throw new Error('image_base64 decoded to an empty image')
   }
   if (data.length > config.maxImageBytes) {
-    throw base64TooLargeError(config)
+    throw imageTooLargeError(config)
   }
 
   const detectedMimeType = detectImageMimeType(data)
@@ -1857,17 +2048,13 @@ async function imageBlockFromInput(params, config) {
   }
 
   if (params.image_url) {
-    const capabilities = resolveModelCapabilities(config.model, config.baseUrl)
-    if (capabilities.supportsPublicImageUrl === false) {
-      throw new Error(`The configured vision model "${config.model}" does not accept public image URLs; use image_base64 or image_ref instead`)
-    }
+    const image = await downloadPublicImage(params.image_url, config)
     return {
       block: {
         type: 'image_url',
-        image_url: { url: normalizeImageUrl(params.image_url) },
+        image_url: { url: `data:${image.mimeType};base64,${image.data.toString('base64')}` },
       },
-      // Public URLs are fetched by the provider rather than buffered locally.
-      byteLength: 0,
+      byteLength: image.byteLength,
     }
   }
 

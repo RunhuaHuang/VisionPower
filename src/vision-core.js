@@ -1,7 +1,10 @@
 import { realpathSync, constants as fsConstants } from 'node:fs'
 import { lstat, open, realpath } from 'node:fs/promises'
 import { createHash } from 'node:crypto'
+import { lookup } from 'node:dns/promises'
 import { BlockList, isIP } from 'node:net'
+import { request as httpRequest } from 'node:http'
+import { request as httpsRequest } from 'node:https'
 import { extname, isAbsolute, resolve, sep } from 'node:path'
 import { resolveModelCapabilities } from './config.js'
 import { readStagedImage } from './image-inbox.js'
@@ -11,6 +14,7 @@ const MAX_PROMPT_CHARS = 20_000
 const MAX_RESPONSE_BODY_BYTES = 5 * 1024 * 1024
 const MAX_CACHE_VALUE_BYTES = 1024 * 1024
 const MAX_RETRY_AFTER_MS = 30 * 1000
+const MAX_REMOTE_IMAGE_REDIRECTS = 3
 const BASE64_WRAP_LINE_CHARS = 64
 const BASE64_WRAP_LINE_BREAK_CHARS = 2
 const BASE64_EDGE_WHITESPACE_CHARS = 1024
@@ -392,7 +396,7 @@ function isPrivateHostname(hostname) {
   return false
 }
 
-function normalizeImageUrl(imageUrl) {
+function parsePublicImageUrl(imageUrl) {
   let url
   try {
     url = new URL(imageUrl)
@@ -410,7 +414,108 @@ function normalizeImageUrl(imageUrl) {
     throw new Error('image_url must be publicly reachable; use image_path for local images')
   }
 
-  return url.toString()
+  return url
+}
+
+function assertPublicAddress(address) {
+  if (typeof address?.address !== 'string' || ![4, 6].includes(address.family) || isPrivateHostname(address.address)) {
+    throw new Error('image_url must resolve only to publicly reachable addresses; use image_path for local images')
+  }
+}
+
+// Resolve every hostname before downloading, rather than handing a mutable URL
+// to the model provider. This fails closed for DNS errors and mixed public /
+// private answers, and the chosen address is pinned in the actual HTTP request
+// below so a DNS rebinding response cannot redirect the local process to a
+// different destination after this check.
+export async function resolvePublicImageUrl(imageUrl, lookupAddresses = lookup) {
+  const url = parsePublicImageUrl(imageUrl)
+  if (isIP(url.hostname)) {
+    assertPublicAddress({ address: url.hostname, family: isIP(url.hostname) })
+    return { url, addresses: [{ address: url.hostname, family: isIP(url.hostname) }] }
+  }
+
+  let addresses
+  try {
+    addresses = await lookupAddresses(url.hostname, { all: true, verbatim: true })
+  } catch {
+    throw new Error('image_url hostname could not be resolved to a public address')
+  }
+  if (!Array.isArray(addresses) || addresses.length === 0) {
+    throw new Error('image_url hostname could not be resolved to a public address')
+  }
+  addresses.forEach(assertPublicAddress)
+  return { url, addresses }
+}
+
+function requestRemoteImage(url, address, timeoutMs) {
+  const request = url.protocol === 'https:' ? httpsRequest : httpRequest
+  return new Promise((resolveRequest, rejectRequest) => {
+    const req = request(url, {
+      lookup: (_hostname, _options, callback) => callback(null, address.address, address.family),
+      headers: { Accept: 'image/*' },
+    }, (response) => resolveRequest(response))
+    req.setTimeout(timeoutMs, () => req.destroy(new Error('image_url download timed out')))
+    req.once('error', rejectRequest)
+    req.end()
+  })
+}
+
+async function downloadPublicImage(imageUrl, config) {
+  let nextUrl = imageUrl
+  for (let redirectCount = 0; redirectCount <= MAX_REMOTE_IMAGE_REDIRECTS; redirectCount += 1) {
+    const { url, addresses } = await resolvePublicImageUrl(nextUrl)
+    // Pin a randomly selected verified address for each request. Choosing a
+    // single address avoids Node re-resolving a hostname after validation;
+    // every answer was checked above, so normal dual-stack hosts remain safe.
+    const address = addresses[Math.floor(Math.random() * addresses.length)]
+    const response = await requestRemoteImage(url, address, config.requestTimeoutMs)
+    const status = response.statusCode ?? 0
+    if ([301, 302, 303, 307, 308].includes(status)) {
+      const location = response.headers.location
+      response.resume()
+      if (!location) throw new Error('image_url redirect is missing a Location header')
+      if (redirectCount === MAX_REMOTE_IMAGE_REDIRECTS) {
+        throw new Error(`image_url exceeded the ${MAX_REMOTE_IMAGE_REDIRECTS}-redirect limit`)
+      }
+      try {
+        nextUrl = new URL(location, url).toString()
+      } catch {
+        throw new Error('image_url redirect location is invalid')
+      }
+      continue
+    }
+    if (status < 200 || status >= 300) {
+      response.resume()
+      throw new Error(`image_url download failed (${status})`)
+    }
+
+    const declaredLength = response.headers['content-length']
+    if (typeof declaredLength === 'string' && /^\d+$/.test(declaredLength) && Number(declaredLength) > config.maxImageBytes) {
+      response.resume()
+      throw imageTooLargeError(config, 'image_url')
+    }
+    const chunks = []
+    let totalBytes = 0
+    const data = await new Promise((resolveData, rejectData) => {
+      response.on('data', (chunk) => {
+        totalBytes += chunk.length
+        if (totalBytes > config.maxImageBytes) {
+          response.destroy()
+          rejectData(imageTooLargeError(config, 'image_url'))
+          return
+        }
+        chunks.push(chunk)
+      })
+      response.once('end', () => resolveData(Buffer.concat(chunks, totalBytes)))
+      response.once('error', rejectData)
+      response.once('aborted', () => rejectData(new Error('image_url download was aborted')))
+    })
+    const mimeType = detectImageMimeType(data)
+    if (!mimeType) throw new Error('image_url content is not a supported raster image')
+    return { data, mimeType, byteLength: data.length }
+  }
+  throw new Error('image_url redirect limit reached')
 }
 
 function maxEncodedBase64Chars(maxDecodedBytes) {
@@ -427,8 +532,8 @@ function maxRawBase64Chars(maxEncodedChars) {
     + BASE64_EDGE_WHITESPACE_CHARS
 }
 
-function base64TooLargeError(config) {
-  return new Error(`image_base64 is too large; max is ${Math.round(config.maxImageBytes / 1024 / 1024)}MB`)
+function imageTooLargeError(config, source = 'image_base64') {
+  return new Error(`${source} is too large; max is ${Math.round(config.maxImageBytes / 1024 / 1024)}MB`)
 }
 
 export function normalizeBase64Image(imageBase64, imageMimeType, config) {
@@ -441,7 +546,7 @@ export function normalizeBase64Image(imageBase64, imageMimeType, config) {
   }
   const maxEncodedChars = maxEncodedBase64Chars(config.maxImageBytes)
   if (imageBase64.length > maxRawBase64Chars(maxEncodedChars)) {
-    throw base64TooLargeError(config)
+    throw imageTooLargeError(config)
   }
   const trimmed = imageBase64.trim()
   if (trimmed.startsWith('data:')) {
@@ -453,7 +558,7 @@ export function normalizeBase64Image(imageBase64, imageMimeType, config) {
     throw new Error('image_base64 must not be empty')
   }
   if (normalized.length > maxEncodedChars) {
-    throw base64TooLargeError(config)
+    throw imageTooLargeError(config)
   }
   if (!/^[A-Za-z0-9+/]+={0,2}$/.test(normalized) || /=[^=]/.test(normalized) || normalized.length % 4 === 1) {
     throw new Error('image_base64 must be valid standard base64')
@@ -472,7 +577,7 @@ export function normalizeBase64Image(imageBase64, imageMimeType, config) {
     throw new Error('image_base64 decoded to an empty image')
   }
   if (data.length > config.maxImageBytes) {
-    throw base64TooLargeError(config)
+    throw imageTooLargeError(config)
   }
 
   const detectedMimeType = detectImageMimeType(data)
@@ -583,17 +688,13 @@ async function imageBlockFromInput(params, config) {
   }
 
   if (params.image_url) {
-    const capabilities = resolveModelCapabilities(config.model, config.baseUrl)
-    if (capabilities.supportsPublicImageUrl === false) {
-      throw new Error(`The configured vision model "${config.model}" does not accept public image URLs; use image_base64 or image_ref instead`)
-    }
+    const image = await downloadPublicImage(params.image_url, config)
     return {
       block: {
         type: 'image_url',
-        image_url: { url: normalizeImageUrl(params.image_url) },
+        image_url: { url: `data:${image.mimeType};base64,${image.data.toString('base64')}` },
       },
-      // Public URLs are fetched by the provider rather than buffered locally.
-      byteLength: 0,
+      byteLength: image.byteLength,
     }
   }
 

@@ -16,6 +16,11 @@ export const DEFAULT_CACHE_MAX_ENTRIES = 32
 export const DEFAULT_CACHE_TTL_MS = 30 * 60 * 1000
 export const DEFAULT_INBOX_TTL_MS = 30 * 60 * 1000
 export const DEFAULT_INBOX_MAX_ENTRIES = 64
+// The Inbox persists browser uploads on disk, unlike maxTotalImageBytes which
+// only caps one model request. Keep its default budget aligned with a normal
+// request and put a separate hard ceiling on it so entry-count settings cannot
+// turn a local upload bridge into unbounded disk consumption.
+export const DEFAULT_INBOX_MAX_BYTES = 64 * 1024 * 1024
 // Hard safety ceilings keep a malformed environment/config value from turning
 // the WebUI request limit or image buffers into an effectively unbounded
 // allocation. These are intentionally generous compared with the defaults.
@@ -28,6 +33,7 @@ export const MAX_CONFIG_CACHE_ENTRIES = 10_000
 export const MAX_CONFIG_CACHE_TTL_MS = 30 * 24 * 60 * 60 * 1000
 export const MAX_CONFIG_INBOX_TTL_MS = 30 * 24 * 60 * 60 * 1000
 export const MAX_CONFIG_INBOX_ENTRIES = 10_000
+export const MAX_CONFIG_INBOX_BYTES = 512 * 1024 * 1024
 const MAX_CONFIG_FILE_BYTES = 1024 * 1024
 const MAX_API_KEY_BYTES = 16 * 1024
 const MAX_MODEL_CHARS = 256
@@ -523,6 +529,12 @@ export function loadVisionConfig(env = process.env) {
     throw new Error(`${source} must not exceed ${MAX_REQUEST_TIMEOUT_MS}`)
   }
 
+  const maxImageBytes = parsePositiveInteger(
+    readEnvValue(env, ['VISIONPOWER_MAX_IMAGE_BYTES']),
+    integerFromFile(file.maxImageBytes, 'maxImageBytes', { max: MAX_CONFIG_IMAGE_BYTES }) ?? DEFAULT_MAX_IMAGE_BYTES,
+    MAX_CONFIG_IMAGE_BYTES,
+  )
+
   const config = {
     apiKey,
     model,
@@ -530,11 +542,7 @@ export function loadVisionConfig(env = process.env) {
     allowedDirs: allowedDirsEnv.value
       ? parseAllowedDirs(allowedDirsEnv)
       : (allowedDirsFromFile(file.allowedDirs) ?? []),
-    maxImageBytes: parsePositiveInteger(
-      readEnvValue(env, ['VISIONPOWER_MAX_IMAGE_BYTES']),
-      integerFromFile(file.maxImageBytes, 'maxImageBytes', { max: MAX_CONFIG_IMAGE_BYTES }) ?? DEFAULT_MAX_IMAGE_BYTES,
-      MAX_CONFIG_IMAGE_BYTES,
-    ),
+    maxImageBytes,
     maxTotalImageBytes: parsePositiveInteger(
       readEnvValue(env, ['VISIONPOWER_MAX_TOTAL_IMAGE_BYTES']),
       integerFromFile(file.maxTotalImageBytes, 'maxTotalImageBytes', { max: MAX_CONFIG_TOTAL_IMAGE_BYTES }) ?? DEFAULT_MAX_TOTAL_IMAGE_BYTES,
@@ -572,10 +580,19 @@ export function loadVisionConfig(env = process.env) {
         integerFromFile(file.inboxMaxEntries, 'inboxMaxEntries', { max: MAX_CONFIG_INBOX_ENTRIES }) ?? DEFAULT_INBOX_MAX_ENTRIES,
         MAX_CONFIG_INBOX_ENTRIES,
       ),
+      maxBytes: parsePositiveInteger(
+        readEnvValue(env, ['VISIONPOWER_INBOX_MAX_BYTES']),
+        integerFromFile(file.inboxMaxBytes, 'inboxMaxBytes', { max: MAX_CONFIG_INBOX_BYTES })
+          ?? Math.max(DEFAULT_INBOX_MAX_BYTES, maxImageBytes),
+        MAX_CONFIG_INBOX_BYTES,
+      ),
     },
   }
   if (config.maxTotalImageBytes < config.maxImageBytes) {
     throw new Error('VISIONPOWER_MAX_TOTAL_IMAGE_BYTES must be greater than or equal to VISIONPOWER_MAX_IMAGE_BYTES')
+  }
+  if (config.inbox.maxBytes < config.maxImageBytes) {
+    throw new Error('VISIONPOWER_INBOX_MAX_BYTES must be greater than or equal to VISIONPOWER_MAX_IMAGE_BYTES')
   }
   return config
 }
@@ -693,7 +710,7 @@ export function saveVisionConfig(config, env = process.env) {
 export const ALLOWED_CONFIG_KEYS = new Set([
   'apiKey', 'model', 'baseUrl', 'allowedDirs',
   'maxImageBytes', 'maxTotalImageBytes', 'timeoutMs', 'maxTokens', 'maxImages', 'maxRetries',
-  'inboxTtlMs', 'inboxMaxEntries', 'debug', 'cache',
+  'inboxTtlMs', 'inboxMaxEntries', 'inboxMaxBytes', 'debug', 'cache',
 ])
 
 // Validates and normalizes a config object coming from the WebUI before it is
@@ -764,6 +781,7 @@ export function normalizeConfigObject(input) {
     { key: 'maxRetries', label: 'maxRetries', allowZero: true, max: MAX_CONFIG_RETRIES },
     { key: 'inboxTtlMs', label: 'inboxTtlMs', allowZero: false, max: MAX_CONFIG_INBOX_TTL_MS },
     { key: 'inboxMaxEntries', label: 'inboxMaxEntries', allowZero: false, max: MAX_CONFIG_INBOX_ENTRIES },
+    { key: 'inboxMaxBytes', label: 'inboxMaxBytes', allowZero: false, max: MAX_CONFIG_INBOX_BYTES },
   ]
   for (const { key, label, allowZero, max } of numericFields) {
     if (cleaned[key] !== undefined && cleaned[key] !== null) {
@@ -786,6 +804,15 @@ export function normalizeConfigObject(input) {
   const effectiveMaxTotalImageBytes = cleaned.maxTotalImageBytes ?? DEFAULT_MAX_TOTAL_IMAGE_BYTES
   if (effectiveMaxTotalImageBytes < effectiveMaxImageBytes) {
     throw new Error('maxTotalImageBytes must be greater than or equal to maxImageBytes')
+  }
+  // Preserve an intuitive one-setting path: increasing a per-image limit
+  // should not make a configuration invalid merely because the Inbox's
+  // implicit default was smaller. An explicit Inbox budget still takes
+  // precedence and must be large enough to store one permitted upload.
+  const effectiveInboxMaxBytes = cleaned.inboxMaxBytes
+    ?? Math.max(DEFAULT_INBOX_MAX_BYTES, effectiveMaxImageBytes)
+  if (effectiveInboxMaxBytes < effectiveMaxImageBytes) {
+    throw new Error('inboxMaxBytes must be greater than or equal to maxImageBytes')
   }
 
   // The same replacement semantics apply to model/baseUrl. A custom or

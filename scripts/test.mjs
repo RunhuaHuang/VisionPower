@@ -9,7 +9,7 @@ import { Script } from 'node:vm'
 import { buildSkillScript } from './build-skill.mjs'
 import { DEFAULT_VISION_BASE_URL, getConfigFilePath, getInboxDir, getSkillStateFilePath, getDefaultBaseUrlForModel, loadVisionConfig, markSkillConfigNeedsSetup, markSkillConfigVerified, normalizeConfigObject, resolveModelCapabilities, saveVisionConfig } from '../src/config.js'
 import { toolInputSchema } from '../src/schema.js'
-import { describeImage, normalizeBase64Image, parseRetryAfterMs } from '../src/vision-core.js'
+import { describeImage, normalizeBase64Image, parseRetryAfterMs, resolvePublicImageUrl } from '../src/vision-core.js'
 import { startWebuiServer } from '../src/webui/server.js'
 import { WEBUI_HTML } from '../src/webui/index-html.js'
 import { deleteStagedImage, listStagedImages, readStagedImage, stageImageBuffer } from '../src/image-inbox.js'
@@ -172,7 +172,7 @@ try {
   // --- Secure image Inbox: explicit browser upload -> opaque short-lived ref ---
   const inboxDir = join(tempDir, 'inbox')
   const inboxConfig = testConfig({
-    inbox: { dir: inboxDir, ttlMs: 30 * 60 * 1000, maxEntries: 4 },
+    inbox: { dir: inboxDir, ttlMs: 30 * 60 * 1000, maxEntries: 4, maxBytes: 64 * 1024 * 1024 },
   })
   const stagedNow = Date.now()
   const staged = await stageImageBuffer(gifBytes, 'image/gif', inboxConfig, stagedNow)
@@ -215,22 +215,33 @@ try {
   assert.equal(await deleteStagedImage(staged.id, inboxConfig), true)
 
   const expiryDir = join(tempDir, 'expiry-inbox')
-  const expiryConfig = testConfig({ inbox: { dir: expiryDir, ttlMs: 100, maxEntries: 2 } })
+  const expiryConfig = testConfig({ inbox: { dir: expiryDir, ttlMs: 100, maxEntries: 2, maxBytes: 64 * 1024 * 1024 } })
   const expiring = await stageImageBuffer(gifBytes, 'image/gif', expiryConfig, 10_000)
   assert.equal((await listStagedImages(expiryConfig, 10_050)).length, 1)
   assert.equal((await listStagedImages(expiryConfig, 10_101)).length, 0)
   await assertRejectsMessage(() => readStagedImage(expiring.id, expiryConfig, 10_101), /does not exist or has expired/)
 
   const capacityDir = join(tempDir, 'capacity-inbox')
-  const capacityConfig = testConfig({ inbox: { dir: capacityDir, ttlMs: 10_000, maxEntries: 1 } })
+  const capacityConfig = testConfig({ inbox: { dir: capacityDir, ttlMs: 10_000, maxEntries: 1, maxBytes: 64 * 1024 * 1024 } })
   await stageImageBuffer(gifBytes, 'image/gif', capacityConfig, 20_000)
   await assertRejectsMessage(
     () => stageImageBuffer(gifBytes, 'image/gif', capacityConfig, 20_001),
     /Inbox is full/,
   )
 
+  const byteCapacityDir = join(tempDir, 'byte-capacity-inbox')
+  const byteCapacityConfig = testConfig({
+    inbox: { dir: byteCapacityDir, ttlMs: 10_000, maxEntries: 8, maxBytes: gifBytes.length * 2 },
+  })
+  await stageImageBuffer(gifBytes, 'image/gif', byteCapacityConfig, 20_100)
+  await stageImageBuffer(gifBytes, 'image/gif', byteCapacityConfig, 20_101)
+  await assertRejectsMessage(
+    () => stageImageBuffer(gifBytes, 'image/gif', byteCapacityConfig, 20_102),
+    /max storage is/,
+  )
+
   const concurrentDir = join(tempDir, 'concurrent-inbox')
-  const concurrentConfig = testConfig({ inbox: { dir: concurrentDir, ttlMs: 10_000, maxEntries: 1 } })
+  const concurrentConfig = testConfig({ inbox: { dir: concurrentDir, ttlMs: 10_000, maxEntries: 1, maxBytes: 64 * 1024 * 1024 } })
   const concurrentResults = await Promise.allSettled([
     stageImageBuffer(gifBytes, 'image/gif', concurrentConfig),
     stageImageBuffer(gifBytes, 'image/gif', concurrentConfig),
@@ -250,9 +261,11 @@ try {
   assert.ok(inboxSource.includes('lstat(lock.lockPath, { bigint: true })'))
   assert.ok(inboxSource.includes('sameLockFile(held, current)'))
   assert.ok(inboxSource.includes('lock.handle.utimes(now, now)'))
+  assert.ok(inboxSource.includes('await rename(lockPath, quarantinePath)'))
+  assert.ok(inboxSource.includes('assertStageLockOwnership'))
 
   const staleLockDir = join(tempDir, 'stale-lock-inbox')
-  const staleLockConfig = testConfig({ inbox: { dir: staleLockDir, ttlMs: 10_000, maxEntries: 2 } })
+  const staleLockConfig = testConfig({ inbox: { dir: staleLockDir, ttlMs: 10_000, maxEntries: 2, maxBytes: 64 * 1024 * 1024 } })
   await listStagedImages(staleLockConfig)
   const staleLockPath = join(staleLockDir, '.stage.lock')
   writeFileSync(staleLockPath, 'crashed writer')
@@ -263,7 +276,7 @@ try {
 
   if (process.platform !== 'win32') {
     const symlinkDir = join(tempDir, 'symlink-inbox')
-    const symlinkConfig = testConfig({ inbox: { dir: symlinkDir, ttlMs: 10_000, maxEntries: 2 } })
+    const symlinkConfig = testConfig({ inbox: { dir: symlinkDir, ttlMs: 10_000, maxEntries: 2, maxBytes: 64 * 1024 * 1024 } })
     await listStagedImages(symlinkConfig, 30_000)
     const protectedTarget = join(tempDir, 'inbox-protected-target.json')
     const maliciousRef = `vpimg_${'Z'.repeat(32)}`
@@ -292,7 +305,7 @@ try {
     const broadDir = join(tempDir, 'broad-inbox')
     mkdirSync(broadDir, { mode: 0o755 })
     chmodSync(broadDir, 0o755)
-    const broadConfig = testConfig({ inbox: { dir: broadDir, ttlMs: 10_000, maxEntries: 2 } })
+    const broadConfig = testConfig({ inbox: { dir: broadDir, ttlMs: 10_000, maxEntries: 2, maxBytes: 64 * 1024 * 1024 } })
     await assertRejectsMessage(
       () => listStagedImages(broadConfig),
       /owned by the current user with mode 0700 or stricter/,
@@ -399,11 +412,16 @@ try {
     /http or https/,
   )
   await assertRejectsMessage(
-    () => describeImage(
-      { image_url: 'https://example.com/image.png' },
-      testConfig({ model: 'kimi-k3', baseUrl: 'https://api.moonshot.cn/v1' }),
-    ),
-    /does not accept public image URLs; use image_base64 or image_ref/,
+    () => resolvePublicImageUrl('http://localhost.localdomain/image.png', async () => [
+      { address: '::1', family: 6 }, { address: '127.0.0.1', family: 4 },
+    ]),
+    /resolve only to publicly reachable addresses/,
+  )
+  await assertRejectsMessage(
+    () => resolvePublicImageUrl('https://public.example/image.png', async () => [
+      { address: '93.184.216.34', family: 4 }, { address: '127.0.0.1', family: 4 },
+    ]),
+    /resolve only to publicly reachable addresses/,
   )
   await assertRejectsMessage(
     () => describeImage({ image_url: 'http://localhost/image.png' }, testConfig()),
@@ -820,14 +838,9 @@ try {
     assert.equal(calls.length, 3)
   })
 
-  // Public URLs are mutable references, so repeating one must call the model
-  // again instead of returning a potentially stale cached answer.
-  await withMockFetch(async (calls) => {
-    const input = { image_url: 'https://images.example/current.png', prompt: 'mutable URL' }
-    await describeImage(input, cacheConfig)
-    await describeImage(input, cacheConfig)
-    assert.equal(calls.length, 2)
-  })
+  // Public URLs are downloaded, validated, and converted to byte-backed data
+  // before they reach the provider. They no longer need a special mutable-URL
+  // cache exemption: only the resolved image bytes participate in the key.
 
   // A different image (same prompt) must NOT hit the cache.
   await withMockFetch(async (calls) => {
@@ -1278,6 +1291,7 @@ try {
   assert.equal(visionpowerEnv.maxImages, 4)
   assert.equal(visionpowerEnv.inbox.ttlMs, 30 * 60 * 1000)
   assert.equal(visionpowerEnv.inbox.maxEntries, 64)
+  assert.equal(visionpowerEnv.inbox.maxBytes, 64 * 1024 * 1024)
 
   const precedence = cfg({
     VISIONPOWER_API_KEY: 'visionpower-key',
@@ -1386,6 +1400,20 @@ try {
     VISIONPOWER_API_KEY: 'k',
     VISIONPOWER_INBOX_MAX_ENTRIES: '10001',
   }), /VISIONPOWER_INBOX_MAX_ENTRIES must not exceed 10000/)
+  assert.throws(() => cfg({
+    VISIONPOWER_API_KEY: 'k',
+    VISIONPOWER_INBOX_MAX_BYTES: String(512 * 1024 * 1024 + 1),
+  }), /VISIONPOWER_INBOX_MAX_BYTES must not exceed 536870912/)
+  assert.equal(cfg({
+    VISIONPOWER_API_KEY: 'k',
+    VISIONPOWER_MAX_IMAGE_BYTES: String(100 * 1024 * 1024),
+    VISIONPOWER_MAX_TOTAL_IMAGE_BYTES: String(100 * 1024 * 1024),
+  }).inbox.maxBytes, 100 * 1024 * 1024)
+  assert.throws(() => cfg({
+    VISIONPOWER_API_KEY: 'k',
+    VISIONPOWER_MAX_IMAGE_BYTES: '100',
+    VISIONPOWER_INBOX_MAX_BYTES: '99',
+  }), /VISIONPOWER_INBOX_MAX_BYTES must be greater than or equal to VISIONPOWER_MAX_IMAGE_BYTES/)
 
   // --- Persistent config file (env still wins over it) ---
   const fileConfigPath = join(tempDir, 'vp-config.json')
@@ -1408,9 +1436,10 @@ try {
     VISIONPOWER_INBOX_DIR: join(tempDir, 'custom-inbox'),
     VISIONPOWER_INBOX_TTL_MS: '9000',
     VISIONPOWER_INBOX_MAX_ENTRIES: '7',
+    VISIONPOWER_INBOX_MAX_BYTES: String(20 * 1024 * 1024),
   })
   assert.deepEqual(inboxSettings.inbox, {
-    dir: join(tempDir, 'custom-inbox'), ttlMs: 9000, maxEntries: 7,
+    dir: join(tempDir, 'custom-inbox'), ttlMs: 9000, maxEntries: 7, maxBytes: 20 * 1024 * 1024,
   })
 
   // Cache config file keys + env overrides.
@@ -1613,6 +1642,7 @@ try {
     maxRetries: 1,
     inboxTtlMs: 90_000,
     inboxMaxEntries: 12,
+    inboxMaxBytes: 8192,
     debug: true,
     cache: { enabled: true, maxEntries: 10, ttlMs: 5000 },
     allowedDirs: '/a, /b',
@@ -1626,6 +1656,7 @@ try {
   assert.equal(clean.maxRetries, 1)
   assert.equal(clean.inboxTtlMs, 90_000)
   assert.equal(clean.inboxMaxEntries, 12)
+  assert.equal(clean.inboxMaxBytes, 8192)
   assert.deepEqual(clean.cache, { enabled: true, maxEntries: 10, ttlMs: 5000 })
   assert.equal(clean.__proto__?.x, undefined)
   assert.equal(clean.constructor, Object.prototype.constructor) // not the string
@@ -1666,6 +1697,14 @@ try {
   assertThrowsMessage(
     () => normalizeConfigObject({ inboxMaxEntries: 0 }),
     /inboxMaxEntries.*positive integer/,
+  )
+  assertThrowsMessage(
+    () => normalizeConfigObject({ inboxMaxBytes: 0 }),
+    /inboxMaxBytes.*positive integer/,
+  )
+  assertThrowsMessage(
+    () => normalizeConfigObject({ maxImageBytes: 20, inboxMaxBytes: 10 }),
+    /inboxMaxBytes must be greater than or equal to maxImageBytes/,
   )
   assertThrowsMessage(
     () => normalizeConfigObject({ maxImageBytes: 20, maxTotalImageBytes: 10 }),

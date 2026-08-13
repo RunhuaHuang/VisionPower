@@ -235,6 +235,7 @@ function getWebuiConfig() {
     timeoutMs: effective.requestTimeoutMs,
     inboxTtlMs: effective.inbox.ttlMs,
     inboxMaxEntries: effective.inbox.maxEntries,
+    inboxMaxBytes: effective.inbox.maxBytes,
     // Keep the persisted file key editable without ever returning it in full.
     // If an environment key overrides it, the connection-test path still uses
     // the effective key from loadVisionConfig() when the mask is echoed back.
