@@ -1,5 +1,32 @@
 # Changelog
 
+## 2.8.0 — 2026-08-14
+
+- Provider requests are now sent streamed (`stream: true`) and aggregated
+  internally into the complete answer — callers see no behavior change. A
+  new first-byte watchdog (default 15s, config `firstByteTimeoutMs` / env
+  `VISIONPOWER_FIRST_BYTE_TIMEOUT_MS`, capped at `timeoutMs`) aborts and
+  retries early when an upstream accepts the request but stalls before its
+  first token, instead of idling to the full request timeout. Gateways that
+  ignore the `stream` flag (plain JSON answers) or reject it outright
+  (automatic non-streaming retry) are both handled.
+- Added a cross-process on-disk result cache (default `~/.visionpower/cache`,
+  env `VISIONPOWER_CACHE_DIR`). The in-memory cache dies with the process, so
+  short-lived Skill runs never shared results; the disk mirror reuses recent
+  identical image+prompt requests across processes under the same
+  TTL/entry-budget knobs, with owner-only files.
+- Raised the default `maxTokens` from 2048 to 4096: long OCR answers were
+  regularly truncated, forcing agents to re-run the whole call. Configs saved
+  by an older WebUI (which persisted the then-default 2048 explicitly) still
+  count as "no explicit user budget", so provider-recommended budgets (e.g.
+  Kimi's 32768) keep applying to the connection probe and preset switching.
+- Tool descriptions and the Skill guide now steer agents toward focused
+  prompts ("Read the error message text") over open-ended "describe
+  everything" requests — output length is the dominant per-call latency
+  factor.
+- The WebUI gained a "First-Byte Timeout" setting and no longer exposes the
+  server-side cache directory through `GET /api/config`.
+
 ## 2.7.2 — 2026-08-14
 
 - Added Anthropic Messages API protocol support for custom model presets. Users
