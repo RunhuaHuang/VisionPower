@@ -1,5 +1,35 @@
 # Changelog
 
+## 2.7.0 — 2026-08-14
+
+- Hid the private welfare gateway endpoint everywhere the browser can see:
+  the WebUI and its API exchange only the opaque `builtin:welfare` alias, and
+  the server resolves the alias back to the real endpoint for validation,
+  persistence, and connection probes. The endpoint itself is stored as an
+  XOR+Base64 cipher in the published source instead of plaintext, and the
+  hostname in the capability registry is derived from that cipher.
+- Restricted the welfare alias to the model the channel actually serves:
+  requests pairing the alias with any model other than MiniMax-M3 are rejected
+  with a clear error, so the private gateway cannot be reused for arbitrary
+  models.
+- Unified the WebUI's API-key preservation rules for `PUT /api/config` and
+  `POST /api/test-connection` into one shared `resolveApiKeyChoice` helper so
+  the two routes cannot drift, and fixed an indentation drift in the PUT
+  handler.
+- Hardened `readJsonBody`: oversized bodies now get the connection dropped
+  shortly after the 413 response instead of letting a peer stream
+  indefinitely.
+- Simplified WebUI routing: the query string is stripped once per request and
+  the pathname is shared by the static and API dispatch paths.
+- Made `normalizeModelForKnownEndpoint` tolerate an unparsable Base URL
+  instead of throwing a bare `TypeError`.
+- Masked the welfare endpoint in the `PUT /api/config` response too — the
+  resolved Base URL is persisted but never echoed back to the browser.
+- Fixed a WebUI foot-gun where merely focusing/editing the API-key field
+  (without changing its masked value) marked it dirty, which could persist the
+  display mask as the real credential on save. The dirty flag now only trips
+  when the value actually differs from the loaded mask.
+
 ## 2.6.1 — 2026-08-13
 
 - Added `scripts/patch-dsh.mjs` (also shipped in the npm package): a
