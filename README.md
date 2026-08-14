@@ -30,6 +30,8 @@ VisionPower 让 Codex、Claude Desktop、Cursor、Cline、Cherry Studio 等 Agen
 - 🔌 **模型无关** —— 任意 OpenAI-compatible 视觉服务，改两个环境变量即可切换。
 - 🔒 **安全优先** —— 路径白名单、文件 magic-byte 校验、私网/SSRF 防护、严格 base64 与输入 schema 校验。详见 [安全设计](#-安全设计)。
 - 🔁 **稳健** —— 上游限流 / 5xx / 网络抖动自动重试（指数退避），超时同时覆盖响应体读取，不会卡死请求。
+- ⚡ **流式请求 + 首字看门狗** —— 对服务商的请求以流式发出（结果仍聚合为完整答案）：若上游接受请求后迟迟不吐首个字符（排队拥塞、网关挂起），默认 15 秒即中断重试，不必干等整体超时；个别不支持 `stream` 参数的网关会自动降级为非流式。
+- 💾 **跨进程结果缓存** —— 相同图片与问题的重复请求直接返回近期结果：常驻 MCP 进程走内存缓存，短生命周期的 Skill 脚本走 `~/.visionpower/cache` 磁盘镜像。
 - 🪶 **极简依赖** —— MCP/WebUI 的直接运行时依赖仅为官方 MCP SDK、zod 与本地提供的 Alpine.js；无原生模块、无图像库。独立 Skill 仍是零依赖脚本。
 - 🌐 **国内友好** —— 内置 npmmirror 镜像与本地安装路径，弱网也能稳定启动。
 
@@ -523,20 +525,22 @@ echo '<JSON 请求>' | node <skill>/describe_image.mjs # 或从 stdin 传入
 | `VISIONPOWER_ALLOWED_DIRS` | | （空 = 不限制） | 逗号分隔的允许目录白名单，`image_path` 必须落在其中。 |
 | `VISIONPOWER_MAX_IMAGE_BYTES` | | `20971520` (20MB) | 单张本地/Base64 图片最大字节数。 |
 | `VISIONPOWER_MAX_TOTAL_IMAGE_BYTES` | | `67108864` (64MB) | 单次调用全部本地/Base64 图片的总字节上限；必须不小于单图上限，公网 URL 不计入。 |
-| `VISIONPOWER_TIMEOUT_MS` | | `60000` | 上游接口超时时间（毫秒）。 |
-| `VISIONPOWER_MAX_TOKENS` | | `2048`（Kimi K2.6/K2.7 Code/K3 默认推荐 `32768`） | 最大输出 token 数；显式设置后优先使用用户值。 |
+| `VISIONPOWER_TIMEOUT_MS` | | `60000` | 上游接口超时时间（毫秒），覆盖建连到响应体读完的全程。 |
+| `VISIONPOWER_FIRST_BYTE_TIMEOUT_MS` | | `15000` | 首字响应超时（毫秒）。请求以流式发出，若服务商已接受请求却在此时限内未吐出首个字符，会提前中断并按重试策略重试，避免干等整体超时；实际取值不会超过 `timeoutMs`。配置文件键为 `firstByteTimeoutMs`。 |
+| `VISIONPOWER_MAX_TOKENS` | | `4096`（Kimi K2.6/K2.7 Code/K3 默认推荐 `32768`） | 最大输出 token 数；显式设置后优先使用用户值。 |
 | `VISIONPOWER_MAX_IMAGES` | | `8` | 单次调用最多分析的图片数量。 |
 | `VISIONPOWER_MAX_RETRIES` | | `2` | 上游 429/5xx 或网络错误时的自动重试次数（指数退避 + 抖动）。 |
 | `VISIONPOWER_INBOX_DIR` | | `~/.visionpower/inbox` | 图片 Inbox 目录；默认从配置文件所在目录派生。最终目录必须由当前用户所有、权限为 `0700` 或更严格，且不能是符号链接。 |
 | `VISIONPOWER_INBOX_TTL_MS` | | `1800000` (30 分钟) | 暂存图片的有效期；仅在写入或访问 Inbox 时惰性清理过期项，不启动后台定时器。配置文件键为 `inboxTtlMs`。 |
 | `VISIONPOWER_INBOX_MAX_ENTRIES` | | `64` | Inbox 最大条目数，满时拒绝新上传而不会静默删除仍有效的图片。配置文件键为 `inboxMaxEntries`。 |
 | `VISIONPOWER_DEBUG` | | `false` | 设为 `true` 时向 stderr 输出请求模型、图片数与耗时等调试信息。 |
-| `VISIONPOWER_CACHE` | | `true` | 是否启用**进程内结果缓存**：同一会话内字节完全相同的本地/Base64 图片与问题直接返回上次结果；公开 URL 内容可变，因此不会缓存。设为 `false` 关闭。 |
-| `VISIONPOWER_CACHE_MAX_ENTRIES` | | `32` | 结果缓存最多保留的条数；设为 `0` 等同关闭缓存。 |
+| `VISIONPOWER_CACHE` | | `true` | 是否启用**结果缓存**：字节完全相同的本地/Base64 图片与问题直接返回上次结果；公开 URL 内容可变，因此不会缓存。设为 `false` 关闭。 |
+| `VISIONPOWER_CACHE_MAX_ENTRIES` | | `32` | 结果缓存最多保留的条数（内存与磁盘镜像共用此配额）；设为 `0` 等同关闭缓存。 |
 | `VISIONPOWER_CACHE_TTL_MS` | | `1800000` (30 分钟) | 单条缓存的存活时间（毫秒），过期后下次相同请求会重新调用模型。 |
+| `VISIONPOWER_CACHE_DIR` | | `~/.visionpower/cache` | 结果缓存磁盘镜像目录。进程内缓存会随进程退出消失，磁盘镜像让短生命周期的 Skill 脚本进程也能复用近期相同请求的结果（同一 TTL 与条目配额，文件权限 `0600`）。 |
 | `VISIONPOWER_SKILL_STATE` | | `~/.visionpower/skill-state.json` | 仅 Skill 脚本使用：记录配置是否已成功验证，避免后续重复预检。 |
 
-> **配置硬上限**：为防止错误环境变量或 WebUI 请求造成过量内存/重试，单图最多 256MB、单次本地/Base64 总量最多 512MB、最大输出 131072 tokens、最多 64 张图、最多 8 次重试、缓存和 Inbox 各最多 10000 条，TTL 最长 30 天。超过上限会在读取或保存配置时直接报错。
+> **配置硬上限**：为防止错误环境变量或 WebUI 请求造成过量内存/重试，单图最多 256MB、单次本地/Base64 总量最多 512MB、最大输出 131072 tokens、最多 64 张图、最多 8 次重试、首字超时最长 600000ms、缓存和 Inbox 各最多 10000 条，TTL 最长 30 天。超过上限会在读取或保存配置时直接报错。
 
 > **命名**：主前缀是 `VISIONPOWER_*`。API Key 还可回退读取 `OPENAI_API_KEY`。
 

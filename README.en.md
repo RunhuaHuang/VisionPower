@@ -30,6 +30,8 @@ It is **not tied to any single model**: it defaults to Qwen-VL via Alibaba Cloud
 - 🔌 **Model-agnostic** — any OpenAI-compatible vision provider; switch by changing two env vars.
 - 🔒 **Security first** — path allowlist, file magic-byte verification, private/SSRF guard, strict base64 and input schema validation. See [Security](#-security-by-design).
 - 🔁 **Resilient** — automatic retries on upstream throttling / 5xx / network blips (exponential backoff), with a timeout that also covers reading the response body so requests never hang.
+- ⚡ **Streamed requests + first-byte watchdog** — provider requests are sent streamed (the answer is still aggregated): if the upstream accepts the request but stalls before the first token (queue congestion, gateway hang), the call aborts and retries after 15s by default instead of idling to the full timeout; gateways that reject the `stream` parameter fall back to non-streaming automatically.
+- 💾 **Cross-process result cache** — repeated identical image + prompt requests return the recent answer directly: long-lived MCP processes use the in-memory cache, short-lived Skill runs share the on-disk mirror under `~/.visionpower/cache`.
 - 🪶 **Minimal dependencies** — the MCP/WebUI's direct runtime dependencies are only the official MCP SDK, zod, and locally served Alpine.js; there are no native modules or image libraries. The standalone Skill remains dependency-free.
 - 🌐 **China-friendly** — built-in npmmirror and local-install paths for unreliable networks.
 
@@ -455,20 +457,22 @@ Both forms share the same configuration. Precedence: **env var > config file > d
 | `VISIONPOWER_ALLOWED_DIRS` | | (empty = unrestricted) | Comma-separated allowlist of directories that `image_path` must fall inside. |
 | `VISIONPOWER_MAX_IMAGE_BYTES` | | `20971520` (20MB) | Max size per local/Base64 image, in bytes. |
 | `VISIONPOWER_MAX_TOTAL_IMAGE_BYTES` | | `67108864` (64MB) | Total local/Base64 image bytes per call; must be at least the per-image limit. Provider-fetched public URLs do not count. |
-| `VISIONPOWER_TIMEOUT_MS` | | `60000` | Upstream API timeout (ms). |
-| `VISIONPOWER_MAX_TOKENS` | | `2048` (Kimi K2.6/K2.7 Code/K3 recommended default `32768`) | Max response tokens; an explicit user value takes precedence. |
+| `VISIONPOWER_TIMEOUT_MS` | | `60000` | Upstream API timeout (ms), covering connection through the fully-read response body. |
+| `VISIONPOWER_FIRST_BYTE_TIMEOUT_MS` | | `15000` | First-byte timeout (ms). Requests are sent streamed; if the provider accepts the request but emits no first token within this window (queue congestion, gateway hang), the call is aborted and retried early instead of waiting out the full timeout. Never exceeds `timeoutMs`. Config-file key: `firstByteTimeoutMs`. |
+| `VISIONPOWER_MAX_TOKENS` | | `4096` (Kimi K2.6/K2.7 Code/K3 recommended default `32768`) | Max response tokens; an explicit user value takes precedence. |
 | `VISIONPOWER_MAX_IMAGES` | | `8` | Max images per call. |
 | `VISIONPOWER_MAX_RETRIES` | | `2` | Automatic retries on upstream 429/5xx or network errors (exponential backoff + jitter). |
 | `VISIONPOWER_INBOX_DIR` | | `~/.visionpower/inbox` | Image Inbox directory, derived from the config-file directory by default. It must be owned by the current user, mode `0700` or stricter, and not a symlink. |
 | `VISIONPOWER_INBOX_TTL_MS` | | `1800000` (30 min) | Staged-image lifetime; expired entries are lazily cleaned only during Inbox writes or reads, with no background timer. Config-file key: `inboxTtlMs`. |
 | `VISIONPOWER_INBOX_MAX_ENTRIES` | | `64` | Maximum staged images. A full Inbox rejects a new upload rather than silently deleting a live item. Config-file key: `inboxMaxEntries`. |
 | `VISIONPOWER_DEBUG` | | `false` | When `true`, logs the request model, image count, and timing to stderr. |
-| `VISIONPOWER_CACHE` | | `true` | Enable the **in-process result cache**: byte-identical local/Base64 image + prompt requests in the same session reuse the previous answer. Public URLs are mutable and are never cached. Set to `false` to disable. |
-| `VISIONPOWER_CACHE_MAX_ENTRIES` | | `32` | Max entries kept in the result cache; `0` disables it. |
+| `VISIONPOWER_CACHE` | | `true` | Enable the **result cache**: byte-identical local/Base64 image + prompt requests reuse the previous answer. Public URLs are mutable and are never cached. Set to `false` to disable. |
+| `VISIONPOWER_CACHE_MAX_ENTRIES` | | `32` | Max entries kept in the result cache (shared by the in-memory map and the disk mirror); `0` disables it. |
 | `VISIONPOWER_CACHE_TTL_MS` | | `1800000` (30 min) | Per-entry cache lifetime in ms; after it elapses, a repeated request calls the model again. |
+| `VISIONPOWER_CACHE_DIR` | | `~/.visionpower/cache` | On-disk cache-mirror directory. The in-memory cache dies with the process; the mirror lets short-lived Skill-script processes reuse recent identical results (same TTL and entry budget, files mode `0600`). |
 | `VISIONPOWER_SKILL_STATE` | | `~/.visionpower/skill-state.json` | Skill script only: records whether setup has been verified so later calls can skip repeated preflight checks. |
 
-> **Hard configuration ceilings**: to prevent malformed environment variables or WebUI requests from causing excessive memory use or retries, one image is capped at 256MB, one call's local/Base64 total at 512MB, output at 131072 tokens, images at 64, retries at 8, cache and Inbox entries at 10000 each, and TTL at 30 days. Values above these ceilings fail during config load or save.
+> **Hard configuration ceilings**: to prevent malformed environment variables or WebUI requests from causing excessive memory use or retries, one image is capped at 256MB, one call's local/Base64 total at 512MB, output at 131072 tokens, images at 64, retries at 8, the first-byte timeout at 600000ms, cache and Inbox entries at 10000 each, and TTL at 30 days. Values above these ceilings fail during config load or save.
 
 > **Naming**: the primary prefix is `VISIONPOWER_*`. The API key also falls back to `OPENAI_API_KEY`.
 

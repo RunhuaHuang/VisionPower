@@ -313,6 +313,12 @@ code-block{display:block;background:var(--code-bg);color:var(--code-text);font-f
           </div>
         </div>
 
+        <div class="form-group">
+          <label class="label" x-text="i18n[lang].firstByteTimeoutLabel"></label>
+          <input type="number" min="1" x-model.number="config.firstByteTimeoutMs" />
+          <div class="mono" style="font-size:var(--fs-mono-xs);color:var(--text-muted);margin-top:var(--space-xs)" x-text="i18n[lang].firstByteTimeoutHint"></div>
+        </div>
+
         <div class="grid-2">
           <div class="form-group">
             <label class="label" x-text="i18n[lang].maxImagesLabel"></label>
@@ -513,7 +519,8 @@ function consoleApp() {
         maxImageBytes: 20971520,
         maxTotalImageBytes: 67108864,
       timeoutMs: 60000,
-      maxTokens: 2048,
+      firstByteTimeoutMs: 15000,
+      maxTokens: 4096,
         maxImages: 8,
         maxRetries: 2,
         inboxTtlMs: 1800000,
@@ -578,6 +585,8 @@ function consoleApp() {
         maxTotalImageBytesLabel: '单次本地/Base64 图片总上限 (Bytes)',
         maxTotalImageBytesHint: '默认 64MB；公网 URL 会安全下载到本机并计入此上限。',
         timeoutLabel: '请求超时时间 (毫秒)',
+        firstByteTimeoutLabel: '首字响应超时 (毫秒)',
+        firstByteTimeoutHint: '默认 15000；模型已接受请求但迟迟不吐首个字符时提前中断并重试，避免干等到整体超时。不超过请求超时时间。',
         maxTokensLabel: '最大输出 Token 数 (Max Tokens)',
         maxImagesLabel: '单次最大分析图片数',
         maxRetriesLabel: '失败自动重试次数',
@@ -588,7 +597,7 @@ function consoleApp() {
         debugTitle: '调试模式 (Debug Mode)',
         debugDesc: '在标准错误输出 (process.stderr) 中打印详细调试日志',
         cacheTitle: '启用缓存 (Cache)',
-        cacheDesc: '对完全相同的图像和提示词请求进行进程内缓存 (不占用磁盘)',
+        cacheDesc: '对完全相同的图像和提示词请求做结果缓存：常驻进程走内存，短生命周期进程（如 Skill 脚本）共享磁盘镜像目录（默认 ~/.visionpower/cache，owner-only 权限），受 TTL 与条目上限约束。',
         cacheMaxLabel: '缓存最大条目数',
         cacheTtlLabel: '缓存有效期 TTL (毫秒)',
         configPathLabel: '配置文件路径: ',
@@ -670,6 +679,8 @@ function consoleApp() {
         maxTotalImageBytesLabel: 'Max Total Local/Base64 Image Bytes',
         maxTotalImageBytesHint: 'Default 64MB. Public URLs are safely downloaded locally and count toward this buffer cap.',
         timeoutLabel: 'Request Timeout (ms)',
+        firstByteTimeoutLabel: 'First-Byte Timeout (ms)',
+        firstByteTimeoutHint: 'Default 15000. When the provider accepts the request but stalls before the first streamed token, abort and retry early instead of waiting for the full timeout. Capped at the request timeout.',
         maxTokensLabel: 'Max Tokens',
         maxImagesLabel: 'Max Images',
         maxRetriesLabel: 'Max Retries',
@@ -680,7 +691,7 @@ function consoleApp() {
         debugTitle: 'Debug Mode',
         debugDesc: 'Print debug information to process.stderr',
         cacheTitle: 'Cache Enabled',
-        cacheDesc: 'Process-local cache for identical image description calls',
+        cacheDesc: 'Caches results for identical image+prompt requests: long-lived processes use memory, short-lived processes (e.g. Skill runs) share an on-disk mirror (default ~/.visionpower/cache, owner-only files) bounded by the TTL and entry limits.',
         cacheMaxLabel: 'Cache Max Entries',
         cacheTtlLabel: 'Cache TTL (ms)',
         configPathLabel: 'Config path: ',
@@ -795,7 +806,8 @@ function consoleApp() {
           maxImageBytes: data.maxImageBytes !== undefined ? data.maxImageBytes : 20971520,
           maxTotalImageBytes: data.maxTotalImageBytes !== undefined ? data.maxTotalImageBytes : 67108864,
           timeoutMs: data.timeoutMs !== undefined ? data.timeoutMs : 60000,
-          maxTokens: data.maxTokens !== undefined ? data.maxTokens : 2048,
+          firstByteTimeoutMs: data.firstByteTimeoutMs !== undefined ? data.firstByteTimeoutMs : 15000,
+          maxTokens: data.maxTokens !== undefined ? data.maxTokens : 4096,
           maxImages: data.maxImages !== undefined ? data.maxImages : 8,
           maxRetries: data.maxRetries !== undefined ? data.maxRetries : 2,
           inboxTtlMs: data.inboxTtlMs !== undefined ? data.inboxTtlMs : 1800000,
@@ -853,7 +865,10 @@ function consoleApp() {
           this.config.model = selected.model;
           this.config.baseUrl = selected.baseUrl;
           this.config.protocol = 'openai';
-          if (selected.recommendedMaxTokens && this.config.maxTokens === 2048) {
+          // Both historical implicit defaults (2048 pre-2.8, 4096 after) count
+          // as "user never chose a budget": configs saved by the older WebUI
+          // persist 2048 explicitly.
+          if (selected.recommendedMaxTokens && [2048, 4096].includes(this.config.maxTokens)) {
             this.config.maxTokens = selected.recommendedMaxTokens;
           }
           if (providerChanged) {

@@ -10,7 +10,20 @@ export const DEFAULT_MAX_IMAGE_BYTES = 20 * 1024 * 1024
 export const DEFAULT_MAX_TOTAL_IMAGE_BYTES = 64 * 1024 * 1024
 export const DEFAULT_REQUEST_TIMEOUT_MS = 60_000
 export const MAX_REQUEST_TIMEOUT_MS = 2_147_483_647
-export const DEFAULT_MAX_TOKENS = 2048
+// Long OCR answers regularly exceed 2048 output tokens; a truncated answer
+// makes the agent retry the whole call, so the default budget favors one
+// complete answer over a marginally cheaper first attempt.
+export const DEFAULT_MAX_TOKENS = 4096
+// Values that have historically served as the implicit maxTokens default. A
+// config saved by an older WebUI persists the then-current default explicitly,
+// so "is this still the default?" checks must accept every historical value —
+// otherwise e.g. a Kimi preset's recommendedMaxTokens stops applying after an
+// upgrade (hidden reasoning burns the whole budget → false "no text content").
+export const DEFAULT_MAX_TOKENS_HISTORY = [2048, DEFAULT_MAX_TOKENS]
+// Streamed requests fail fast when the provider accepts the connection but
+// stalls before emitting the first token (queue congestion, gateway hangs).
+export const DEFAULT_FIRST_BYTE_TIMEOUT_MS = 15_000
+export const MAX_CONFIG_FIRST_BYTE_TIMEOUT_MS = 600_000
 export const DEFAULT_MAX_IMAGES = 8
 export const DEFAULT_MAX_RETRIES = 2
 export const DEFAULT_CACHE_MAX_ENTRIES = 32
@@ -369,6 +382,13 @@ export function getInboxDir(env = process.env) {
   return resolve(env.VISIONPOWER_INBOX_DIR?.trim() || join(dirname(getConfigFilePath(env)), 'inbox'))
 }
 
+// On-disk mirror of the in-process result cache, so short-lived processes
+// (the standalone Skill script) can reuse a recent identical answer. Derived
+// from the config file location, never persisted into config.json itself.
+export function getCacheDir(env = process.env) {
+  return resolve(env.VISIONPOWER_CACHE_DIR?.trim() || join(dirname(getConfigFilePath(env)), 'cache'))
+}
+
 function isOwnedTempFileEntry(filePath, entry) {
   const prefix = `${basename(filePath)}.`
   const suffix = '.tmp'
@@ -609,6 +629,14 @@ export function loadVisionConfig(env = process.env) {
     throw new Error(`${source} must not exceed ${MAX_REQUEST_TIMEOUT_MS}`)
   }
 
+  const firstByteTimeoutEnv = readEnvValue(env, ['VISIONPOWER_FIRST_BYTE_TIMEOUT_MS'])
+  const firstByteTimeoutFile = integerFromFile(file.firstByteTimeoutMs, 'firstByteTimeoutMs', { max: MAX_CONFIG_FIRST_BYTE_TIMEOUT_MS })
+  const firstByteTimeoutMs = parsePositiveInteger(
+    firstByteTimeoutEnv,
+    firstByteTimeoutFile ?? DEFAULT_FIRST_BYTE_TIMEOUT_MS,
+    MAX_CONFIG_FIRST_BYTE_TIMEOUT_MS,
+  )
+
   const maxImageBytes = parsePositiveInteger(
     readEnvValue(env, ['VISIONPOWER_MAX_IMAGE_BYTES']),
     integerFromFile(file.maxImageBytes, 'maxImageBytes', { max: MAX_CONFIG_IMAGE_BYTES }) ?? DEFAULT_MAX_IMAGE_BYTES,
@@ -630,6 +658,7 @@ export function loadVisionConfig(env = process.env) {
       MAX_CONFIG_TOTAL_IMAGE_BYTES,
     ),
     requestTimeoutMs,
+    firstByteTimeoutMs,
     maxTokens: parsePositiveInteger(
       readEnvValue(env, ['VISIONPOWER_MAX_TOKENS']),
       integerFromFile(file.maxTokens, 'maxTokens', { max: MAX_CONFIG_TOKENS })
@@ -730,7 +759,7 @@ function resolveCacheConfig(env, file) {
 
   if (maxEntries <= 0) enabled = false
 
-  return { enabled, maxEntries, ttlMs }
+  return { enabled, maxEntries, ttlMs, dir: getCacheDir(env) }
 }
 
 export function normalizeBaseUrl(value, name) {
@@ -814,7 +843,8 @@ export function saveVisionConfig(config, env = process.env) {
 // the validators below) so the server and the validation pass always agree.
 export const ALLOWED_CONFIG_KEYS = new Set([
   'apiKey', 'model', 'baseUrl', 'protocol', 'allowedDirs',
-  'maxImageBytes', 'maxTotalImageBytes', 'timeoutMs', 'maxTokens', 'maxImages', 'maxRetries',
+  'maxImageBytes', 'maxTotalImageBytes', 'timeoutMs', 'firstByteTimeoutMs',
+  'maxTokens', 'maxImages', 'maxRetries',
   'inboxTtlMs', 'inboxMaxEntries', 'inboxMaxBytes', 'debug', 'cache',
 ])
 
@@ -892,6 +922,7 @@ export function normalizeConfigObject(input) {
     { key: 'maxImageBytes', label: 'maxImageBytes', allowZero: false, max: MAX_CONFIG_IMAGE_BYTES },
     { key: 'maxTotalImageBytes', label: 'maxTotalImageBytes', allowZero: false, max: MAX_CONFIG_TOTAL_IMAGE_BYTES },
     { key: 'timeoutMs', label: 'timeoutMs', allowZero: false },
+    { key: 'firstByteTimeoutMs', label: 'firstByteTimeoutMs', allowZero: false, max: MAX_CONFIG_FIRST_BYTE_TIMEOUT_MS },
     { key: 'maxTokens', label: 'maxTokens', allowZero: false, max: MAX_CONFIG_TOKENS },
     { key: 'maxImages', label: 'maxImages', allowZero: false, max: MAX_CONFIG_IMAGES },
     { key: 'maxRetries', label: 'maxRetries', allowZero: true, max: MAX_CONFIG_RETRIES },

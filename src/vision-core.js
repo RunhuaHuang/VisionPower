@@ -1,11 +1,11 @@
 import { realpathSync, constants as fsConstants } from 'node:fs'
-import { lstat, open, realpath } from 'node:fs/promises'
+import { lstat, mkdir, open, readFile, readdir, realpath, rename, stat, unlink, utimes, writeFile } from 'node:fs/promises'
 import { createHash } from 'node:crypto'
 import { lookup } from 'node:dns/promises'
 import { BlockList, isIP } from 'node:net'
 import { request as httpRequest } from 'node:http'
 import { request as httpsRequest } from 'node:https'
-import { extname, isAbsolute, resolve, sep } from 'node:path'
+import { extname, isAbsolute, join, resolve, sep } from 'node:path'
 import { resolveModelCapabilities, ensureAnthropicVersionPath } from './config.js'
 import { readStagedImage } from './image-inbox.js'
 
@@ -121,7 +121,7 @@ export function parseRetryAfterMs(value, now = Date.now()) {
   return Math.min(Math.max(timestamp - now, 0), MAX_RETRY_AFTER_MS)
 }
 
-async function readResponseText(response) {
+async function readResponseText(response, onFirstByte) {
   const declaredLength = response.headers.get('content-length')
   if (declaredLength && /^\d+$/.test(declaredLength)
     && Number(declaredLength) > MAX_RESPONSE_BODY_BYTES) {
@@ -136,10 +136,15 @@ async function readResponseText(response) {
   const reader = response.body.getReader()
   const chunks = []
   let totalBytes = 0
+  let firstByte = true
   try {
     for (;;) {
       const { done, value } = await reader.read()
       if (done) break
+      if (firstByte && value?.byteLength) {
+        firstByte = false
+        onFirstByte?.()
+      }
       totalBytes += value.byteLength
       if (totalBytes > MAX_RESPONSE_BODY_BYTES) {
         await reader.cancel().catch(() => {})
@@ -154,6 +159,187 @@ async function readResponseText(response) {
   }
 
   return Buffer.concat(chunks, totalBytes).toString('utf8')
+}
+
+// Deterministic provider-side failures (explicit upstream error payloads,
+// non-JSON bodies) are never worth retrying: the same request would produce
+// the same answer. Tagged so the retry loop can rethrow them directly.
+function providerError(message) {
+  const error = new Error(message)
+  error.code = 'VISION_PROVIDER_ERROR'
+  return error
+}
+
+// One streamed completion being aggregated. Both wire protocols (OpenAI
+// compatible chat completions and Anthropic Messages) use SSE `data:` framing;
+// only the delta shapes differ, so a single line processor serves both.
+function createSseAccumulator() {
+  return { parts: [], sawReasoning: false, totalChars: 0, done: false }
+}
+
+function streamEventErrorMessage(event) {
+  if (event?.type !== 'error' && !event?.error) return undefined
+  const candidates = [event.error?.message, event.message, event.error?.type]
+  const message = candidates.find((candidate) => typeof candidate === 'string' && candidate.trim())
+  return message || JSON.stringify(event).slice(0, 240)
+}
+
+function pushSseContent(state, text) {
+  if (!text) return
+  state.parts.push(text)
+  state.totalChars += text.length
+  if (state.totalChars > MAX_RESPONSE_BODY_BYTES) {
+    const error = new Error('Vision model response body is too large; max is 5MB')
+    error.code = 'VISION_RESPONSE_TOO_LARGE'
+    throw error
+  }
+}
+
+function feedSseLine(state, line) {
+  if (!line.startsWith('data:')) return
+  const payload = line.slice(5).trim()
+  if (!payload) return
+  if (payload === '[DONE]') {
+    state.done = true
+    return
+  }
+  let event
+  try {
+    event = JSON.parse(payload)
+  } catch {
+    return
+  }
+  const upstreamMessage = streamEventErrorMessage(event)
+  if (upstreamMessage) throw providerError(`Vision model API error: ${upstreamMessage}`)
+
+  // OpenAI-compatible: choices[0].delta.{content,reasoning_content}
+  const delta = event.choices?.[0]?.delta
+  if (delta) {
+    if (typeof delta.reasoning_content === 'string' && delta.reasoning_content.trim()) state.sawReasoning = true
+    if (Array.isArray(delta.reasoning_details)
+      && delta.reasoning_details.some((detail) => typeof detail?.text === 'string' && detail.text.trim())) {
+      state.sawReasoning = true
+    }
+    pushSseContent(state, typeof delta.content === 'string'
+      ? delta.content
+      : Array.isArray(delta.content)
+        ? delta.content.map((part) => (typeof part?.text === 'string' ? part.text : '')).join('')
+        : '')
+  }
+  // Anthropic Messages: content_block_delta with text_delta / thinking_delta
+  if (event.type === 'content_block_delta') {
+    if (event.delta?.type === 'text_delta' && typeof event.delta?.text === 'string') {
+      pushSseContent(state, event.delta.text)
+    } else if (event.delta?.type === 'thinking_delta') {
+      state.sawReasoning = true
+    }
+  }
+}
+
+function finishSse(state) {
+  return {
+    text: stripLeadingReasoningBlock(state.parts.join('')).trim(),
+    sawReasoning: state.sawReasoning,
+  }
+}
+
+// Streams are read incrementally so the first-byte watchdog can be disarmed as
+// soon as the provider starts answering and a stalled upstream is detected
+// long before the overall request timeout would fire.
+async function readSseCompletion(response, onFirstByte) {
+  const reader = response.body.getReader()
+  const decoder = new TextDecoder()
+  const state = createSseAccumulator()
+  let buffer = ''
+  let firstByte = true
+  let totalBytes = 0
+  try {
+    for (;;) {
+      const { done, value } = await reader.read()
+      if (done) break
+      if (firstByte && value?.byteLength) {
+        firstByte = false
+        onFirstByte?.()
+      }
+      // Raw-byte cap mirrors readResponseText: a hostile upstream streaming
+      // one endless newline-less event must not grow `buffer` unboundedly.
+      totalBytes += value.byteLength
+      if (totalBytes > MAX_RESPONSE_BODY_BYTES) {
+        const error = new Error('Vision model response body is too large; max is 5MB')
+        error.code = 'VISION_RESPONSE_TOO_LARGE'
+        throw error
+      }
+      buffer += decoder.decode(value, { stream: true })
+      let newlineIndex
+      while ((newlineIndex = buffer.indexOf('\n')) !== -1) {
+        const line = buffer.slice(0, newlineIndex).replace(/\r$/, '')
+        buffer = buffer.slice(newlineIndex + 1)
+        feedSseLine(state, line)
+        if (state.done) break
+      }
+      if (state.done) break
+    }
+    // Flush any decoder-pending multibyte tail, then process a final line that
+    // arrived without its trailing newline — a truncated or nonconformant
+    // stream must not silently drop its last event.
+    buffer += decoder.decode()
+    if (!state.done && buffer.trim()) {
+      feedSseLine(state, buffer.replace(/\r$/, ''))
+    }
+  } finally {
+    // On error paths the socket may still hold unread events; drain-cancel so
+    // one abandoned stream cannot pin a pooled connection.
+    await reader.cancel().catch(() => {})
+    reader.releaseLock()
+  }
+  return finishSse(state)
+}
+
+function completionFromSseText(bodyText) {
+  const state = createSseAccumulator()
+  for (const line of bodyText.split('\n')) {
+    feedSseLine(state, line.replace(/\r$/, ''))
+    if (state.done) break
+  }
+  return finishSse(state)
+}
+
+function looksLikeSse(bodyText) {
+  // Some gateways open with `: keepalive` comment lines before the first
+  // `data:` event, so sniff the opening kilobyte for any data line rather
+  // than only the first line.
+  return /(^|\n)\s*data:/.test(bodyText.slice(0, 1024))
+}
+
+function hasReasoningResponse(data) {
+  const message = data?.choices?.[0]?.message
+  return typeof message?.reasoning_content === 'string'
+    ? message.reasoning_content.trim() !== ''
+    : Array.isArray(message?.reasoning_details)
+      && message.reasoning_details.some((detail) => typeof detail?.text === 'string' && detail.text.trim())
+}
+
+function completionFromResponseBody(data) {
+  return {
+    text: extractTextContent(data),
+    sawReasoning: hasThinkingOnlyResponse(data) || hasReasoningResponse(data),
+  }
+}
+
+// A gateway may ignore `stream: true` and answer with a normal JSON body, or
+// stream SSE while labeling it with an unexpected content type. Parse the JSON
+// envelope first; fall back to SSE line parsing when the body only looks like
+// an event stream.
+function completionFromBodyText(bodyText) {
+  let data
+  try {
+    data = JSON.parse(bodyText)
+  } catch {
+    if (looksLikeSse(bodyText)) return completionFromSseText(bodyText)
+    throw providerError('Vision model returned a non-JSON response')
+  }
+  if (data?.error?.message) throw providerError(`Vision model API error: ${data.error.message}`)
+  return completionFromResponseBody(data)
 }
 
 const MIME_BY_EXT = {
@@ -955,17 +1141,49 @@ function getProviderRequestConfig(config, requestBody) {
   }
 }
 
-async function fetchVisionCompletion(requestBody, config, signal) {
+// Requests are sent with `stream: true` even though callers need the complete
+// answer: streaming lets a stalled provider (accepted connection, queue
+// congestion, gateway hang) be detected at the first byte instead of at the
+// overall timeout, cutting worst-case waits from minutes to seconds. Gateways
+// that ignore the flag answer with a normal JSON body, which the completion
+// parser accepts unchanged.
+const FALLBACK_FIRST_BYTE_TIMEOUT_MS = 15_000
+
+function firstByteWatchdogMs(config) {
+  const configured = typeof config.firstByteTimeoutMs === 'number' && config.firstByteTimeoutMs > 0
+    ? config.firstByteTimeoutMs
+    : FALLBACK_FIRST_BYTE_TIMEOUT_MS
+  // The overall request timeout always remains the hard ceiling.
+  return Math.min(configured, config.requestTimeoutMs)
+}
+
+async function fetchVisionCompletion(requestBody, config, signal, { stream = true } = {}) {
   const { url, headers, body } = getProviderRequestConfig(config, requestBody)
+  const sendBody = stream ? { ...body, stream: true } : body
   if (signal?.aborted) throw abortError()
 
+  const watchdogMs = stream ? firstByteWatchdogMs(config) : 0
   for (let attempt = 0; ; attempt += 1) {
     const controller = new AbortController()
     // The timeout covers both establishing the request and reading the full
-    // response body, so a stalled body download still aborts cleanly.
+    // response body, so a stalled body download still aborts cleanly. Any
+    // AbortError that is neither external nor the first-byte watchdog below
+    // comes from this timer.
     const timeout = setTimeout(() => controller.abort(), config.requestTimeoutMs)
+    // Disarmed at the first response byte; only the overall timeout remains
+    // after that, mirroring the non-streaming behavior for slow generations.
+    let stalledFirstByte = false
+    const watchdog = watchdogMs > 0
+      ? setTimeout(() => {
+        stalledFirstByte = true
+        controller.abort()
+      }, watchdogMs)
+      : null
+    const disarmWatchdog = () => {
+      if (watchdog) clearTimeout(watchdog)
+    }
     // External cooperative cancellation (e.g. the dsh tool-call signal).
-    // Tracked separately from the internal timeout so the two abort causes
+    // Tracked separately from the internal timeouts so the abort causes
     // never collapse into the same error message.
     let externalAbort = signal?.aborted ?? false
     const onExternalAbort = () => {
@@ -981,10 +1199,15 @@ async function fetchVisionCompletion(requestBody, config, signal) {
       const response = await fetch(url, {
         method: 'POST',
         headers,
-        body: JSON.stringify(body),
+        body: JSON.stringify(sendBody),
         signal: controller.signal,
       })
-      const bodyText = await readResponseText(response)
+      const contentType = response.headers.get('content-type') ?? ''
+      if (response.ok && stream && contentType.includes('text/event-stream')) {
+        return await readSseCompletion(response, disarmWatchdog)
+      }
+      const bodyText = await readResponseText(response, disarmWatchdog)
+      if (response.ok) return completionFromBodyText(bodyText)
       result = {
         ok: response.ok,
         status: response.status,
@@ -992,13 +1215,27 @@ async function fetchVisionCompletion(requestBody, config, signal) {
         retryAfterMs: parseRetryAfterMs(response.headers.get('retry-after')),
       }
     } catch (error) {
+      // Disarm both timers before any retry backoff so a fired callback can
+      // never bleed into the next attempt's state.
+      clearTimeout(timeout)
+      disarmWatchdog()
       if (externalAbort || signal?.aborted) throw abortError()
+      if (stalledFirstByte) {
+        if (attempt < config.maxRetries) {
+          const wait = retryDelayMs(attempt)
+          debugLog(config, `no first byte within ${watchdogMs}ms; retry ${attempt + 1}/${config.maxRetries} in ${wait}ms`)
+          await delay(wait, signal)
+          continue
+        }
+        throw new Error(`Vision model did not start responding within ${watchdogMs}ms; the upstream appears stalled`)
+      }
       if (error?.name === 'AbortError') {
         throw new Error(`Vision model request timed out after ${Math.round(config.requestTimeoutMs / 1000)}s`)
       }
-      // Retrying an already oversized response only repeats the same memory and
-      // bandwidth pressure. Surface this deterministic safety failure directly.
-      if (error?.code === 'VISION_RESPONSE_TOO_LARGE') throw error
+      // Retrying an already oversized or otherwise deterministic provider
+      // failure only repeats the same memory and bandwidth pressure. Surface
+      // it directly.
+      if (error?.code === 'VISION_RESPONSE_TOO_LARGE' || error?.code === 'VISION_PROVIDER_ERROR') throw error
       if (attempt < config.maxRetries) {
         const wait = retryDelayMs(attempt)
         debugLog(config, `request error: ${error?.message ?? error}; retry ${attempt + 1}/${config.maxRetries} in ${wait}ms`)
@@ -1008,12 +1245,10 @@ async function fetchVisionCompletion(requestBody, config, signal) {
       throw error
     } finally {
       clearTimeout(timeout)
+      disarmWatchdog()
       signal?.removeEventListener('abort', onExternalAbort)
     }
 
-    if (result.ok) {
-      return result.bodyText
-    }
     if (VISION_RETRYABLE_STATUS.has(result.status) && attempt < config.maxRetries) {
       const wait = retryDelayMs(attempt, result.retryAfterMs)
       debugLog(config, `upstream ${result.status}; retry ${attempt + 1}/${config.maxRetries} in ${wait}ms`)
@@ -1099,6 +1334,142 @@ function writeResultCache(key, text, config) {
   resultCache.set(key, { text, expiresAt: Date.now() + config.cache.ttlMs })
   // Evict oldest entries once over capacity (Map preserves insertion order).
   trimResultCache(config.cache.maxEntries)
+}
+
+// On-disk mirror of the in-process result cache under cache.dir (see
+// getCacheDir). The in-memory Map dies with the process, so short-lived Skill
+// runs never share results; this mirror lets a fresh process return a recent
+// identical answer without a second billed call. Entries use the same request
+// hash as the memory cache and the same TTL/capacity knobs. Every failure —
+// missing dir, unwritable disk, corrupt file — degrades to a plain cache miss.
+const DISK_CACHE_FILE_PATTERN = /^[a-f0-9]{64}\.json$/
+const DISK_CACHE_TMP_MAX_AGE_MS = 10 * 60 * 1000
+
+function isDiskCacheTempEntry(name) {
+  // Temp files are `<hash>.<pid>.<timestamp>.tmp`; only these are ever swept.
+  const parts = name.split('.')
+  return parts.length === 4 && /^[a-f0-9]{64}$/.test(parts[0]) && /^\d+$/.test(parts[1])
+    && /^\d+$/.test(parts[2]) && parts[3] === 'tmp'
+}
+
+function parseDiskCacheEntry(raw, key) {
+  let entry
+  try {
+    entry = JSON.parse(raw)
+  } catch {
+    return null
+  }
+  if (entry?.version !== 1 || entry.key !== key
+    || typeof entry.value !== 'string' || !Number.isFinite(entry.expiresAt)) {
+    return null
+  }
+  return entry
+}
+
+async function readDiskResultCache(key, config) {
+  const dir = config.cache?.dir
+  if (!config.cache?.enabled || !key || !dir) return undefined
+  const filePath = join(dir, `${key}.json`)
+  let raw
+  try {
+    raw = await readFile(filePath, 'utf8')
+  } catch (error) {
+    if (error?.code !== 'ENOENT') debugLog(config, `disk cache read failed: ${error?.message ?? error}`)
+    return undefined
+  }
+  const entry = parseDiskCacheEntry(raw, key)
+  if (!entry) {
+    await unlink(filePath).catch(() => {})
+    return undefined
+  }
+  if (Date.now() > entry.expiresAt) {
+    await unlink(filePath).catch(() => {})
+    return undefined
+  }
+  // Refresh recency so the mtime-based eviction below matches the memory
+  // cache's LRU semantics.
+  const now = new Date()
+  await utimes(filePath, now, now).catch(() => {})
+  debugLog(config, `disk cache hit (${key.slice(0, 12)}…)`)
+  return entry.value
+}
+
+async function trimDiskResultCache(dir, config) {
+  let entries
+  try {
+    entries = await readdir(dir)
+  } catch {
+    return
+  }
+  const owned = []
+  const now = Date.now()
+  for (const name of entries) {
+    if (DISK_CACHE_FILE_PATTERN.test(name)) {
+      owned.push(name)
+      continue
+    }
+    if (isDiskCacheTempEntry(name)) {
+      const fileStat = await stat(join(dir, name)).catch(() => null)
+      if (fileStat?.isFile() && now - fileStat.mtimeMs > DISK_CACHE_TMP_MAX_AGE_MS) {
+        await unlink(join(dir, name)).catch(() => {})
+      }
+    }
+  }
+  if (owned.length <= config.cache.maxEntries) return
+  const statted = await Promise.all(owned.map(async (name) => {
+    const fileStat = await stat(join(dir, name)).catch(() => null)
+    return { name, mtimeMs: fileStat?.mtimeMs ?? 0 }
+  }))
+  statted.sort((left, right) => left.mtimeMs - right.mtimeMs)
+  const excess = statted.slice(0, statted.length - config.cache.maxEntries)
+  for (const { name } of excess) {
+    await unlink(join(dir, name)).catch(() => {})
+  }
+}
+
+// The disk mirror must only ever store into a directory this process owns
+// with owner-only permissions (mirroring the Inbox rules). A pre-existing
+// loose directory (or a symlink) disables the mirror for that call — the
+// cache is an optimization and must never fail the image request over it.
+async function isSecureCacheDir(dir) {
+  let dirStat
+  try {
+    dirStat = await lstat(dir)
+  } catch {
+    return false
+  }
+  if (dirStat.isSymbolicLink() || !dirStat.isDirectory()) return false
+  if (process.platform !== 'win32') {
+    const wrongOwner = typeof process.getuid === 'function' && dirStat.uid !== process.getuid()
+    const sharedPermissions = (dirStat.mode & 0o077) !== 0
+    if (wrongOwner || sharedPermissions) return false
+  }
+  return true
+}
+
+async function writeDiskResultCache(key, text, config) {
+  const dir = config.cache?.dir
+  if (!config.cache?.enabled || !key || !dir) return
+  if (Buffer.byteLength(text, 'utf8') > MAX_CACHE_VALUE_BYTES) return
+  const entry = JSON.stringify({
+    version: 1,
+    key,
+    expiresAt: Date.now() + config.cache.ttlMs,
+    value: text,
+  })
+  try {
+    await mkdir(dir, { recursive: true, mode: 0o700 })
+    if (!(await isSecureCacheDir(dir))) {
+      debugLog(config, `disk cache skipped: ${dir} is not an owner-only directory`)
+      return
+    }
+    const tempPath = join(dir, `${key}.${process.pid}.${Date.now()}.tmp`)
+    await writeFile(tempPath, entry, { mode: 0o600, flag: 'wx' })
+    await rename(tempPath, join(dir, `${key}.json`))
+    await trimDiskResultCache(dir, config)
+  } catch (error) {
+    debugLog(config, `disk cache write failed: ${error?.message ?? error}`)
+  }
 }
 
 // 防止 prompt injection：视觉模型观察到的内容（尤其是 OCR 出的文字）属于
@@ -1258,26 +1629,46 @@ function requestWithMaxTokens(requestBody) {
   return compatible
 }
 
+function isUnsupportedStreamParameterError(error) {
+  const message = error instanceof Error ? error.message : String(error)
+  if (!/Vision model API request failed \((?:400|422)\):/i.test(message)) return false
+  const parameterPattern = /\bstream(?:ing)?\b/i
+  const unsupportedPattern = /unsupported|not[ _-]*(?:supported|allowed|permitted)|unknown|unrecognized|unrecognised|unexpected|invalid[ _-]*(?:parameter|field|request[ _-]*argument|value)/i
+  return parameterPattern.test(message) && unsupportedPattern.test(message)
+}
+
 async function fetchVisionCompletionCompatible(requestBody, config, signal) {
   try {
     return await fetchVisionCompletion(requestBody, config, signal)
   } catch (error) {
     // Cooperative cancellation is never a compatibility problem — surface it
-    // immediately instead of feeding it to the token-parameter fallback.
+    // immediately instead of feeding it to a parameter fallback.
     if (error?.name === 'AbortError') throw error
-    // The token-parameter swap is specific to OpenAI-compatible providers.
-    // Anthropic Messages API only accepts max_tokens, so a rejection there
-    // should not be silently converted into a different parameter.
-    if (config.protocol === 'anthropic') throw error
-    const compatible = requestBody.max_tokens !== undefined && isUnsupportedMaxTokensError(error)
-      ? requestWithMaxCompletionTokens(requestBody)
-      : requestBody.max_completion_tokens !== undefined && isUnsupportedMaxCompletionTokensError(error)
-        ? requestWithMaxTokens(requestBody)
-        : null
-    if (!compatible) throw error
-    const target = compatible.max_completion_tokens === undefined ? 'max_tokens' : 'max_completion_tokens'
-    debugLog(config, `provider rejected token parameter; retrying once with ${target}`)
-    return fetchVisionCompletion(compatible, config, signal)
+    // Dropping `stream` is not a parameter-shape conversion, so the fallback
+    // below applies to both protocols. The token-parameter swap, however, is
+    // specific to OpenAI-compatible providers: Anthropic Messages API only
+    // accepts max_tokens, and a rejection there must not be silently converted
+    // into a different parameter.
+    if (config.protocol !== 'anthropic') {
+      const compatible = requestBody.max_tokens !== undefined && isUnsupportedMaxTokensError(error)
+        ? requestWithMaxCompletionTokens(requestBody)
+        : requestBody.max_completion_tokens !== undefined && isUnsupportedMaxCompletionTokensError(error)
+          ? requestWithMaxTokens(requestBody)
+          : null
+      if (compatible) {
+        const target = compatible.max_completion_tokens === undefined ? 'max_tokens' : 'max_completion_tokens'
+        debugLog(config, `provider rejected token parameter; retrying once with ${target}`)
+        return fetchVisionCompletion(compatible, config, signal)
+      }
+    }
+    // A rare few OpenAI-compatible and Anthropic-compatible gateways reject
+    // the standard `stream` parameter outright; retry the identical request
+    // non-streamed.
+    if (isUnsupportedStreamParameterError(error)) {
+      debugLog(config, 'provider rejected the stream parameter; retrying once without streaming')
+      return fetchVisionCompletion(requestBody, config, signal, { stream: false })
+    }
+    throw error
   }
 }
 
@@ -1346,14 +1737,18 @@ export async function describeImage(params, config, signal) {
     ])
 
   const cacheKey = computeCacheKey(requestBody, config)
-  const cached = readResultCache(cacheKey, config)
-  if (cached !== undefined) return cached
+  const cached = readResultCache(cacheKey, config) ?? await readDiskResultCache(cacheKey, config)
+  if (cached !== undefined) {
+    // Warm the process-local cache so later identical calls skip the disk too.
+    writeResultCache(cacheKey, cached, config)
+    return cached
+  }
 
   const startedAt = Date.now()
   debugLog(config, `requesting provider=${capabilities.provider} model=${config.model} images=${images.length} format=${structured ? 'structured' : 'text'}`)
-  let bodyText
+  let completion
   try {
-    bodyText = await fetchVisionCompletionCompatible(requestBody, config, signal)
+    completion = await fetchVisionCompletionCompatible(requestBody, config, signal)
   } catch (error) {
     if (error?.name === 'AbortError') throw error
     const compatibilityRequest = isUnsupportedSystemRoleError(error)
@@ -1361,28 +1756,18 @@ export async function describeImage(params, config, signal) {
       : null
     if (!compatibilityRequest) throw error
     debugLog(config, 'provider rejected system role; retrying once with safety instruction in user content')
-    bodyText = await fetchVisionCompletionCompatible(compatibilityRequest, config, signal)
+    completion = await fetchVisionCompletionCompatible(compatibilityRequest, config, signal)
   }
 
-  let data
-  try {
-    data = JSON.parse(bodyText)
-  } catch {
-    throw new Error('Vision model returned a non-JSON response')
-  }
-  if (data?.error?.message) {
-    throw new Error(`Vision model API error: ${data.error.message}`)
-  }
-
-  const responseContent = extractTextContent(data)
-  if (!responseContent) {
+  if (!completion.text) {
     throw new Error('Vision model returned no text content')
   }
 
   const result = structured
-    ? wrapStructuredResult(responseContent, images.length)
-    : `${VISION_UNTRUSTED_BANNER}${responseContent}`
+    ? wrapStructuredResult(completion.text, images.length)
+    : `${VISION_UNTRUSTED_BANNER}${completion.text}`
   writeResultCache(cacheKey, result, config)
+  await writeDiskResultCache(cacheKey, result, config)
   debugLog(config, `completed in ${Date.now() - startedAt}ms`)
   return result
 }
@@ -1404,72 +1789,36 @@ export async function testModelConnection(config, { testVision = true } = {}) {
         ],
       },
     ])
-    let bodyText
+    let completion
     try {
-      bodyText = await fetchVisionCompletionCompatible(requestBody, config)
+      completion = await fetchVisionCompletionCompatible(requestBody, config)
     } catch (error) {
       const compatibilityRequest = isUnsupportedSystemRoleError(error)
         ? requestWithoutSystemRole(requestBody)
         : null
       if (!compatibilityRequest) throw error
-      bodyText = await fetchVisionCompletionCompatible(compatibilityRequest, config)
+      completion = await fetchVisionCompletionCompatible(compatibilityRequest, config)
     }
-    let data
-    try {
-      data = JSON.parse(bodyText)
-    } catch {
-      throw new Error('Model returned a non-JSON response')
-    }
-    if (data?.error?.message) {
-      throw new Error(`API error: ${data.error.message}`)
-    }
-    const content = extractTextContent(data)
-    if (content) return `Visual connection verified: ${content}`
-    // A thinking-only reply still proves the connection, so treat it like the
-    // reasoning case below instead of a false "no text content" failure.
-    if (hasThinkingOnlyResponse(data)) {
-      return '(visual connection verified; reasoning model produced no visible reply within the token budget)'
-    }
-    const message = data?.choices?.[0]?.message
-    const hasReasoning = typeof message?.reasoning_content === 'string'
-      ? message.reasoning_content.trim() !== ''
-      : Array.isArray(message?.reasoning_details)
-        && message.reasoning_details.some((detail) => typeof detail?.text === 'string' && detail.text.trim())
-    if (hasReasoning) {
+    if (completion.text) return `Visual connection verified: ${completion.text}`
+    // Hidden thinking blocks or a populated reasoning channel still prove the
+    // model processed the prompt; a connection test only needs reachability.
+    if (completion.sawReasoning) {
       return '(visual connection verified; reasoning model produced no visible reply within the token budget)'
     }
     throw new Error('Model returned no text content for the visual probe')
   }
   const { requestBody } = buildProviderRequestBody(config, [
-      { role: 'user', content: 'hi' }
-    ])
-  const bodyText = await fetchVisionCompletionCompatible(requestBody, config)
-  let data
-  try {
-    data = JSON.parse(bodyText)
-  } catch {
-    throw new Error('Model returned a non-JSON response')
-  }
-  if (data?.error?.message) {
-    throw new Error(`API error: ${data.error.message}`)
-  }
-  const content = extractTextContent(data)
-  if (content) return content
+    { role: 'user', content: 'hi' }
+  ])
+  const completion = await fetchVisionCompletionCompatible(requestBody, config)
+  if (completion.text) return completion.text
 
   // Fallback: even with a generous budget a reasoning model can still spend it
   // all thinking and return an empty content. A connection test only needs to
   // confirm the key/endpoint/model are reachable and the model responded — a
-  // populated reasoning_content proves the model actually processed the prompt,
+  // populated reasoning channel proves the model actually processed the prompt,
   // so treat that as a successful connection rather than a false failure.
-  if (hasThinkingOnlyResponse(data)) {
-    return '(connection ok; reasoning model produced no visible reply within the token budget)'
-  }
-  const message = data?.choices?.[0]?.message
-  const hasReasoning = typeof message?.reasoning_content === 'string'
-    ? message.reasoning_content.trim() !== ''
-    : Array.isArray(message?.reasoning_details)
-      && message.reasoning_details.some((detail) => typeof detail?.text === 'string' && detail.text.trim())
-  if (hasReasoning) {
+  if (completion.sawReasoning) {
     return '(connection ok; reasoning model produced no visible reply within the token budget)'
   }
   throw new Error('Model returned no text content')

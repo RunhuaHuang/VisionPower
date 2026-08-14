@@ -17,6 +17,7 @@
 //           baseUrl: https://api.minimaxi.com/v1
 //           protocol: openai    # or anthropic; inferred from model/baseUrl when omitted
 //           timeoutMs: 60000
+//           firstByteTimeoutMs: 15000
 
 import z from '@deepseek-ai/schemastery'
 import { defineTool } from '@deepseek-ai/dsh-tools'
@@ -36,6 +37,7 @@ export const Config = z.object({
   apiKeyEnv: z.string(),
   configPath: z.string(),
   timeoutMs: z.number(),
+  firstByteTimeoutMs: z.number(),
   debug: z.boolean(),
 }).default({})
 
@@ -76,6 +78,7 @@ function resolveConfig(overrides) {
   if (overrides.model !== undefined) base.model = overrides.model
   if (overrides.baseUrl !== undefined) base.baseUrl = overrides.baseUrl
   if (overrides.timeoutMs !== undefined) base.requestTimeoutMs = overrides.timeoutMs
+  if (overrides.firstByteTimeoutMs !== undefined) base.firstByteTimeoutMs = overrides.firstByteTimeoutMs
   if (overrides.debug !== undefined) base.debug = overrides.debug
   if (overrides.apiKeyEnv) {
     const key = process.env[overrides.apiKeyEnv]
@@ -103,7 +106,7 @@ function resolveConfig(overrides) {
 export function apply(ctx, config) {
   ctx.tools.register(defineTool({
     name: 'describe_image',
-    description: 'See and understand images — screenshots, photos, diagrams, charts. Extract text (OCR), describe scenes, compare images, and answer questions about what is shown. Use whenever an image is provided via image_path, image_url, image_base64, image_ref, or images[].',
+    description: 'See and understand images — screenshots, photos, diagrams, charts. Extract text (OCR), describe scenes, compare images, and answer questions about what is shown. Use whenever an image is provided via image_path, image_url, image_base64, image_ref, or images[]. For faster, more useful answers, ask the specific question you need answered (e.g. "read the error text", "what does this chart show") instead of an open-ended "describe everything".',
     parameters: {
       ...imageSourceParameters,
       images: {
@@ -117,7 +120,7 @@ export function apply(ctx, config) {
       },
       prompt: {
         type: 'string',
-        description: 'Specific question or instruction about the image(s). Leave empty for a full description.',
+        description: 'Specific question or instruction about the image(s). Focused questions (e.g. "Read the error message text") are faster and more useful than open-ended "describe everything" prompts. Leave empty for a full description.',
       },
       output_format: {
         type: 'string',

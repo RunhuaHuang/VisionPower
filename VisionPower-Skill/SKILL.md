@@ -98,10 +98,15 @@ On a normal request, **just run the script once** with the image and report the 
 no preflight checks, no narration (see Response style above). Pick the simplest form below
 and replace `<skill>` with this folder's absolute path.
 
+**Ask the focused question, not an open-ended one.** The script's speed scales with the
+model's output length, so a prompt like `--prompt "Read the error message text"` finishes
+much faster than `--prompt "Describe this image in detail"`, and the answer is usually
+more useful. Reserve open-ended descriptions for when the user truly wants everything.
+
 ### A single local image (use an absolute path)
 
 ```bash
-node <skill>/describe_image.mjs --image-path /absolute/path/to/image.png --prompt "Read the text and summarize it."
+node <skill>/describe_image.mjs --image-path /absolute/path/to/image.png --prompt "Read the text and summarize it in one paragraph."
 ```
 
 ### A public image URL
@@ -193,20 +198,22 @@ Matching `VISIONPOWER_*` environment variables override the file.
 | `baseUrl` | `VISIONPOWER_BASE_URL` | DashScope `/compatible-mode/v1` | OpenAI-compatible base URL |
 | `maxImageBytes` | `VISIONPOWER_MAX_IMAGE_BYTES` | `20971520` | Per-image local/Base64 byte limit |
 | `maxTotalImageBytes` | `VISIONPOWER_MAX_TOTAL_IMAGE_BYTES` | `67108864` | Total local/Base64 bytes per call |
-| `maxTokens` | `VISIONPOWER_MAX_TOKENS` | `2048` (Kimi K2.6/K2.7 Code/K3 recommended `32768`) | Maximum provider output tokens; an explicit value wins |
 | `maxImages` | `VISIONPOWER_MAX_IMAGES` | `8` | Max images per call |
 | `maxRetries` | `VISIONPOWER_MAX_RETRIES` | `2` | Retry count for transient upstream failures |
-| `timeoutMs` | `VISIONPOWER_TIMEOUT_MS` | `60000` | Upstream timeout (ms) |
+| `timeoutMs` | `VISIONPOWER_TIMEOUT_MS` | `60000` | Upstream timeout (ms), covering connection through the fully-read response |
+| `firstByteTimeoutMs` | `VISIONPOWER_FIRST_BYTE_TIMEOUT_MS` | `15000` | First-byte timeout (ms): streamed requests that see no first token within this window abort and retry early instead of idling to the full timeout; capped at `timeoutMs` |
+| `maxTokens` | `VISIONPOWER_MAX_TOKENS` | `4096` (Kimi K2.6/K2.7 Code/K3 recommended `32768`) | Maximum provider output tokens; an explicit value wins |
 | `inboxTtlMs` | `VISIONPOWER_INBOX_TTL_MS` | `1800000` | Staged-image lifetime (ms); expired entries are lazily cleaned on Inbox reads/writes |
 | `inboxMaxEntries` | `VISIONPOWER_INBOX_MAX_ENTRIES` | `64` | Maximum live Inbox entries |
 | — | `VISIONPOWER_INBOX_DIR` | config directory + `/inbox` | Private staged-image directory |
-| `cache.enabled` | `VISIONPOWER_CACHE` | `true` | In-process result cache for byte-identical local/Base64 images; public URLs are not cached |
-| — | `VISIONPOWER_CACHE_MAX_ENTRIES` | `32` | Result cache capacity (0 disables) |
+| `cache.enabled` | `VISIONPOWER_CACHE` | `true` | Result cache for byte-identical local/Base64 images; public URLs are not cached |
+| — | `VISIONPOWER_CACHE_MAX_ENTRIES` | `32` | Result cache capacity, shared by the in-memory map and the disk mirror (0 disables) |
 | — | `VISIONPOWER_CACHE_TTL_MS` | `1800000` | Result cache entry lifetime (ms) |
+| — | `VISIONPOWER_CACHE_DIR` | config directory + `/cache` | On-disk cache mirror; lets each fresh script process reuse recent identical results |
 | `debug` | `VISIONPOWER_DEBUG` | `false` | Write bounded request diagnostics to stderr |
 | — | `VISIONPOWER_SKILL_STATE` | `~/.visionpower/skill-state.json` | Verified setup marker path |
 
 The loader enforces hard ceilings of 256MB per image, 512MB total local/Base64 bytes
-per call, 131072 output tokens, 64 images, 8 retries, 10000 cache/Inbox entries, and
-30-day TTLs. Values above those ceilings are rejected instead of being accepted as
-unbounded allocations or retry loops.
+per call, 131072 output tokens, 64 images, 8 retries, a 600000ms first-byte timeout,
+10000 cache/Inbox entries, and 30-day TTLs. Values above those ceilings are rejected
+instead of being accepted as unbounded allocations or retry loops.

@@ -17,7 +17,7 @@ export const imageSourceSchema = z.object(imageSourceSchemaShape).strict()
 export const toolInputSchemaShape = {
   ...imageSourceSchemaShape,
   images: z.array(imageSourceSchema).min(1).optional().describe('Ordered list of images to analyze. Use this for multiple images; do not combine it with top-level image fields.'),
-  prompt: z.string().trim().min(1).max(20_000).optional().describe('Specific question or instruction about the image(s). Leave empty for a full description.'),
+  prompt: z.string().trim().min(1).max(20_000).optional().describe('Specific question or instruction about the image(s). Focused questions (e.g. "Read the error message text", "List the visible menu items") are faster and more useful than open-ended "describe everything" prompts. Leave empty for a full description.'),
   output_format: z.enum(['text', 'structured']).optional().describe("Output shape. 'text' (default) returns a free-form description with an untrusted-source banner. 'structured' returns a JSON envelope: when formatValid is true, a single image has {answer, observations, extractedText?, limitations?} and multiple images have images[]; otherwise formatValid is false with formatError and rawResponse."),
 }
 

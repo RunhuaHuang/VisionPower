@@ -39,6 +39,7 @@ dsh plugin --profile web add file:/path/to/VisionPower
 | `apiKeyEnv` | 无 | 从指定环境变量读取 API Key（如 `VISIONPOWER_API_KEY`） |
 | `configPath` | `~/.visionpower/config.json` | 覆盖配置文件路径 |
 | `timeoutMs` | 60000 | 上游模型请求超时（毫秒）；上游视觉模型偶发较慢，建议 120000 |
+| `firstByteTimeoutMs` | 15000 | 首字响应超时（毫秒）：流式请求若在此时限内未吐出首个字符则提前中断并重试，不超过 `timeoutMs` |
 | `debug` | false | 输出 `[visionpower]` 调试日志到 stderr |
 
 优先级：**cordis.yml 配置 > 环境变量 > `~/.visionpower/config.json`**。API Key 建议继续放在 `~/.visionpower/config.json`（mode 600），不写进 cordis.yml。

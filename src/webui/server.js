@@ -5,7 +5,7 @@ import { WEBUI_HTML } from './index-html.js'
 import {
   loadVisionConfig,
   DEFAULT_VISION_MODEL,
-  DEFAULT_MAX_TOKENS,
+  DEFAULT_MAX_TOKENS_HISTORY,
   DEFAULT_PROTOCOL,
   assertSafeApiKey,
   assertSafeModel,
@@ -273,6 +273,13 @@ function getWebuiConfig() {
     ...effective,
     requestTimeoutMs: undefined,
     inbox: undefined,
+    // The cache mirror's on-disk location is server-side plumbing, just like
+    // the inbox dir; expose only the user-tunable cache knobs.
+    cache: {
+      enabled: effective.cache.enabled,
+      maxEntries: effective.cache.maxEntries,
+      ttlMs: effective.cache.ttlMs,
+    },
     timeoutMs: effective.requestTimeoutMs,
     inboxTtlMs: effective.inbox.ttlMs,
     inboxMaxEntries: effective.inbox.maxEntries,
@@ -608,7 +615,7 @@ async function handleApi(method, url, req, res) {
       // reasoning and emit no visible answer). An explicit non-default user
       // budget remains untouched.
       const probeCapabilities = resolveModelCapabilities(tempConfig.model, tempConfig.baseUrl)
-      if (tempConfig.maxTokens === DEFAULT_MAX_TOKENS && probeCapabilities.recommendedMaxTokens) {
+      if (DEFAULT_MAX_TOKENS_HISTORY.includes(tempConfig.maxTokens) && probeCapabilities.recommendedMaxTokens) {
         tempConfig.maxTokens = probeCapabilities.recommendedMaxTokens
       }
 

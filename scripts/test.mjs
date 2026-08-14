@@ -1,8 +1,8 @@
 import assert from 'node:assert/strict'
 import { execFile } from 'node:child_process'
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, truncateSync, unlinkSync, utimesSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, symlinkSync, truncateSync, unlinkSync, utimesSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 import { request as httpRequest } from 'node:http'
 import { fileURLToPath } from 'node:url'
 import { Script } from 'node:vm'
@@ -1079,6 +1079,289 @@ try {
     assert.equal(calls.length, 4)
   })
 
+  // --- Streaming requests: SSE is aggregated; `stream: true` is on the wire --
+  await withMockFetch(async (calls) => {
+    const sseBody = [
+      'data: {"choices":[{"delta":{"role":"assistant"}}]}',
+      '',
+      'data: {"choices":[{"delta":{"content":"streamed "}}]}',
+      'data: {"choices":[{"delta":{"content":"answer"}}]}',
+      'data: {"choices":[{"delta":{},"finish_reason":"stop"}]}',
+      'data: [DONE]',
+      '',
+    ].join('\n')
+    const originalFetch = globalThis.fetch
+    globalThis.fetch = async (url, options) => {
+      calls.push({ url, options, body: parseRequestBody(options) })
+      return new Response(sseBody, { status: 200, headers: { 'content-type': 'text/event-stream' } })
+    }
+    try {
+      const result = await describeImage(
+        { image_base64: gifBytes.toString('base64'), prompt: 'stream me' },
+        testConfig(),
+      )
+      assert.equal(stripBanner(result), 'streamed answer')
+      assert.equal(calls.length, 1)
+      assert.equal(calls[0].body.stream, true, 'streamed requests must ask the provider to stream')
+    } finally {
+      globalThis.fetch = originalFetch
+    }
+  })
+
+  // Anthropic Messages SSE events (content_block_delta) are aggregated too.
+  {
+    const anthropicSse = [
+      'data: {"type":"message_start","message":{"role":"assistant"}}',
+      '',
+      'data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"anthropic "}}',
+      'data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"ok"}}',
+      'data: {"type":"message_delta","delta":{"stop_reason":"end_turn"}}',
+      'data: {"type":"message_stop"}',
+      '',
+    ].join('\n')
+    const originalFetch = globalThis.fetch
+    const anthropicCalls = []
+    globalThis.fetch = async (url, options) => {
+      anthropicCalls.push({ url, options, body: parseRequestBody(options) })
+      return new Response(anthropicSse, { status: 200, headers: { 'content-type': 'text/event-stream' } })
+    }
+    try {
+      const result = await describeImage(
+        { image_base64: gifBytes.toString('base64'), prompt: 'anthropic stream' },
+        testConfig({ model: 'claude-test', baseUrl: 'https://gateway.example.com/v1', protocol: 'anthropic' }),
+      )
+      assert.equal(stripBanner(result), 'anthropic ok')
+      assert.equal(anthropicCalls[0].body.stream, true)
+    } finally {
+      globalThis.fetch = originalFetch
+    }
+  }
+
+  // A thinking-only stream still proves a connection for testModelConnection.
+  {
+    const reasoningSse = [
+      'data: {"choices":[{"delta":{"reasoning_content":"thinking hard"}}]}',
+      'data: {"choices":[{"delta":{},"finish_reason":"length"}]}',
+      'data: [DONE]',
+      '',
+    ].join('\n')
+    const originalFetch = globalThis.fetch
+    globalThis.fetch = async () => new Response(reasoningSse, { status: 200, headers: { 'content-type': 'text/event-stream' } })
+    try {
+      const message = await testModelConnection(
+        testConfig({ model: 'reasoning-stream-model', baseUrl: 'https://gateway.example.com/v1' }),
+      )
+      assert.match(message, /visual connection verified; reasoning model/i)
+    } finally {
+      globalThis.fetch = originalFetch
+    }
+  }
+
+  // A gateway that rejects the standard `stream` parameter is retried once
+  // non-streamed; a gateway that ignores it answers JSON (covered implicitly
+  // by every application/json mock above).
+  await withSequencedFetch(
+    [
+      { status: 400, body: JSON.stringify({ error: { message: "Unsupported parameter: 'stream'." } }) },
+      { status: 200, body: JSON.stringify({ choices: [{ message: { content: 'non-stream ok' } }] }) },
+    ],
+    async (calls) => {
+      const result = await describeImage(
+        { image_base64: gifBytes.toString('base64'), prompt: 'no stream please' },
+        testConfig(),
+      )
+      assert.equal(stripBanner(result), 'non-stream ok')
+      assert.equal(calls.length, 2)
+      assert.equal(calls[0].body.stream, true)
+      assert.equal(calls[1].body.stream, undefined)
+    },
+  )
+
+  // An explicit upstream error event mid-stream is a deterministic provider
+  // failure: surfaced with its message, never retried.
+  {
+    const sseError = 'data: {"error":{"message":"upstream exploded"}}\n\n'
+    const originalFetch = globalThis.fetch
+    let errorCalls = 0
+    globalThis.fetch = async () => {
+      errorCalls += 1
+      return new Response(sseError, { status: 200, headers: { 'content-type': 'text/event-stream' } })
+    }
+    try {
+      await assertRejectsMessage(
+        () => describeImage({ image_base64: gifBytes.toString('base64'), prompt: 'boom' }, testConfig({ maxRetries: 2 })),
+        /Vision model API error: upstream exploded/,
+      )
+      assert.equal(errorCalls, 1, 'provider error events must not be retried')
+    } finally {
+      globalThis.fetch = originalFetch
+    }
+  }
+
+  // The non-streaming retry after a `stream` rejection also covers Anthropic
+  // protocol gateways — dropping `stream` is not an OpenAI parameter-shape
+  // conversion, so the protocol guard must not block it.
+  await withSequencedFetch(
+    [
+      { status: 400, body: JSON.stringify({ type: 'error', error: { type: 'invalid_request_error', message: "Unsupported parameter: 'stream'." } }) },
+      { status: 200, body: JSON.stringify({ content: [{ type: 'text', text: 'anthropic non-stream ok' }] }) },
+    ],
+    async (calls) => {
+      const result = await describeImage(
+        { image_base64: gifBytes.toString('base64'), prompt: 'anthropic no stream' },
+        testConfig({ model: 'claude-test', baseUrl: 'https://gateway.example.com/v1', protocol: 'anthropic' }),
+      )
+      assert.equal(stripBanner(result), 'anthropic non-stream ok')
+      assert.equal(calls.length, 2)
+      assert.equal(calls[0].body.stream, true)
+      assert.equal(calls[1].body.stream, undefined)
+    },
+  )
+
+  // A stream whose final data event lacks its trailing newline must not lose
+  // that event's content.
+  {
+    const truncatedSse = 'data: {"choices":[{"delta":{"content":"tail "}}]}\ndata: {"choices":[{"delta":{"content":"kept"}}]}'
+    const originalFetch = globalThis.fetch
+    globalThis.fetch = async () => new Response(truncatedSse, { status: 200, headers: { 'content-type': 'text/event-stream' } })
+    try {
+      const result = await describeImage(
+        { image_base64: gifBytes.toString('base64'), prompt: 'truncated tail' },
+        testConfig(),
+      )
+      assert.equal(stripBanner(result), 'tail kept')
+    } finally {
+      globalThis.fetch = originalFetch
+    }
+  }
+
+  // --- First-byte watchdog ---------------------------------------------------
+  // A provider that accepts the request but never emits a byte is retried at
+  // the watchdog deadline instead of waiting for the overall request timeout.
+  {
+    const originalFetch = globalThis.fetch
+    let stallCalls = 0
+    globalThis.fetch = (url, options) => new Promise((resolveStall) => {
+      stallCalls += 1
+      const stalled = new ReadableStream({
+        start(controller) {
+          options.signal.addEventListener('abort', () => {
+            try { controller.error(new Error('aborted')) } catch { /* already closed */ }
+          }, { once: true })
+        },
+      })
+      resolveStall(new Response(stalled, { status: 200, headers: { 'content-type': 'text/event-stream' } }))
+    })
+    try {
+      await assertRejectsMessage(
+        () => describeImage(
+          { image_base64: gifBytes.toString('base64'), prompt: 'stalled' },
+          testConfig({ requestTimeoutMs: 5_000, firstByteTimeoutMs: 60, maxRetries: 1 }),
+        ),
+        /did not start responding within 60ms/,
+      )
+      assert.equal(stallCalls, 2, 'a first-byte stall must be retried up to maxRetries')
+    } finally {
+      globalThis.fetch = originalFetch
+    }
+  }
+
+  // --- Cross-process disk result cache ---------------------------------------
+  // The in-memory Map dies with the process; the on-disk mirror under cache.dir
+  // lets a fresh module instance (a new Skill run) reuse a recent answer.
+  const diskCacheDir = join(tempDir, 'result-cache-a')
+  const diskCacheConfig = testConfig({
+    cache: { enabled: true, maxEntries: 8, ttlMs: 60_000, dir: diskCacheDir },
+    model: 'disk-cache-model',
+  })
+  await withMockFetch(async (calls) => {
+    const first = await describeImage({ image_base64: gifBytes.toString('base64'), prompt: 'persist me' }, diskCacheConfig)
+    assert.equal(stripBanner(first), 'ok')
+    assert.equal(calls.length, 1)
+  })
+  const diskEntries = readdirSync(diskCacheDir).filter((name) => /^[a-f0-9]{64}\.json$/.test(name))
+  assert.equal(diskEntries.length, 1, 'a completed call must persist exactly one cache entry')
+  const diskEntry = JSON.parse(readFileSync(join(diskCacheDir, diskEntries[0]), 'utf8'))
+  assert.equal(diskEntry.version, 1)
+  assert.equal(typeof diskEntry.expiresAt, 'number')
+  assert.match(diskEntry.value, /^\[VisionPower\]/)
+
+  // Fresh module instance = fresh in-memory cache, as in a new Skill process.
+  const freshCoreUrl = new URL('../src/vision-core.js', import.meta.url)
+  const freshCore = await import(`${freshCoreUrl.href}?fresh=disk-cache`)
+  await withMockFetch(async (calls) => {
+    const result = await freshCore.describeImage(
+      { image_base64: gifBytes.toString('base64'), prompt: 'persist me' },
+      diskCacheConfig,
+    )
+    assert.equal(calls.length, 0, 'a disk hit must not bill the provider again')
+    assert.equal(stripBanner(result), 'ok')
+  })
+
+  // Expired disk entries are removed and the provider is billed again.
+  const expiringDir = join(tempDir, 'result-cache-b')
+  const expiringConfig = testConfig({
+    cache: { enabled: true, maxEntries: 8, ttlMs: 40, dir: expiringDir },
+    model: 'disk-cache-expiring-model',
+  })
+  const expiringInput = { image_base64: gifBytes.toString('base64'), prompt: 'expire me' }
+  await withMockFetch(async (calls) => {
+    await describeImage(expiringInput, expiringConfig)
+    assert.equal(calls.length, 1)
+  })
+  await new Promise((resolveWait) => setTimeout(resolveWait, 80))
+  await withMockFetch(async (calls) => {
+    await describeImage(expiringInput, expiringConfig)
+    assert.equal(calls.length, 1, 'an expired disk entry must bill the provider again')
+  })
+
+  // A disabled cache never touches the disk.
+  const disabledCacheDir = join(tempDir, 'result-cache-c')
+  await withMockFetch(async () => {
+    await describeImage(
+      { image_base64: gifBytes.toString('base64'), prompt: 'no disk' },
+      testConfig({ cache: { enabled: false, maxEntries: 0, ttlMs: 1_000, dir: disabledCacheDir } }),
+    )
+  })
+  assert.equal(existsSync(disabledCacheDir), false)
+
+  // A hostile stream that never emits a newline is bounded by the raw-byte
+  // cap, exactly like the buffered non-streaming read.
+  {
+    const endless = new ReadableStream({
+      start(controller) {
+        controller.enqueue(Buffer.alloc(6 * 1024 * 1024, 0x61)) // 'a' * 6MB, no newline
+      },
+    })
+    const originalFetch = globalThis.fetch
+    globalThis.fetch = async () => new Response(endless, { status: 200, headers: { 'content-type': 'text/event-stream' } })
+    try {
+      await assertRejectsMessage(
+        () => describeImage({ image_base64: gifBytes.toString('base64'), prompt: 'endless' }, testConfig()),
+        /response body is too large/,
+      )
+    } finally {
+      globalThis.fetch = originalFetch
+    }
+  }
+
+  // A pre-existing group/world-accessible cache directory disables the disk
+  // mirror without failing the request.
+  if (process.platform !== 'win32') {
+    const looseDir = join(tempDir, 'result-cache-loose')
+    mkdirSync(looseDir, { recursive: true })
+    chmodSync(looseDir, 0o777)
+    await withMockFetch(async (calls) => {
+      const result = await describeImage(
+        { image_base64: gifBytes.toString('base64'), prompt: 'loose dir' },
+        testConfig({ cache: { enabled: true, maxEntries: 4, ttlMs: 60_000, dir: looseDir }, model: 'loose-cache-model' }),
+      )
+      assert.equal(stripBanner(result), 'ok')
+      assert.equal(calls.length, 1)
+    })
+    assert.equal(readdirSync(looseDir).length, 0, 'no entry may be written to an insecure cache dir')
+  }
+
   // --- output_format validation ---
   await assertRejectsMessage(
     () => describeImage({ image_base64: gifBytes.toString('base64'), output_format: 'html' }, testConfig()),
@@ -1569,6 +1852,19 @@ try {
   const retryDefaults = cfg({ VISIONPOWER_API_KEY: 'k' })
   assert.equal(retryDefaults.maxRetries, 2)
   assert.equal(retryDefaults.debug, false)
+  assert.equal(retryDefaults.maxTokens, 4096)
+  assert.equal(retryDefaults.firstByteTimeoutMs, 15_000)
+  // The on-disk cache mirror lives next to the config file (never inside it).
+  assert.equal(retryDefaults.cache.dir, join(dirname(absentConfig), 'cache'))
+  const firstByteEnv = cfg({
+    VISIONPOWER_API_KEY: 'k',
+    VISIONPOWER_FIRST_BYTE_TIMEOUT_MS: '8000',
+  })
+  assert.equal(firstByteEnv.firstByteTimeoutMs, 8000)
+  assert.throws(
+    () => cfg({ VISIONPOWER_API_KEY: 'k', VISIONPOWER_FIRST_BYTE_TIMEOUT_MS: '0' }),
+    /VISIONPOWER_FIRST_BYTE_TIMEOUT_MS must be a positive integer/,
+  )
 
   const kimiDefaults = cfg({
     VISIONPOWER_API_KEY: 'k',
@@ -1688,7 +1984,7 @@ try {
   assert.equal(fromFile.model, 'file-model')
   assert.equal(fromFile.baseUrl, 'https://file.example.com/v1')
   assert.equal(fromFile.maxImages, 3)
-  assert.deepEqual(fromFile.cache, { enabled: true, maxEntries: 32, ttlMs: 30 * 60 * 1000 }) // cache defaults to on
+  assert.deepEqual(fromFile.cache, { enabled: true, maxEntries: 32, ttlMs: 30 * 60 * 1000, dir: join(tempDir, 'cache') }) // cache defaults to on
   assert.equal(fromFile.inbox.dir, join(tempDir, 'inbox'))
 
   const inboxSettings = cfg({
@@ -1709,12 +2005,17 @@ try {
     cache: { maxEntries: 5, ttlMs: 12_000 },
   }))
   const cacheFile = loadVisionConfig({ VISIONPOWER_CONFIG: cacheFileConfigPath })
-  assert.deepEqual(cacheFile.cache, { enabled: true, maxEntries: 5, ttlMs: 12_000 })
+  assert.deepEqual(cacheFile.cache, { enabled: true, maxEntries: 5, ttlMs: 12_000, dir: join(dirname(cacheFileConfigPath), 'cache') })
 
   const cacheDisabled = loadVisionConfig({ VISIONPOWER_CONFIG: absentConfig, VISIONPOWER_API_KEY: 'k', VISIONPOWER_CACHE: 'false' })
   assert.equal(cacheDisabled.cache.enabled, false)
+  // VISIONPOWER_CACHE_DIR overrides the derived location for the disk mirror.
+  assert.equal(
+    cfg({ VISIONPOWER_API_KEY: 'k', VISIONPOWER_CACHE_DIR: join(tempDir, 'custom-cache') }).cache.dir,
+    join(tempDir, 'custom-cache'),
+  )
   const cacheEntries = cfg({ VISIONPOWER_API_KEY: 'k', VISIONPOWER_CACHE_MAX_ENTRIES: '7', VISIONPOWER_CACHE_TTL_MS: '9000' })
-  assert.deepEqual(cacheEntries.cache, { enabled: true, maxEntries: 7, ttlMs: 9000 })
+  assert.deepEqual(cacheEntries.cache, { enabled: true, maxEntries: 7, ttlMs: 9000, dir: join(tempDir, 'cache') })
   // maxEntries of zero disables the cache (store nothing).
   assert.equal(cfg({ VISIONPOWER_API_KEY: 'k', VISIONPOWER_CACHE_MAX_ENTRIES: '0' }).cache.enabled, false)
 
@@ -2204,6 +2505,11 @@ try {
       assert.equal(webuiConfig.inboxMaxEntries, 64)
       assert.equal(webuiConfig.inbox, undefined)
       assert.equal(webuiConfig.requestTimeoutMs, undefined)
+      // The on-disk cache location is server-side plumbing, never sent to the
+      // browser; the tunable cache knobs are still exposed.
+      assert.equal(webuiConfig.cache.dir, undefined)
+      assert.equal(webuiConfig.cache.enabled, true)
+      assert.equal(webuiConfig.firstByteTimeoutMs, 15_000)
 
       // API routes remain valid when a harmless query parameter is added.
       const configWithQuery = await fetch(`${origin}/api/config?cacheBust=1`)
@@ -2402,6 +2708,35 @@ try {
           assert.equal(providerCalls[3].body.max_tokens, 32_768)
           assert.equal(providerCalls[3].body.max_completion_tokens, undefined)
 
+        // A config persisted by the pre-2.8 WebUI carries an explicit
+        // maxTokens of 2048 (the then-default). That value must still count as
+        // "no explicit user budget" so the Kimi probe upgrade applies.
+        {
+          const configPath27 = process.env.VISIONPOWER_CONFIG
+          const savedConfig27 = readFileSync(configPath27, 'utf8')
+          const parsed27 = JSON.parse(savedConfig27)
+          parsed27.maxTokens = 2048
+          writeFileSync(configPath27, JSON.stringify(parsed27))
+          try {
+            const legacyDefaultConnection = await localHttpRequest(`${origin}/api/test-connection`, {
+              method: 'POST',
+              body: {
+                apiKey: 'moonshot-test-key',
+                model: 'kimi-k3',
+                baseUrl: 'https://api.moonshot.cn/v1',
+              },
+            })
+            assert.equal(legacyDefaultConnection.status, 200)
+            assert.equal(providerCalls.length, 5)
+            assert.equal(
+              providerCalls[4].body.max_tokens, 32_768,
+              'an explicit 2048 saved by the old default must still receive the recommended probe budget',
+            )
+          } finally {
+            writeFileSync(configPath27, savedConfig27)
+          }
+        }
+
         // The Playground must expose the same output_format contract as MCP and
         // the Skill. Verify full browser-endpoint forwarding, not just that the
         // server accepts an undocumented field.
@@ -2417,8 +2752,8 @@ try {
         const structuredPlaygroundResult = JSON.parse(structuredPlaygroundResponse.json.result)
           assert.equal(structuredPlaygroundResult.formatValid, true)
           assert.equal(structuredPlaygroundResult.answer, 'structured playground')
-          assert.equal(providerCalls.length, 5)
-          assert.match(providerCalls[4].body.messages[0].content, /Return ONLY JSON/i)
+          assert.equal(providerCalls.length, 6)
+          assert.match(providerCalls[5].body.messages[0].content, /Return ONLY JSON/i)
 
         const unknownPlaygroundField = await localHttpRequest(`${origin}/api/test`, {
           method: 'POST',
@@ -2447,7 +2782,7 @@ try {
         })
           assert.equal(multiplePlaygroundSources.status, 400)
           assert.match(multiplePlaygroundSources.json.error, /exactly one/)
-          assert.equal(providerCalls.length, 5)
+          assert.equal(providerCalls.length, 6)
 
         const invalidInboxMime = await localHttpRequest(`${origin}/api/inbox`, {
           method: 'POST',
@@ -2479,15 +2814,15 @@ try {
         })
           assert.equal(refWithMime.status, 400)
           assert.match(refWithMime.json.error, /only be used with image_base64/)
-          assert.equal(providerCalls.length, 5)
+          assert.equal(providerCalls.length, 6)
 
           const refPlaygroundResponse = await localHttpRequest(`${origin}/api/test`, {
-          method: 'POST',
-          body: { image_ref: `  ${stagedRef}  `, prompt: 'Read staged image.' },
+            method: 'POST',
+            body: { image_ref: `  ${stagedRef}  `, prompt: 'Read staged image.' },
           })
           assert.equal(refPlaygroundResponse.status, 200)
-          assert.equal(providerCalls.length, 6)
-          const stagedPart = userContent(providerCalls[5]).find((part) => part.type === 'image_url')
+          assert.equal(providerCalls.length, 7)
+          const stagedPart = userContent(providerCalls[6]).find((part) => part.type === 'image_url')
         assert.match(stagedPart.image_url.url, /^data:image\/gif;base64,/)
 
         const deleteRefResponse = await localHttpRequest(`${origin}/api/inbox/${stagedRef}`, {
@@ -2504,7 +2839,7 @@ try {
         })
           assert.equal(invalidFormatResponse.status, 400)
           assert.match(invalidFormatResponse.json.error, /output_format must be 'text' or 'structured'/)
-          assert.equal(providerCalls.length, 6)
+          assert.equal(providerCalls.length, 7)
       } finally {
         globalThis.fetch = originalFetch
       }
