@@ -14,6 +14,7 @@ import { BlockList, isIP } from 'node:net'
 import { request as httpRequest } from 'node:http'
 import { request as httpsRequest } from 'node:https'
 
+const DEFAULT_PROTOCOL = 'openai'
 const DEFAULT_VISION_BASE_URL = 'https://dashscope.aliyuncs.com/compatible-mode/v1'
 const DEFAULT_VISION_MODEL = 'qwen3-vl-flash'
 const DEFAULT_MAX_IMAGE_BYTES = 20 * 1024 * 1024
@@ -114,75 +115,80 @@ function maskWelfareBaseUrl(value) {
 const VISION_PROVIDER_CAPABILITIES = [
   {
     provider: 'openai', hosts: ['api.openai.com'], modelPattern: '^gpt-5', region: 'global',
-    tokenParameter: 'max_completion_tokens', supportsSystemRole: true,
+    protocol: 'openai', tokenParameter: 'max_completion_tokens', supportsSystemRole: true,
     auth: 'bearer', vision: true, supportsPublicImageUrl: true, lastVerified: '2026-08-11',
   },
   {
     provider: 'openai', hosts: ['api.openai.com'], region: 'global',
-    tokenParameter: 'max_tokens', supportsSystemRole: true,
+    protocol: 'openai', tokenParameter: 'max_tokens', supportsSystemRole: true,
     auth: 'bearer', vision: true, supportsPublicImageUrl: true, lastVerified: null,
   },
   {
+    provider: 'anthropic', hosts: ['api.anthropic.com'], region: 'global',
+    protocol: 'anthropic', tokenParameter: 'max_tokens', supportsSystemRole: true,
+    auth: 'anthropic', vision: true, supportsPublicImageUrl: false, lastVerified: null,
+  },
+  {
     provider: 'alibaba-cloud', hosts: ['dashscope.aliyuncs.com'], modelPattern: '^qwen3\\.(?:6|7)-', region: 'china',
-    tokenParameter: 'max_completion_tokens', supportsSystemRole: true,
+    protocol: 'openai', tokenParameter: 'max_completion_tokens', supportsSystemRole: true,
     auth: 'bearer', vision: true, supportsPublicImageUrl: true, lastVerified: '2026-08-11',
   },
   {
     provider: 'alibaba-cloud', hosts: ['dashscope.aliyuncs.com'], region: 'china',
-    tokenParameter: 'max_tokens', supportsSystemRole: true,
+    protocol: 'openai', tokenParameter: 'max_tokens', supportsSystemRole: true,
     auth: 'bearer', vision: true, supportsPublicImageUrl: true, lastVerified: '2026-08-11',
   },
   {
     provider: 'minimax', hosts: ['api.minimaxi.com'], region: 'china',
-    tokenParameter: 'max_completion_tokens', supportsSystemRole: true,
+    protocol: 'openai', tokenParameter: 'max_completion_tokens', supportsSystemRole: true,
     auth: 'bearer', vision: true, supportsPublicImageUrl: true, lastVerified: '2026-08-11',
   },
   {
     provider: 'minimax', hosts: ['api.minimax.io'], region: 'global',
-    tokenParameter: 'max_completion_tokens', supportsSystemRole: true,
+    protocol: 'openai', tokenParameter: 'max_completion_tokens', supportsSystemRole: true,
     auth: 'bearer', vision: true, supportsPublicImageUrl: true, lastVerified: '2026-08-11',
   },
   {
     // Hostname derived from the obfuscated welfare cipher, never spelled out.
     provider: 'minimax-gateway', hosts: [welfareHostname()].filter(Boolean), region: 'custom',
-    tokenParameter: 'auto', supportsSystemRole: 'auto',
+    protocol: 'openai', tokenParameter: 'auto', supportsSystemRole: 'auto',
     auth: 'bearer', vision: true, supportsPublicImageUrl: 'auto', lastVerified: null,
   },
   {
     provider: 'zhipu', hosts: ['open.bigmodel.cn'], region: 'china',
-    tokenParameter: 'max_tokens', supportsSystemRole: true,
+    protocol: 'openai', tokenParameter: 'max_tokens', supportsSystemRole: true,
     auth: 'bearer', vision: true, supportsPublicImageUrl: true, lastVerified: null,
   },
   {
     provider: 'zhipu', hosts: ['api.z.ai'], region: 'global',
-    tokenParameter: 'max_tokens', supportsSystemRole: true,
+    protocol: 'openai', tokenParameter: 'max_tokens', supportsSystemRole: true,
     auth: 'bearer', vision: true, supportsPublicImageUrl: true, lastVerified: null,
   },
   {
     provider: 'volcengine', hosts: ['ark.cn-beijing.volces.com'], region: 'china',
-    tokenParameter: 'max_tokens', supportsSystemRole: true,
+    protocol: 'openai', tokenParameter: 'max_tokens', supportsSystemRole: true,
     auth: 'bearer', vision: true, supportsPublicImageUrl: true, lastVerified: null,
   },
   {
     provider: 'moonshot', hosts: ['api.moonshot.cn'], modelPattern: '^kimi-(?:k2\\.6|k2\\.7-code|k3)$', region: 'china',
-    tokenParameter: 'max_tokens', supportsSystemRole: true,
+    protocol: 'openai', tokenParameter: 'max_tokens', supportsSystemRole: true,
     auth: 'bearer', vision: true, supportsPublicImageUrl: false,
     recommendedMaxTokens: 32_768, lastVerified: '2026-08-11',
   },
   {
     provider: 'moonshot', hosts: ['api.moonshot.ai'], modelPattern: '^kimi-(?:k2\\.6|k2\\.7-code|k3)$', region: 'global',
-    tokenParameter: 'max_tokens', supportsSystemRole: true,
+    protocol: 'openai', tokenParameter: 'max_tokens', supportsSystemRole: true,
     auth: 'bearer', vision: true, supportsPublicImageUrl: false,
     recommendedMaxTokens: 32_768, lastVerified: '2026-08-11',
   },
   {
     provider: 'moonshot', hosts: ['api.moonshot.cn', 'api.moonshot.ai'], region: 'custom',
-    tokenParameter: 'auto', supportsSystemRole: 'auto',
+    protocol: 'openai', tokenParameter: 'auto', supportsSystemRole: 'auto',
     auth: 'bearer', vision: 'auto', supportsPublicImageUrl: 'auto', lastVerified: null,
   },
   {
     provider: 'google', hosts: ['generativelanguage.googleapis.com'], region: 'global',
-    tokenParameter: 'max_tokens', supportsSystemRole: true,
+    protocol: 'openai', tokenParameter: 'max_tokens', supportsSystemRole: true,
     auth: 'bearer', vision: true, supportsPublicImageUrl: true, lastVerified: null,
   },
 ]
@@ -202,6 +208,7 @@ function resolveModelCapabilities(model, baseUrl) {
     return {
       provider: capability.provider,
       region: capability.region,
+      protocol: capability.protocol,
       tokenParameter: capability.tokenParameter,
       supportsSystemRole: capability.supportsSystemRole,
       auth: capability.auth,
@@ -214,6 +221,7 @@ function resolveModelCapabilities(model, baseUrl) {
   return {
     provider: 'custom',
     region: 'custom',
+    protocol: 'openai',
     tokenParameter: 'auto',
     supportsSystemRole: 'auto',
     auth: 'bearer',
@@ -549,6 +557,14 @@ function booleanFromFile(value, label, { prefix = 'config file' } = {}) {
   return value
 }
 
+function normalizeProtocol(value, source = 'protocol') {
+  const normalized = String(value || 'openai').toLowerCase()
+  if (normalized !== 'openai' && normalized !== 'anthropic') {
+    throw new Error(`${source} must be "openai" or "anthropic"`)
+  }
+  return normalized
+}
+
 function allowedDirsFromFile(value) {
   if (value === undefined || value === null) return undefined
   const list = Array.isArray(value)
@@ -588,6 +604,12 @@ function loadVisionConfig(env = process.env) {
   const model = normalizeModelForKnownEndpoint(configuredModel, baseUrl)
   const modelCapabilities = resolveModelCapabilities(model, baseUrl)
 
+  const protocolEnv = readEnvValue(env, ['VISIONPOWER_PROTOCOL'])
+  const protocolFile = stringFromFile(file.protocol, 'protocol')
+  const protocolSource = protocolEnv.value ? protocolEnv.name : (protocolFile ? 'config file "protocol"' : 'protocol')
+  const rawProtocol = protocolEnv.value || protocolFile || modelCapabilities.protocol || DEFAULT_PROTOCOL
+  const protocol = normalizeProtocol(rawProtocol, protocolSource)
+
   const allowedDirsEnv = readEnvValue(env, ['VISIONPOWER_ALLOWED_DIRS'])
   const debugEnv = readEnvValue(env, ['VISIONPOWER_DEBUG'])
   const timeoutEnv = readEnvValue(env, ['VISIONPOWER_TIMEOUT_MS'])
@@ -608,6 +630,7 @@ function loadVisionConfig(env = process.env) {
     apiKey,
     model,
     baseUrl,
+    protocol,
     allowedDirs: allowedDirsEnv.value
       ? parseAllowedDirs(allowedDirsEnv)
       : (allowedDirsFromFile(file.allowedDirs) ?? []),
@@ -748,6 +771,24 @@ function normalizeBaseUrl(value, name) {
   return url.toString().replace(/\/+$/, '')
 }
 
+// Anthropic's official endpoint requires the /v1 path segment. Accept the bare
+// host URL and fill in /v1 when the request URL is built, so users only need to
+// remember `api.anthropic.com` (custom gateways keep their own path).
+function ensureAnthropicVersionPath(baseUrl, protocol) {
+  if (protocol !== 'anthropic' || typeof baseUrl !== 'string') return baseUrl
+  let url
+  try {
+    url = new URL(baseUrl)
+  } catch {
+    return baseUrl
+  }
+  if (url.hostname.toLowerCase() !== 'api.anthropic.com') return baseUrl
+  const pathname = url.pathname.replace(/\/+$/, '')
+  if (pathname && pathname !== '/') return baseUrl
+  url.pathname = '/v1'
+  return url.toString().replace(/\/+$/, '')
+}
+
 function saveVisionConfig(config, env = process.env) {
   const configPath = getConfigFilePath(env)
   const dir = dirname(configPath)
@@ -783,7 +824,7 @@ function saveVisionConfig(config, env = process.env) {
 // polluting keys sent by the client are silently dropped. Kept here (next to
 // the validators below) so the server and the validation pass always agree.
 const ALLOWED_CONFIG_KEYS = new Set([
-  'apiKey', 'model', 'baseUrl', 'allowedDirs',
+  'apiKey', 'model', 'baseUrl', 'protocol', 'allowedDirs',
   'maxImageBytes', 'maxTotalImageBytes', 'timeoutMs', 'maxTokens', 'maxImages', 'maxRetries',
   'inboxTtlMs', 'inboxMaxEntries', 'inboxMaxBytes', 'debug', 'cache',
 ])
@@ -809,6 +850,17 @@ function normalizeConfigObject(input) {
     cleaned.baseUrl = normalizeBaseUrl(cleaned.baseUrl.trim(), 'baseUrl')
   } else if (cleaned.baseUrl !== undefined) {
     throw new Error('baseUrl must be a non-empty string')
+  }
+
+  // protocol: explicit OpenAI/Anthropic selection; default stays openai.
+  if (cleaned.protocol !== undefined && cleaned.protocol !== null) {
+    if (typeof cleaned.protocol !== 'string') {
+      throw new Error('config field "protocol" must be a string')
+    }
+    cleaned.protocol = normalizeProtocol(cleaned.protocol.trim(), 'config field "protocol"')
+  } else if (cleaned.protocol === null) {
+    // null is never persisted — drop it so loadVisionConfig doesn't reject.
+    delete cleaned.protocol
   }
 
   // String fields: apiKey and model. loadVisionConfig reads these via
@@ -2203,7 +2255,11 @@ function stripLeadingReasoningBlock(text) {
 }
 
 function extractTextContent(data) {
-  const content = data?.choices?.[0]?.message?.content
+  // OpenAI-compatible: choices[0].message.content
+  const openAiContent = data?.choices?.[0]?.message?.content
+  // Anthropic Messages API: content[0].text
+  const anthropicContent = data?.content
+  const content = openAiContent ?? anthropicContent
   let text = ''
   if (typeof content === 'string') {
     text = content
@@ -2213,14 +2269,25 @@ function extractTextContent(data) {
       .filter(Boolean)
       .join('\n')
   }
-  
+
   return stripLeadingReasoningBlock(text).trim()
+}
+
+// Hidden thinking blocks carry no visible text (no `.text` field), so a reply
+// consisting only of them yields an empty extraction while still proving the
+// model responded. Checked in both response envelopes: the Anthropic Messages
+// API's top-level content array and OpenAI-compatible content arrays.
+function hasThinkingOnlyResponse(data) {
+  return [data?.content, data?.choices?.[0]?.message?.content]
+    .some((parts) => Array.isArray(parts) && parts.some((part) => part?.type === 'thinking'))
 }
 
 function extractUpstreamErrorMessage(bodyText) {
   try {
     const data = JSON.parse(bodyText)
     const candidates = [
+      // Anthropic: { type: 'error', error: { type, message } }
+      data?.type === 'error' && data?.error?.message,
       data?.error?.message,
       data?.message,
       data?.base_resp?.status_msg,
@@ -2280,8 +2347,92 @@ function unsupportedImageFormatMessage(requestBody, config, result) {
   return `The configured vision model "${config.model}" rejected ${imageFormat} input. VisionPower forwarded the original image without conversion. Try a vision model that supports this format, or convert the image to PNG/JPEG and retry. Upstream message: ${conciseUpstreamMessage}`
 }
 
+function parseDataUri(url) {
+  const match = url.match(/^data:([^;]+);base64,(.*)$/i)
+  if (!match) return null
+  return { mimeType: match[1].trim().toLowerCase(), data: match[2] }
+}
+
+function toAnthropicImageSource(imageUrl) {
+  // Anthropic accepts both base64 and URL image sources. VisionPower already
+  // downloads public URLs locally and forwards every image as a data URI, so the
+  // base64 path is always available and keeps the request self-contained.
+  const dataUri = parseDataUri(imageUrl)
+  if (dataUri) {
+    return {
+      type: 'base64',
+      media_type: dataUri.mimeType,
+      data: dataUri.data,
+    }
+  }
+  return { type: 'url', url: imageUrl }
+}
+
+function toAnthropicContentPart(part) {
+  if (part?.type === 'text') {
+    return { type: 'text', text: part.text }
+  }
+  if (part?.type === 'image_url') {
+    return {
+      type: 'image',
+      source: toAnthropicImageSource(part.image_url?.url ?? ''),
+    }
+  }
+  return null
+}
+
+function toAnthropicMessage(message) {
+  const content = Array.isArray(message.content)
+    ? message.content.map(toAnthropicContentPart).filter(Boolean)
+    : [{ type: 'text', text: message.content }]
+  return { role: message.role, content }
+}
+
+function toAnthropicRequestBody(openAiBody) {
+  const systemMessage = openAiBody.messages?.find((message) => message.role === 'system')
+  const system = typeof systemMessage?.content === 'string' ? systemMessage.content : undefined
+  const messages = openAiBody.messages
+    ?.filter((message) => message.role !== 'system')
+    .map(toAnthropicMessage) ?? []
+  const maxTokens = openAiBody.max_tokens ?? openAiBody.max_completion_tokens
+  const body = {
+    model: openAiBody.model,
+    max_tokens: maxTokens,
+    messages,
+  }
+  if (system) body.system = system
+  return body
+}
+
+function getProviderRequestConfig(config, requestBody) {
+  if (config.protocol === 'anthropic') {
+    // The official Anthropic endpoint requires the /v1 path segment. Accept a
+    // bare `https://api.anthropic.com` base URL and fill it in only when the
+    // request is built, so the stored/displayed value stays what the user
+    // typed. Custom gateways keep whatever path they configured.
+    const baseUrl = ensureAnthropicVersionPath(config.baseUrl, config.protocol)
+    return {
+      url: `${baseUrl}/messages`,
+      headers: {
+        'Content-Type': 'application/json',
+        'x-api-key': config.apiKey,
+        'anthropic-version': '2023-06-01',
+      },
+      body: toAnthropicRequestBody(requestBody),
+    }
+  }
+  return {
+    url: `${config.baseUrl}/chat/completions`,
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${config.apiKey}`,
+    },
+    body: requestBody,
+  }
+}
+
 async function fetchVisionCompletion(requestBody, config, signal) {
-  const url = `${config.baseUrl}/chat/completions`
+  const { url, headers, body } = getProviderRequestConfig(config, requestBody)
   if (signal?.aborted) throw abortError()
 
   for (let attempt = 0; ; attempt += 1) {
@@ -2305,11 +2456,8 @@ async function fetchVisionCompletion(requestBody, config, signal) {
     try {
       const response = await fetch(url, {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${config.apiKey}`,
-        },
-        body: JSON.stringify(requestBody),
+        headers,
+        body: JSON.stringify(body),
         signal: controller.signal,
       })
       const bodyText = await readResponseText(response)
@@ -2368,6 +2516,7 @@ function computeCacheKey(requestBody, config) {
   // Scope cached answers to the exact provider endpoint and credential. The
   // same model ID can exist behind different gateways/accounts with different
   // behavior or data boundaries, so sharing across either is incorrect.
+  hash.update(`protocol=${config.protocol ?? 'openai'}\n`)
   hash.update(`base_url=${config.baseUrl}\n`)
   hash.update(`api_key=${config.apiKey}\n`)
   hash.update(`model=${requestBody.model}\n`)
@@ -2592,6 +2741,10 @@ async function fetchVisionCompletionCompatible(requestBody, config, signal) {
     // Cooperative cancellation is never a compatibility problem — surface it
     // immediately instead of feeding it to the token-parameter fallback.
     if (error?.name === 'AbortError') throw error
+    // The token-parameter swap is specific to OpenAI-compatible providers.
+    // Anthropic Messages API only accepts max_tokens, so a rejection there
+    // should not be silently converted into a different parameter.
+    if (config.protocol === 'anthropic') throw error
     const compatible = requestBody.max_tokens !== undefined && isUnsupportedMaxTokensError(error)
       ? requestWithMaxCompletionTokens(requestBody)
       : requestBody.max_completion_tokens !== undefined && isUnsupportedMaxCompletionTokensError(error)
@@ -2748,6 +2901,11 @@ async function testModelConnection(config, { testVision = true } = {}) {
     }
     const content = extractTextContent(data)
     if (content) return `Visual connection verified: ${content}`
+    // A thinking-only reply still proves the connection, so treat it like the
+    // reasoning case below instead of a false "no text content" failure.
+    if (hasThinkingOnlyResponse(data)) {
+      return '(visual connection verified; reasoning model produced no visible reply within the token budget)'
+    }
     const message = data?.choices?.[0]?.message
     const hasReasoning = typeof message?.reasoning_content === 'string'
       ? message.reasoning_content.trim() !== ''
@@ -2779,6 +2937,9 @@ async function testModelConnection(config, { testVision = true } = {}) {
   // confirm the key/endpoint/model are reachable and the model responded — a
   // populated reasoning_content proves the model actually processed the prompt,
   // so treat that as a successful connection rather than a false failure.
+  if (hasThinkingOnlyResponse(data)) {
+    return '(connection ok; reasoning model produced no visible reply within the token budget)'
+  }
   const message = data?.choices?.[0]?.message
   const hasReasoning = typeof message?.reasoning_content === 'string'
     ? message.reasoning_content.trim() !== ''

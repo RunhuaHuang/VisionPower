@@ -6,7 +6,7 @@ import { BlockList, isIP } from 'node:net'
 import { request as httpRequest } from 'node:http'
 import { request as httpsRequest } from 'node:https'
 import { extname, isAbsolute, resolve, sep } from 'node:path'
-import { resolveModelCapabilities } from './config.js'
+import { resolveModelCapabilities, ensureAnthropicVersionPath } from './config.js'
 import { readStagedImage } from './image-inbox.js'
 
 const VISION_RETRYABLE_STATUS = new Set([429, 500, 502, 503, 504])
@@ -779,7 +779,11 @@ function stripLeadingReasoningBlock(text) {
 }
 
 function extractTextContent(data) {
-  const content = data?.choices?.[0]?.message?.content
+  // OpenAI-compatible: choices[0].message.content
+  const openAiContent = data?.choices?.[0]?.message?.content
+  // Anthropic Messages API: content[0].text
+  const anthropicContent = data?.content
+  const content = openAiContent ?? anthropicContent
   let text = ''
   if (typeof content === 'string') {
     text = content
@@ -789,14 +793,25 @@ function extractTextContent(data) {
       .filter(Boolean)
       .join('\n')
   }
-  
+
   return stripLeadingReasoningBlock(text).trim()
+}
+
+// Hidden thinking blocks carry no visible text (no `.text` field), so a reply
+// consisting only of them yields an empty extraction while still proving the
+// model responded. Checked in both response envelopes: the Anthropic Messages
+// API's top-level content array and OpenAI-compatible content arrays.
+function hasThinkingOnlyResponse(data) {
+  return [data?.content, data?.choices?.[0]?.message?.content]
+    .some((parts) => Array.isArray(parts) && parts.some((part) => part?.type === 'thinking'))
 }
 
 function extractUpstreamErrorMessage(bodyText) {
   try {
     const data = JSON.parse(bodyText)
     const candidates = [
+      // Anthropic: { type: 'error', error: { type, message } }
+      data?.type === 'error' && data?.error?.message,
       data?.error?.message,
       data?.message,
       data?.base_resp?.status_msg,
@@ -856,8 +871,92 @@ function unsupportedImageFormatMessage(requestBody, config, result) {
   return `The configured vision model "${config.model}" rejected ${imageFormat} input. VisionPower forwarded the original image without conversion. Try a vision model that supports this format, or convert the image to PNG/JPEG and retry. Upstream message: ${conciseUpstreamMessage}`
 }
 
+function parseDataUri(url) {
+  const match = url.match(/^data:([^;]+);base64,(.*)$/i)
+  if (!match) return null
+  return { mimeType: match[1].trim().toLowerCase(), data: match[2] }
+}
+
+function toAnthropicImageSource(imageUrl) {
+  // Anthropic accepts both base64 and URL image sources. VisionPower already
+  // downloads public URLs locally and forwards every image as a data URI, so the
+  // base64 path is always available and keeps the request self-contained.
+  const dataUri = parseDataUri(imageUrl)
+  if (dataUri) {
+    return {
+      type: 'base64',
+      media_type: dataUri.mimeType,
+      data: dataUri.data,
+    }
+  }
+  return { type: 'url', url: imageUrl }
+}
+
+function toAnthropicContentPart(part) {
+  if (part?.type === 'text') {
+    return { type: 'text', text: part.text }
+  }
+  if (part?.type === 'image_url') {
+    return {
+      type: 'image',
+      source: toAnthropicImageSource(part.image_url?.url ?? ''),
+    }
+  }
+  return null
+}
+
+function toAnthropicMessage(message) {
+  const content = Array.isArray(message.content)
+    ? message.content.map(toAnthropicContentPart).filter(Boolean)
+    : [{ type: 'text', text: message.content }]
+  return { role: message.role, content }
+}
+
+function toAnthropicRequestBody(openAiBody) {
+  const systemMessage = openAiBody.messages?.find((message) => message.role === 'system')
+  const system = typeof systemMessage?.content === 'string' ? systemMessage.content : undefined
+  const messages = openAiBody.messages
+    ?.filter((message) => message.role !== 'system')
+    .map(toAnthropicMessage) ?? []
+  const maxTokens = openAiBody.max_tokens ?? openAiBody.max_completion_tokens
+  const body = {
+    model: openAiBody.model,
+    max_tokens: maxTokens,
+    messages,
+  }
+  if (system) body.system = system
+  return body
+}
+
+function getProviderRequestConfig(config, requestBody) {
+  if (config.protocol === 'anthropic') {
+    // The official Anthropic endpoint requires the /v1 path segment. Accept a
+    // bare `https://api.anthropic.com` base URL and fill it in only when the
+    // request is built, so the stored/displayed value stays what the user
+    // typed. Custom gateways keep whatever path they configured.
+    const baseUrl = ensureAnthropicVersionPath(config.baseUrl, config.protocol)
+    return {
+      url: `${baseUrl}/messages`,
+      headers: {
+        'Content-Type': 'application/json',
+        'x-api-key': config.apiKey,
+        'anthropic-version': '2023-06-01',
+      },
+      body: toAnthropicRequestBody(requestBody),
+    }
+  }
+  return {
+    url: `${config.baseUrl}/chat/completions`,
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${config.apiKey}`,
+    },
+    body: requestBody,
+  }
+}
+
 async function fetchVisionCompletion(requestBody, config, signal) {
-  const url = `${config.baseUrl}/chat/completions`
+  const { url, headers, body } = getProviderRequestConfig(config, requestBody)
   if (signal?.aborted) throw abortError()
 
   for (let attempt = 0; ; attempt += 1) {
@@ -881,11 +980,8 @@ async function fetchVisionCompletion(requestBody, config, signal) {
     try {
       const response = await fetch(url, {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${config.apiKey}`,
-        },
-        body: JSON.stringify(requestBody),
+        headers,
+        body: JSON.stringify(body),
         signal: controller.signal,
       })
       const bodyText = await readResponseText(response)
@@ -944,6 +1040,7 @@ function computeCacheKey(requestBody, config) {
   // Scope cached answers to the exact provider endpoint and credential. The
   // same model ID can exist behind different gateways/accounts with different
   // behavior or data boundaries, so sharing across either is incorrect.
+  hash.update(`protocol=${config.protocol ?? 'openai'}\n`)
   hash.update(`base_url=${config.baseUrl}\n`)
   hash.update(`api_key=${config.apiKey}\n`)
   hash.update(`model=${requestBody.model}\n`)
@@ -1168,6 +1265,10 @@ async function fetchVisionCompletionCompatible(requestBody, config, signal) {
     // Cooperative cancellation is never a compatibility problem — surface it
     // immediately instead of feeding it to the token-parameter fallback.
     if (error?.name === 'AbortError') throw error
+    // The token-parameter swap is specific to OpenAI-compatible providers.
+    // Anthropic Messages API only accepts max_tokens, so a rejection there
+    // should not be silently converted into a different parameter.
+    if (config.protocol === 'anthropic') throw error
     const compatible = requestBody.max_tokens !== undefined && isUnsupportedMaxTokensError(error)
       ? requestWithMaxCompletionTokens(requestBody)
       : requestBody.max_completion_tokens !== undefined && isUnsupportedMaxCompletionTokensError(error)
@@ -1324,6 +1425,11 @@ export async function testModelConnection(config, { testVision = true } = {}) {
     }
     const content = extractTextContent(data)
     if (content) return `Visual connection verified: ${content}`
+    // A thinking-only reply still proves the connection, so treat it like the
+    // reasoning case below instead of a false "no text content" failure.
+    if (hasThinkingOnlyResponse(data)) {
+      return '(visual connection verified; reasoning model produced no visible reply within the token budget)'
+    }
     const message = data?.choices?.[0]?.message
     const hasReasoning = typeof message?.reasoning_content === 'string'
       ? message.reasoning_content.trim() !== ''
@@ -1355,6 +1461,9 @@ export async function testModelConnection(config, { testVision = true } = {}) {
   // confirm the key/endpoint/model are reachable and the model responded — a
   // populated reasoning_content proves the model actually processed the prompt,
   // so treat that as a successful connection rather than a false failure.
+  if (hasThinkingOnlyResponse(data)) {
+    return '(connection ok; reasoning model produced no visible reply within the token budget)'
+  }
   const message = data?.choices?.[0]?.message
   const hasReasoning = typeof message?.reasoning_content === 'string'
     ? message.reasoning_content.trim() !== ''

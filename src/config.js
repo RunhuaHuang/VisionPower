@@ -3,6 +3,7 @@ import { readdir, chmod, lstat, mkdir, rename, unlink, writeFile } from 'node:fs
 import { basename, dirname, join, resolve } from 'node:path'
 import { homedir } from 'node:os'
 
+export const DEFAULT_PROTOCOL = 'openai'
 export const DEFAULT_VISION_BASE_URL = 'https://dashscope.aliyuncs.com/compatible-mode/v1'
 export const DEFAULT_VISION_MODEL = 'qwen3-vl-flash'
 export const DEFAULT_MAX_IMAGE_BYTES = 20 * 1024 * 1024
@@ -103,75 +104,80 @@ export function maskWelfareBaseUrl(value) {
 export const VISION_PROVIDER_CAPABILITIES = [
   {
     provider: 'openai', hosts: ['api.openai.com'], modelPattern: '^gpt-5', region: 'global',
-    tokenParameter: 'max_completion_tokens', supportsSystemRole: true,
+    protocol: 'openai', tokenParameter: 'max_completion_tokens', supportsSystemRole: true,
     auth: 'bearer', vision: true, supportsPublicImageUrl: true, lastVerified: '2026-08-11',
   },
   {
     provider: 'openai', hosts: ['api.openai.com'], region: 'global',
-    tokenParameter: 'max_tokens', supportsSystemRole: true,
+    protocol: 'openai', tokenParameter: 'max_tokens', supportsSystemRole: true,
     auth: 'bearer', vision: true, supportsPublicImageUrl: true, lastVerified: null,
   },
   {
+    provider: 'anthropic', hosts: ['api.anthropic.com'], region: 'global',
+    protocol: 'anthropic', tokenParameter: 'max_tokens', supportsSystemRole: true,
+    auth: 'anthropic', vision: true, supportsPublicImageUrl: false, lastVerified: null,
+  },
+  {
     provider: 'alibaba-cloud', hosts: ['dashscope.aliyuncs.com'], modelPattern: '^qwen3\\.(?:6|7)-', region: 'china',
-    tokenParameter: 'max_completion_tokens', supportsSystemRole: true,
+    protocol: 'openai', tokenParameter: 'max_completion_tokens', supportsSystemRole: true,
     auth: 'bearer', vision: true, supportsPublicImageUrl: true, lastVerified: '2026-08-11',
   },
   {
     provider: 'alibaba-cloud', hosts: ['dashscope.aliyuncs.com'], region: 'china',
-    tokenParameter: 'max_tokens', supportsSystemRole: true,
+    protocol: 'openai', tokenParameter: 'max_tokens', supportsSystemRole: true,
     auth: 'bearer', vision: true, supportsPublicImageUrl: true, lastVerified: '2026-08-11',
   },
   {
     provider: 'minimax', hosts: ['api.minimaxi.com'], region: 'china',
-    tokenParameter: 'max_completion_tokens', supportsSystemRole: true,
+    protocol: 'openai', tokenParameter: 'max_completion_tokens', supportsSystemRole: true,
     auth: 'bearer', vision: true, supportsPublicImageUrl: true, lastVerified: '2026-08-11',
   },
   {
     provider: 'minimax', hosts: ['api.minimax.io'], region: 'global',
-    tokenParameter: 'max_completion_tokens', supportsSystemRole: true,
+    protocol: 'openai', tokenParameter: 'max_completion_tokens', supportsSystemRole: true,
     auth: 'bearer', vision: true, supportsPublicImageUrl: true, lastVerified: '2026-08-11',
   },
   {
     // Hostname derived from the obfuscated welfare cipher, never spelled out.
     provider: 'minimax-gateway', hosts: [welfareHostname()].filter(Boolean), region: 'custom',
-    tokenParameter: 'auto', supportsSystemRole: 'auto',
+    protocol: 'openai', tokenParameter: 'auto', supportsSystemRole: 'auto',
     auth: 'bearer', vision: true, supportsPublicImageUrl: 'auto', lastVerified: null,
   },
   {
     provider: 'zhipu', hosts: ['open.bigmodel.cn'], region: 'china',
-    tokenParameter: 'max_tokens', supportsSystemRole: true,
+    protocol: 'openai', tokenParameter: 'max_tokens', supportsSystemRole: true,
     auth: 'bearer', vision: true, supportsPublicImageUrl: true, lastVerified: null,
   },
   {
     provider: 'zhipu', hosts: ['api.z.ai'], region: 'global',
-    tokenParameter: 'max_tokens', supportsSystemRole: true,
+    protocol: 'openai', tokenParameter: 'max_tokens', supportsSystemRole: true,
     auth: 'bearer', vision: true, supportsPublicImageUrl: true, lastVerified: null,
   },
   {
     provider: 'volcengine', hosts: ['ark.cn-beijing.volces.com'], region: 'china',
-    tokenParameter: 'max_tokens', supportsSystemRole: true,
+    protocol: 'openai', tokenParameter: 'max_tokens', supportsSystemRole: true,
     auth: 'bearer', vision: true, supportsPublicImageUrl: true, lastVerified: null,
   },
   {
     provider: 'moonshot', hosts: ['api.moonshot.cn'], modelPattern: '^kimi-(?:k2\\.6|k2\\.7-code|k3)$', region: 'china',
-    tokenParameter: 'max_tokens', supportsSystemRole: true,
+    protocol: 'openai', tokenParameter: 'max_tokens', supportsSystemRole: true,
     auth: 'bearer', vision: true, supportsPublicImageUrl: false,
     recommendedMaxTokens: 32_768, lastVerified: '2026-08-11',
   },
   {
     provider: 'moonshot', hosts: ['api.moonshot.ai'], modelPattern: '^kimi-(?:k2\\.6|k2\\.7-code|k3)$', region: 'global',
-    tokenParameter: 'max_tokens', supportsSystemRole: true,
+    protocol: 'openai', tokenParameter: 'max_tokens', supportsSystemRole: true,
     auth: 'bearer', vision: true, supportsPublicImageUrl: false,
     recommendedMaxTokens: 32_768, lastVerified: '2026-08-11',
   },
   {
     provider: 'moonshot', hosts: ['api.moonshot.cn', 'api.moonshot.ai'], region: 'custom',
-    tokenParameter: 'auto', supportsSystemRole: 'auto',
+    protocol: 'openai', tokenParameter: 'auto', supportsSystemRole: 'auto',
     auth: 'bearer', vision: 'auto', supportsPublicImageUrl: 'auto', lastVerified: null,
   },
   {
     provider: 'google', hosts: ['generativelanguage.googleapis.com'], region: 'global',
-    tokenParameter: 'max_tokens', supportsSystemRole: true,
+    protocol: 'openai', tokenParameter: 'max_tokens', supportsSystemRole: true,
     auth: 'bearer', vision: true, supportsPublicImageUrl: true, lastVerified: null,
   },
 ]
@@ -191,6 +197,7 @@ export function resolveModelCapabilities(model, baseUrl) {
     return {
       provider: capability.provider,
       region: capability.region,
+      protocol: capability.protocol,
       tokenParameter: capability.tokenParameter,
       supportsSystemRole: capability.supportsSystemRole,
       auth: capability.auth,
@@ -203,6 +210,7 @@ export function resolveModelCapabilities(model, baseUrl) {
   return {
     provider: 'custom',
     region: 'custom',
+    protocol: 'openai',
     tokenParameter: 'auto',
     supportsSystemRole: 'auto',
     auth: 'bearer',
@@ -538,6 +546,14 @@ function booleanFromFile(value, label, { prefix = 'config file' } = {}) {
   return value
 }
 
+function normalizeProtocol(value, source = 'protocol') {
+  const normalized = String(value || 'openai').toLowerCase()
+  if (normalized !== 'openai' && normalized !== 'anthropic') {
+    throw new Error(`${source} must be "openai" or "anthropic"`)
+  }
+  return normalized
+}
+
 function allowedDirsFromFile(value) {
   if (value === undefined || value === null) return undefined
   const list = Array.isArray(value)
@@ -577,6 +593,12 @@ export function loadVisionConfig(env = process.env) {
   const model = normalizeModelForKnownEndpoint(configuredModel, baseUrl)
   const modelCapabilities = resolveModelCapabilities(model, baseUrl)
 
+  const protocolEnv = readEnvValue(env, ['VISIONPOWER_PROTOCOL'])
+  const protocolFile = stringFromFile(file.protocol, 'protocol')
+  const protocolSource = protocolEnv.value ? protocolEnv.name : (protocolFile ? 'config file "protocol"' : 'protocol')
+  const rawProtocol = protocolEnv.value || protocolFile || modelCapabilities.protocol || DEFAULT_PROTOCOL
+  const protocol = normalizeProtocol(rawProtocol, protocolSource)
+
   const allowedDirsEnv = readEnvValue(env, ['VISIONPOWER_ALLOWED_DIRS'])
   const debugEnv = readEnvValue(env, ['VISIONPOWER_DEBUG'])
   const timeoutEnv = readEnvValue(env, ['VISIONPOWER_TIMEOUT_MS'])
@@ -597,6 +619,7 @@ export function loadVisionConfig(env = process.env) {
     apiKey,
     model,
     baseUrl,
+    protocol,
     allowedDirs: allowedDirsEnv.value
       ? parseAllowedDirs(allowedDirsEnv)
       : (allowedDirsFromFile(file.allowedDirs) ?? []),
@@ -737,6 +760,24 @@ export function normalizeBaseUrl(value, name) {
   return url.toString().replace(/\/+$/, '')
 }
 
+// Anthropic's official endpoint requires the /v1 path segment. Accept the bare
+// host URL and fill in /v1 when the request URL is built, so users only need to
+// remember `api.anthropic.com` (custom gateways keep their own path).
+export function ensureAnthropicVersionPath(baseUrl, protocol) {
+  if (protocol !== 'anthropic' || typeof baseUrl !== 'string') return baseUrl
+  let url
+  try {
+    url = new URL(baseUrl)
+  } catch {
+    return baseUrl
+  }
+  if (url.hostname.toLowerCase() !== 'api.anthropic.com') return baseUrl
+  const pathname = url.pathname.replace(/\/+$/, '')
+  if (pathname && pathname !== '/') return baseUrl
+  url.pathname = '/v1'
+  return url.toString().replace(/\/+$/, '')
+}
+
 export function saveVisionConfig(config, env = process.env) {
   const configPath = getConfigFilePath(env)
   const dir = dirname(configPath)
@@ -772,7 +813,7 @@ export function saveVisionConfig(config, env = process.env) {
 // polluting keys sent by the client are silently dropped. Kept here (next to
 // the validators below) so the server and the validation pass always agree.
 export const ALLOWED_CONFIG_KEYS = new Set([
-  'apiKey', 'model', 'baseUrl', 'allowedDirs',
+  'apiKey', 'model', 'baseUrl', 'protocol', 'allowedDirs',
   'maxImageBytes', 'maxTotalImageBytes', 'timeoutMs', 'maxTokens', 'maxImages', 'maxRetries',
   'inboxTtlMs', 'inboxMaxEntries', 'inboxMaxBytes', 'debug', 'cache',
 ])
@@ -798,6 +839,17 @@ export function normalizeConfigObject(input) {
     cleaned.baseUrl = normalizeBaseUrl(cleaned.baseUrl.trim(), 'baseUrl')
   } else if (cleaned.baseUrl !== undefined) {
     throw new Error('baseUrl must be a non-empty string')
+  }
+
+  // protocol: explicit OpenAI/Anthropic selection; default stays openai.
+  if (cleaned.protocol !== undefined && cleaned.protocol !== null) {
+    if (typeof cleaned.protocol !== 'string') {
+      throw new Error('config field "protocol" must be a string')
+    }
+    cleaned.protocol = normalizeProtocol(cleaned.protocol.trim(), 'config field "protocol"')
+  } else if (cleaned.protocol === null) {
+    // null is never persisted — drop it so loadVisionConfig doesn't reject.
+    delete cleaned.protocol
   }
 
   // String fields: apiKey and model. loadVisionConfig reads these via

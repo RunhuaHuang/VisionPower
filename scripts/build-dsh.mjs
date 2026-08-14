@@ -38,6 +38,7 @@ ${core.body}
 export {
   describeImage,
   loadVisionConfig,
+  resolveModelCapabilities,
   testModelConnection,
 }
 `

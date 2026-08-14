@@ -6,12 +6,14 @@ import {
   loadVisionConfig,
   DEFAULT_VISION_MODEL,
   DEFAULT_MAX_TOKENS,
+  DEFAULT_PROTOCOL,
   assertSafeApiKey,
   assertSafeModel,
   saveVisionConfig,
   getConfigFilePath,
   getDefaultBaseUrlForModel,
   normalizeBaseUrl,
+  ensureAnthropicVersionPath,
   normalizeConfigObject,
   resolveModelCapabilities,
   VISION_MODEL_PRESETS,
@@ -237,7 +239,11 @@ function rawApiKey(config) {
 function sameNormalizedBaseUrl(left, right) {
   if (typeof left !== 'string' || typeof right !== 'string' || !left || !right) return false
   try {
-    return normalizeBaseUrl(left, 'baseUrl') === normalizeBaseUrl(right, 'baseUrl')
+    // The bare official Anthropic host and its /v1 form are the same endpoint;
+    // normalize both sides so a switch between them never counts as a
+    // credential-scope change. Other hosts are unaffected (no-op).
+    return ensureAnthropicVersionPath(normalizeBaseUrl(left, 'baseUrl'), 'anthropic')
+      === ensureAnthropicVersionPath(normalizeBaseUrl(right, 'baseUrl'), 'anthropic')
   } catch {
     return false
   }
@@ -278,6 +284,7 @@ function getWebuiConfig() {
     apiKeyConfigured: Boolean(effective.apiKey),
     // The welfare gateway endpoint is private: clients only see the alias.
     baseUrl: maskWelfareBaseUrl(effective.baseUrl),
+    protocol: effective.protocol ?? DEFAULT_PROTOCOL,
   }
 }
 
@@ -498,16 +505,20 @@ async function handleApi(method, url, req, res) {
   if (method === 'POST' && pathname === '/api/test-connection') {
     try {
       const body = await readJsonBody(req)
-      const unknownKey = Object.keys(body).find((key) => !['apiKey', 'baseUrl', 'model', 'testVision', 'preserveConfiguredKey'].includes(key))
+      const unknownKey = Object.keys(body).find((key) => !['apiKey', 'baseUrl', 'model', 'protocol', 'testVision', 'preserveConfiguredKey'].includes(key))
       if (unknownKey) {
         sendJson(res, 400, { error: `Connection test contains an unknown field: ${unknownKey}` })
         return true
       }
-      for (const key of ['apiKey', 'baseUrl', 'model']) {
+      for (const key of ['apiKey', 'baseUrl', 'model', 'protocol']) {
         if (body[key] !== undefined && typeof body[key] !== 'string') {
           sendJson(res, 400, { error: `${key} must be a string` })
           return true
         }
+      }
+      if (body.protocol !== undefined && !['openai', 'anthropic'].includes(body.protocol)) {
+        sendJson(res, 400, { error: 'protocol must be "openai" or "anthropic"' })
+        return true
       }
       if (body.testVision !== undefined && typeof body.testVision !== 'boolean') {
         sendJson(res, 400, { error: 'testVision must be a boolean' })
@@ -549,6 +560,9 @@ async function handleApi(method, url, req, res) {
       }
       if (modelInput) {
         tempConfig.model = modelInput
+      }
+      if (body.protocol) {
+        tempConfig.protocol = body.protocol
       }
 
       // Normalize before deciding whether a masked/omitted key may be reused.

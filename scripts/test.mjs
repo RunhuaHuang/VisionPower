@@ -10,7 +10,7 @@ import { buildSkillScript } from './build-skill.mjs'
 import { buildDshCoreBundle } from './build-dsh.mjs'
 import { DEFAULT_VISION_BASE_URL, getConfigFilePath, getInboxDir, getSkillStateFilePath, getDefaultBaseUrlForModel, loadVisionConfig, markSkillConfigNeedsSetup, markSkillConfigVerified, normalizeConfigObject, resolveModelCapabilities, saveVisionConfig, VISION_MODEL_PRESETS, resolveWelfareBaseUrl, maskWelfareBaseUrl } from '../src/config.js'
 import { toolInputSchema } from '../src/schema.js'
-import { describeImage, normalizeBase64Image, parseRetryAfterMs, resolvePublicImageUrl } from '../src/vision-core.js'
+import { describeImage, normalizeBase64Image, parseRetryAfterMs, resolvePublicImageUrl, testModelConnection } from '../src/vision-core.js'
 import { startWebuiServer } from '../src/webui/server.js'
 import { WEBUI_HTML } from '../src/webui/index-html.js'
 import { deleteStagedImage, listStagedImages, readStagedImage, stageImageBuffer } from '../src/image-inbox.js'
@@ -720,6 +720,119 @@ try {
   assert.equal(kimiCapabilities.supportsPublicImageUrl, false)
   assert.equal(kimiCapabilities.recommendedMaxTokens, 32_768)
   assert.equal(resolveModelCapabilities('custom-model', 'https://gateway.example.com/v1').tokenParameter, 'auto')
+
+  // Anthropic protocol infers from the official hostname and switches the
+  // request shape to the Messages API.
+  const anthropicCapabilities = resolveModelCapabilities('claude-3-5-sonnet-20241022', 'https://api.anthropic.com/v1')
+  assert.equal(anthropicCapabilities.provider, 'anthropic')
+  assert.equal(anthropicCapabilities.protocol, 'anthropic')
+  await withMockFetch(async (calls) => {
+    const result = await describeImage(
+      { image_base64: gifBytes.toString('base64') },
+      testConfig({
+        model: 'claude-3-5-sonnet-20241022',
+        baseUrl: 'https://api.anthropic.com/v1',
+        protocol: 'anthropic',
+      }),
+    )
+    assert.equal(stripBanner(result), 'ok')
+    assert.equal(calls.length, 1)
+    assert.equal(calls[0].url, 'https://api.anthropic.com/v1/messages')
+    assert.equal(calls[0].options.headers.Authorization, undefined)
+    assert.equal(calls[0].options.headers['x-api-key'], 'test-key')
+    assert.equal(calls[0].options.headers['anthropic-version'], '2023-06-01')
+    assert.match(calls[0].body.system, /UNTRUSTED DATA/i)
+    assert.equal(calls[0].body.messages[0].role, 'user')
+    assert.equal(calls[0].body.messages[0].content[0].type, 'text')
+    const imagePart = calls[0].body.messages[0].content[1]
+    assert.equal(imagePart.type, 'image')
+    assert.equal(imagePart.source.type, 'base64')
+    assert.equal(imagePart.source.media_type, 'image/gif')
+    assert.equal(imagePart.source.data, gifBytes.toString('base64'))
+    assert.equal(calls[0].body.max_tokens, 128)
+  })
+
+  await withMockFetch(async (calls) => {
+    const result = await describeImage(
+      { image_base64: gifBytes.toString('base64') },
+      testConfig({ model: 'custom-model', baseUrl: 'https://gateway.example.com/v1', protocol: 'anthropic' }),
+    )
+    assert.equal(stripBanner(result), 'ok')
+    assert.equal(calls[0].url, 'https://gateway.example.com/v1/messages')
+    assert.equal(calls[0].body.messages[0].role, 'user')
+  })
+
+  // The bare official Anthropic host gets /v1 filled in at request time.
+  await withMockFetch(async (calls) => {
+    const result = await describeImage(
+      { image_base64: gifBytes.toString('base64') },
+      testConfig({ model: 'custom-model', baseUrl: 'https://api.anthropic.com', protocol: 'anthropic' }),
+    )
+    assert.equal(stripBanner(result), 'ok')
+    assert.equal(calls[0].url, 'https://api.anthropic.com/v1/messages')
+    assert.equal(calls[0].body.messages[0].role, 'user')
+  })
+
+  await withMockFetch(async (calls) => {
+    await describeImage(
+      { image_base64: gifBytes.toString('base64') },
+      testConfig({ model: 'custom-model', baseUrl: 'https://gateway.example.com/v1' }),
+    )
+    assert.equal(calls[0].url, 'https://gateway.example.com/v1/chat/completions')
+    assert.equal(calls[0].options.headers.Authorization, 'Bearer test-key')
+    assert.equal(calls[0].body.messages[0].role, 'system')
+  })
+
+  // Anthropic protocol must not fall back to OpenAI's max_completion_tokens swap.
+  await withSequencedFetch(
+    [
+      {
+        status: 400,
+        body: JSON.stringify({
+          type: 'error',
+          error: {
+            type: 'invalid_request_error',
+            message: "max_tokens is not supported. Use 'max_completion_tokens' instead.",
+          },
+        }),
+      },
+    ],
+    async () => {
+      await assertRejectsMessage(
+        () => describeImage(
+          { image_base64: gifBytes.toString('base64') },
+          testConfig({ model: 'claude-test', baseUrl: 'https://api.anthropic.com/v1', protocol: 'anthropic' }),
+        ),
+        /failed \(400\)/,
+      )
+    },
+  )
+
+  // A thinking-only Anthropic reply still counts as a verified connection:
+  // hidden reasoning can exhaust the token budget with no visible text.
+  await withSequencedFetch(
+    [
+      {
+        status: 200,
+        body: JSON.stringify({
+          id: 'msg_1',
+          type: 'message',
+          role: 'assistant',
+          content: [{ type: 'thinking', thinking: 'hidden reasoning blocks' }],
+          stop_reason: 'max_tokens',
+        }),
+      },
+    ],
+    async (calls) => {
+      const message = await testModelConnection(
+        testConfig({ model: 'claude-3-5-sonnet-20241022', baseUrl: 'https://api.anthropic.com/v1', protocol: 'anthropic' }),
+      )
+      assert.match(message, /visual connection verified/i)
+      assert.equal(calls.length, 1)
+      assert.equal(calls[0].url, 'https://api.anthropic.com/v1/messages')
+    },
+  )
+
   await withMockFetch(async (calls) => {
     await describeImage(
       { image_base64: gifBytes.toString('base64') },
@@ -1377,6 +1490,45 @@ try {
   assert.equal(normalized.maxImageBytes, 20 * 1024 * 1024)
   assert.equal(normalized.maxTotalImageBytes, 64 * 1024 * 1024)
 
+  // The bare official Anthropic host is stored/displayed as typed; /v1 is
+  // filled in only when the request URL is built (see the anthropic request
+  // tests further down).
+  const anthropicBare = cfg({
+    VISIONPOWER_API_KEY: 'k',
+    VISIONPOWER_MODEL: 'claude-sonnet-4-5',
+    VISIONPOWER_BASE_URL: 'https://api.anthropic.com',
+    VISIONPOWER_PROTOCOL: 'anthropic',
+  })
+  assert.equal(anthropicBare.baseUrl, 'https://api.anthropic.com')
+  assert.equal(anthropicBare.protocol, 'anthropic')
+
+  const anthropicVersioned = cfg({
+    VISIONPOWER_API_KEY: 'k',
+    VISIONPOWER_MODEL: 'claude-sonnet-4-5',
+    VISIONPOWER_BASE_URL: 'https://api.anthropic.com/v1/',
+    VISIONPOWER_PROTOCOL: 'anthropic',
+  })
+  assert.equal(anthropicVersioned.baseUrl, 'https://api.anthropic.com/v1')
+
+  // Custom Anthropic gateways keep the path the user actually configured.
+  const customAnthropic = cfg({
+    VISIONPOWER_API_KEY: 'k',
+    VISIONPOWER_MODEL: 'claude-sonnet-4-5',
+    VISIONPOWER_BASE_URL: 'https://gateway.example.com/v2',
+    VISIONPOWER_PROTOCOL: 'anthropic',
+  })
+  assert.equal(customAnthropic.baseUrl, 'https://gateway.example.com/v2')
+
+  // No /v1 fill for the OpenAI protocol, even on the official Anthropic host.
+  const openaiOnAnthropicHost = cfg({
+    VISIONPOWER_API_KEY: 'k',
+    VISIONPOWER_MODEL: 'custom-model',
+    VISIONPOWER_BASE_URL: 'https://api.anthropic.com',
+    VISIONPOWER_PROTOCOL: 'openai',
+  })
+  assert.equal(openaiOnAnthropicHost.baseUrl, 'https://api.anthropic.com')
+  assert.equal(openaiOnAnthropicHost.protocol, 'openai')
+
   const visionpowerEnv = cfg({
     VISIONPOWER_API_KEY: 'visionpower-key',
     VISIONPOWER_MODEL: 'visionpower-model',
@@ -1773,6 +1925,22 @@ try {
   assertThrowsMessage(
     () => normalizeConfigObject({ baseUrl: 'https://api.example.com/v1/chat/completions' }),
     /should not include/,
+  )
+
+  // The bare official Anthropic host is kept as typed on save; /v1 is filled
+  // in at request time instead.
+  assert.equal(
+    normalizeConfigObject({ baseUrl: 'https://api.anthropic.com', protocol: 'anthropic' }).baseUrl,
+    'https://api.anthropic.com',
+  )
+  // Custom Anthropic gateways and non-Anthropic protocols are left untouched.
+  assert.equal(
+    normalizeConfigObject({ baseUrl: 'https://gateway.example.com/v2', protocol: 'anthropic' }).baseUrl,
+    'https://gateway.example.com/v2',
+  )
+  assert.equal(
+    normalizeConfigObject({ baseUrl: 'https://api.anthropic.com', protocol: 'openai' }).baseUrl,
+    'https://api.anthropic.com',
   )
 
   // baseUrl with a non-http scheme is rejected.

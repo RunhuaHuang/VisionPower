@@ -248,9 +248,18 @@ code-block{display:block;background:var(--code-bg);color:var(--code-text);font-f
         </div>
       </div>
 
+      <div class="form-group" x-show="config.presetId === 'custom'">
+        <label class="label" x-text="i18n[lang].protocolLabel"></label>
+        <select x-model="config.protocol">
+          <option value="openai" x-text="i18n[lang].protocolOpenAI"></option>
+          <option value="anthropic" x-text="i18n[lang].protocolAnthropic"></option>
+        </select>
+        <div class="mono" style="font-size:var(--fs-mono-xs);color:var(--text-muted);margin-top:var(--space-xs)" x-text="i18n[lang].protocolHint"></div>
+      </div>
+
       <div class="form-group">
         <label class="label" x-text="i18n[lang].baseUrlLabel"></label>
-        <input type="text" :readonly="config.presetId !== 'custom'" :placeholder="i18n[lang].baseUrlPlaceholder" :style="config.presetId !== 'custom' ? 'opacity:0.6;cursor:not-allowed' : ''"
+        <input type="text" :readonly="config.presetId !== 'custom'" :placeholder="config.protocol === 'anthropic' ? i18n[lang].baseUrlPlaceholderAnthropic : i18n[lang].baseUrlPlaceholder" :style="config.presetId !== 'custom' ? 'opacity:0.6;cursor:not-allowed' : ''"
           :value="currentPreset?.welfare ? i18n[lang].welfareBaseUrlMasked : config.baseUrl"
           @input="config.baseUrl = $event.target.value" />
         <div class="mono" style="font-size:var(--fs-mono-xs);color:var(--text-muted);margin-top:var(--space-xs)" x-show="config.presetId === 'custom'" x-text="i18n[lang].baseUrlHint"></div>
@@ -497,6 +506,7 @@ function consoleApp() {
       presetId: 'qwen3-vl-flash|https://dashscope.aliyuncs.com/compatible-mode/v1',
       model: 'qwen3-vl-flash',
       baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+      protocol: 'openai',
       apiKey: '',
       apiKeyConfigured: false,
         allowedDirs: '',
@@ -551,10 +561,15 @@ function consoleApp() {
         apiKeyLabel: 'API 密钥 (API Key)',
         apiKeyPlaceholder: '已安全保存 · 输入新密钥以覆盖',
         apiKeyEmptyPlaceholder: '在此粘贴您的 API 密钥',
+        protocolLabel: '协议 (Protocol)',
+        protocolOpenAI: 'OpenAI',
+        protocolAnthropic: 'Anthropic',
+        protocolHint: '自定义渠道可切换协议；内置预设均使用 OpenAI 协议。',
         baseUrlLabel: '请求网址 (Base URL)',
         baseUrlPlaceholder: 'https://api.example.com/v1',
+        baseUrlPlaceholderAnthropic: 'https://api.anthropic.com',
         welfareBaseUrlMasked: '（内置福利渠道，地址已隐藏 · 用户不需要进行修改）',
-        baseUrlHint: '需为 OpenAI 兼容端点（不含 /chat/completions；路径按服务商要求填写，例如 /v1、/api/v3 或 /v4）。Claude 原生协议不兼容，需经适配器。',
+        baseUrlHint: 'OpenAI 协议需包含 API 版本路径（如 /v1）；Anthropic 协议可直接写裸 URL即可。路径后的 /chat/completions 或 /messages 会自动追加。',
         advancedTitle: '高级配置',
         allowedDirsLabel: '允许访问的本地目录 (以逗号分隔)',
         allowedDirsPlaceholder: '例如: /path/to/project, /another/path',
@@ -638,10 +653,15 @@ function consoleApp() {
         apiKeyLabel: 'API Key',
         apiKeyPlaceholder: 'stored · retype to overwrite',
         apiKeyEmptyPlaceholder: 'paste api key here',
+        protocolLabel: 'Protocol',
+        protocolOpenAI: 'OpenAI',
+        protocolAnthropic: 'Anthropic',
+        protocolHint: 'Custom endpoints can switch protocols; built-in presets use OpenAI protocol.',
         baseUrlLabel: 'Base URL (OpenAI-compatible Endpoint)',
         baseUrlPlaceholder: 'https://api.example.com/v1',
+        baseUrlPlaceholderAnthropic: 'https://api.anthropic.com',
         welfareBaseUrlMasked: '(built-in welfare channel · endpoint hidden, provided privately by the author)',
-        baseUrlHint: 'Must be an OpenAI-compatible endpoint (without /chat/completions; keep the provider-specific path such as /v1, /api/v3, or /v4). Claude native protocol is not compatible and needs an adapter.',
+        baseUrlHint: 'OpenAI-compatible endpoints require the API version path (usually /v1). For Anthropic, enter the bare URL and VisionPower auto-fills /v1. /chat/completions or /messages is appended automatically.',
         advancedTitle: 'ADVANCED CONFIGURATION',
         allowedDirsLabel: 'Allowed Local Directories (comma-separated)',
         allowedDirsPlaceholder: 'e.g. /path/to/project, /another/path',
@@ -768,6 +788,7 @@ function consoleApp() {
           presetId: resolvedPresetId,
           model: storedModel,
           baseUrl: data.baseUrl || '',
+          protocol: data.protocol || 'openai',
           apiKey: data.apiKey || '',
           apiKeyConfigured: !!data.apiKeyConfigured,
           allowedDirs: dirsStr,
@@ -818,9 +839,10 @@ function consoleApp() {
 
     onPresetChange() {
       if (this.config.presetId === 'custom') {
-        // Switching away from the welfare preset: drop its opaque alias token
-        // so the now-editable field starts from a clean, meaningful state.
-        if (this.config.baseUrl === 'builtin:welfare') this.config.baseUrl = ''
+        // Switching from a built-in preset to custom: drop the inherited Base URL
+        // so the user enters their own endpoint instead of carrying over the
+        // preset one (including the opaque welfare alias).
+        this.config.baseUrl = ''
         return
       }
       // presetId is a "model|baseUrl" composite so that presets sharing a
@@ -830,6 +852,7 @@ function consoleApp() {
           const providerChanged = this.config.baseUrl !== selected.baseUrl;
           this.config.model = selected.model;
           this.config.baseUrl = selected.baseUrl;
+          this.config.protocol = 'openai';
           if (selected.recommendedMaxTokens && this.config.maxTokens === 2048) {
             this.config.maxTokens = selected.recommendedMaxTokens;
           }
@@ -894,6 +917,7 @@ function consoleApp() {
           apiKey: this.config.apiKey,
           baseUrl: this.config.baseUrl,
           model: this.config.model,
+          protocol: this.config.protocol,
           testVision: true,
           // An empty field can mean either "use the key from env/config" or
           // "the user intentionally cleared it". Carry the UI state so the

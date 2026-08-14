@@ -15,11 +15,12 @@
 //         config:            # all fields optional
 //           model: MiniMax-M3
 //           baseUrl: https://api.minimaxi.com/v1
+//           protocol: openai    # or anthropic; inferred from model/baseUrl when omitted
 //           timeoutMs: 60000
 
 import z from '@deepseek-ai/schemastery'
 import { defineTool } from '@deepseek-ai/dsh-tools'
-import { describeImage, loadVisionConfig } from './core.bundle.js'
+import { describeImage, loadVisionConfig, resolveModelCapabilities } from './core.bundle.js'
 
 export const name = 'visionpower'
 
@@ -31,6 +32,7 @@ export const inject = ['tools']
 export const Config = z.object({
   model: z.string(),
   baseUrl: z.string(),
+  protocol: z.string(),
   apiKeyEnv: z.string(),
   configPath: z.string(),
   timeoutMs: z.number(),
@@ -78,6 +80,22 @@ function resolveConfig(overrides) {
   if (overrides.apiKeyEnv) {
     const key = process.env[overrides.apiKeyEnv]
     if (key) base.apiKey = key
+  }
+  if (overrides.protocol !== undefined) {
+    // An explicit operator choice wins over everything. Normalize like the
+    // core's normalizeProtocol (which the bundle keeps private).
+    const protocol = String(overrides.protocol).toLowerCase()
+    if (!['openai', 'anthropic'].includes(protocol)) {
+      throw new Error('visionpower plugin config "protocol" must be "openai" or "anthropic"')
+    }
+    base.protocol = protocol
+  } else if (overrides.baseUrl !== undefined) {
+    // The request shape must match the final endpoint, and the capability
+    // registry infers the protocol from the hostname alone. Only a baseUrl
+    // override can invalidate the resolved protocol — a model-only override
+    // must keep it, so an explicit "protocol": "anthropic" in the config file
+    // for a custom gateway survives a plugin model switch.
+    base.protocol = resolveModelCapabilities(base.model, base.baseUrl).protocol
   }
   return base
 }
