@@ -553,7 +553,7 @@ function consoleApp() {
         apiKeyEmptyPlaceholder: '在此粘贴您的 API 密钥',
         baseUrlLabel: '请求网址 (Base URL)',
         baseUrlPlaceholder: 'https://api.example.com/v1',
-        welfareBaseUrlMasked: '（内置福利渠道，地址已隐藏 · 由作者私下提供）',
+        welfareBaseUrlMasked: '（内置福利渠道，地址已隐藏 · 用户不需要进行修改）',
         baseUrlHint: '需为 OpenAI 兼容端点（不含 /chat/completions；路径按服务商要求填写，例如 /v1、/api/v3 或 /v4）。Claude 原生协议不兼容，需经适配器。',
         advancedTitle: '高级配置',
         allowedDirsLabel: '允许访问的本地目录 (以逗号分隔)',
