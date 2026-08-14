@@ -243,14 +243,16 @@ code-block{display:block;background:var(--code-bg);color:var(--code-text);font-f
           <a x-show="apiKeyLink" :href="apiKeyLink" target="_blank" rel="noopener noreferrer" class="mono" style="font-size:var(--fs-mono-xs);color:var(--signal);text-decoration:none;border-bottom:1px dashed var(--signal);cursor:pointer;opacity:0.85;transition:opacity .15s" @mouseenter="$el.style.opacity = '1'" @mouseleave="$el.style.opacity = '0.85'" x-text="apiKeyLinkText"></a>
         </div>
         <div style="position:relative">
-          <input :type="showKey ? 'text' : 'password'" x-model="config.apiKey" @input="apiKeyDirty = true" :placeholder="(config.apiKey || config.apiKeyConfigured) ? i18n[lang].apiKeyPlaceholder : i18n[lang].apiKeyEmptyPlaceholder" />
+          <input :type="showKey ? 'text' : 'password'" x-model="config.apiKey" @input="apiKeyDirty = config.apiKey !== loadedApiKeyMask" :placeholder="(config.apiKey || config.apiKeyConfigured) ? i18n[lang].apiKeyPlaceholder : i18n[lang].apiKeyEmptyPlaceholder" />
           <button type="button" @click="showKey = !showKey" style="position:absolute;right:10px;top:50%;transform:translateY(-50%);background:transparent;border:0;color:var(--text-muted);font-family:var(--font-mono);font-size:var(--fs-mono-xs);cursor:pointer;" x-text="showKey ? 'HIDE' : 'SHOW'"></button>
         </div>
       </div>
 
       <div class="form-group">
         <label class="label" x-text="i18n[lang].baseUrlLabel"></label>
-        <input type="text" x-model="config.baseUrl" :readonly="config.presetId !== 'custom'" :placeholder="i18n[lang].baseUrlPlaceholder" :style="config.presetId !== 'custom' ? 'opacity:0.6;cursor:not-allowed' : ''" />
+        <input type="text" :readonly="config.presetId !== 'custom'" :placeholder="i18n[lang].baseUrlPlaceholder" :style="config.presetId !== 'custom' ? 'opacity:0.6;cursor:not-allowed' : ''"
+          :value="currentPreset?.welfare ? i18n[lang].welfareBaseUrlMasked : config.baseUrl"
+          @input="config.baseUrl = $event.target.value" />
         <div class="mono" style="font-size:var(--fs-mono-xs);color:var(--text-muted);margin-top:var(--space-xs)" x-show="config.presetId === 'custom'" x-text="i18n[lang].baseUrlHint"></div>
       </div>
 
@@ -484,6 +486,10 @@ function consoleApp() {
     alert: { msg: '', type: 'success' },
     showKey: false,
     apiKeyDirty: false,
+    // The mask returned by GET /api/config, so the input handler can tell a
+    // genuine edit from a no-op keystroke on the echoed mask (which must not
+    // turn the mask into the persisted credential).
+    loadedApiKeyMask: '',
     saving: false,
     testingConnection: false,
     presets: [],
@@ -547,6 +553,7 @@ function consoleApp() {
         apiKeyEmptyPlaceholder: '在此粘贴您的 API 密钥',
         baseUrlLabel: '请求网址 (Base URL)',
         baseUrlPlaceholder: 'https://api.example.com/v1',
+        welfareBaseUrlMasked: '（内置福利渠道，地址已隐藏 · 由作者私下提供）',
         baseUrlHint: '需为 OpenAI 兼容端点（不含 /chat/completions；路径按服务商要求填写，例如 /v1、/api/v3 或 /v4）。Claude 原生协议不兼容，需经适配器。',
         advancedTitle: '高级配置',
         allowedDirsLabel: '允许访问的本地目录 (以逗号分隔)',
@@ -633,6 +640,7 @@ function consoleApp() {
         apiKeyEmptyPlaceholder: 'paste api key here',
         baseUrlLabel: 'Base URL (OpenAI-compatible Endpoint)',
         baseUrlPlaceholder: 'https://api.example.com/v1',
+        welfareBaseUrlMasked: '(built-in welfare channel · endpoint hidden, provided privately by the author)',
         baseUrlHint: 'Must be an OpenAI-compatible endpoint (without /chat/completions; keep the provider-specific path such as /v1, /api/v3, or /v4). Claude native protocol is not compatible and needs an adapter.',
         advancedTitle: 'ADVANCED CONFIGURATION',
         allowedDirsLabel: 'Allowed Local Directories (comma-separated)',
@@ -780,6 +788,7 @@ function consoleApp() {
           }
         };
         this.apiKeyDirty = false;
+        this.loadedApiKeyMask = data.apiKey || '';
       } catch (err) {
         this.showAlert(err.message, 'error');
       }
@@ -808,10 +817,15 @@ function consoleApp() {
     },
 
     onPresetChange() {
-      if (this.config.presetId !== 'custom') {
-        // presetId is a "model|baseUrl" composite so that presets sharing a
-        // model ID (e.g. MiniMax / Kimi China vs. global) stay distinguishable.
-        const selected = this.presets.find(p => (p.model + '|' + p.baseUrl) === this.config.presetId);
+      if (this.config.presetId === 'custom') {
+        // Switching away from the welfare preset: drop its opaque alias token
+        // so the now-editable field starts from a clean, meaningful state.
+        if (this.config.baseUrl === 'builtin:welfare') this.config.baseUrl = ''
+        return
+      }
+      // presetId is a "model|baseUrl" composite so that presets sharing a
+      // model ID (e.g. MiniMax / Kimi China vs. global) stay distinguishable.
+      const selected = this.presets.find(p => (p.model + '|' + p.baseUrl) === this.config.presetId);
         if (selected) {
           const providerChanged = this.config.baseUrl !== selected.baseUrl;
           this.config.model = selected.model;
@@ -825,7 +839,6 @@ function consoleApp() {
             this.apiKeyDirty = true;
           }
         }
-      }
     },
 
     showAlert(msg, type = 'success') {

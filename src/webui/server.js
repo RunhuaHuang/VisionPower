@@ -15,6 +15,9 @@ import {
   normalizeConfigObject,
   resolveModelCapabilities,
   VISION_MODEL_PRESETS,
+  WELFARE_BASE_URL_ALIAS,
+  resolveWelfareBaseUrl,
+  maskWelfareBaseUrl,
 } from '../config.js'
 import { describeImage, normalizeBase64Image, testModelConnection } from '../vision-core.js'
 import { deleteStagedImage, listStagedImages, stageImageBuffer } from '../image-inbox.js'
@@ -54,6 +57,10 @@ function readJsonBody(req, maxBytes = SMALL_JSON_BODY_LIMIT) {
       if (receivedBytes > maxBytes) {
         tooLarge = true
         chunks.length = 0
+        // Stop accepting the rest of an oversized upload instead of letting a
+        // peer stream indefinitely: give the 413 response a tick to flush,
+        // then drop the connection.
+        setImmediate(() => req.destroy())
         const error = new Error(`Request body too large (max ${maxBytes} bytes)`)
         error.statusCode = 413
         reject(error)
@@ -179,6 +186,34 @@ function maskApiKey(key) {
   return key.slice(0, 4) + '****' + key.slice(-4)
 }
 
+// Shared "masked echo means keep" credential rules for PUT /api/config and
+// POST /api/test-connection. Both routes treat a displayed mask as
+// presentation data, not a protocol sentinel: only an explicit preserve
+// signal may substitute a saved credential, a new literal always wins when
+// preservation is off, and a kept credential never crosses a Base URL
+// boundary. One implementation keeps the two routes' rules from drifting.
+// Returns the effective key ('' means no key).
+function resolveApiKeyChoice({
+  echoed = '',
+  echoedDefined = false,
+  preserve = false,
+  sameScope = false,
+  keepKeys = [],
+  keepWhenUnspecified = '',
+}) {
+  const masks = keepKeys.filter(Boolean).map(maskApiKey)
+  if (preserve) {
+    if (echoed && !masks.includes(echoed)) {
+      throw new Error('preserveConfiguredKey cannot be combined with a new API key')
+    }
+    const keep = keepKeys.find(Boolean) || ''
+    return sameScope ? keep : ''
+  }
+  if (echoed) return echoed
+  if (echoedDefined) return ''
+  return keepWhenUnspecified
+}
+
 function loadRawConfig() {
   const path = getConfigFilePath()
   if (!existsSync(path)) return {}
@@ -241,6 +276,8 @@ function getWebuiConfig() {
     // the effective key from loadVisionConfig() when the mask is echoed back.
     apiKey: savedApiKey ? maskApiKey(savedApiKey) : '',
     apiKeyConfigured: Boolean(effective.apiKey),
+    // The welfare gateway endpoint is private: clients only see the alias.
+    baseUrl: maskWelfareBaseUrl(effective.baseUrl),
   }
 }
 
@@ -251,9 +288,9 @@ function maxPlaygroundBodyBytes(config) {
 }
 
 async function handleApi(method, url, req, res) {
-  // Ignore query strings during route matching so harmless cache-busting or
-  // proxy parameters do not turn a valid API endpoint into a 404.
-  const pathname = url.split('?')[0]
+  // `url` is already the query-stripped pathname (computed once by the
+  // request handler below); /api/export reads req.url for its parameters.
+  const pathname = url
 
   // GET /api/config
   if (method === 'GET' && pathname === '/api/config') {
@@ -262,51 +299,56 @@ async function handleApi(method, url, req, res) {
   }
 
   // PUT /api/config
-    if (method === 'PUT' && pathname === '/api/config') {
-      try {
-        const body = await readJsonBody(req)
-        const { preserveConfiguredKey = false, ...configInput } = body
-        if (typeof preserveConfiguredKey !== 'boolean') {
-          sendJson(res, 400, { error: 'preserveConfiguredKey must be a boolean' })
-          return true
-        }
-        const current = loadRawConfig()
+  if (method === 'PUT' && pathname === '/api/config') {
+    try {
+      const body = await readJsonBody(req)
+      const { preserveConfiguredKey = false, ...configInput } = body
+      if (typeof preserveConfiguredKey !== 'boolean') {
+        sendJson(res, 400, { error: 'preserveConfiguredKey must be a boolean' })
+        return true
+      }
+      const current = loadRawConfig()
+
+      // Resolve the private welfare alias to the real endpoint before
+      // validation/persistence — the browser never learns the real URL.
+      if (typeof configInput.baseUrl === 'string') {
+        configInput.baseUrl = resolveWelfareBaseUrl(configInput.baseUrl, configInput.model)
+      }
 
       // Validate + normalize using the same rules loadVisionConfig enforces on
       // read. This drops unknown keys (prototype-pollution guard) and rejects
       // poison values (e.g. cache.ttlMs=0) before they can be persisted — a
       // bad value here would make every subsequent config read throw.
-        const cleaned = normalizeConfigObject(configInput)
+      const cleaned = normalizeConfigObject(configInput)
 
-        // The rendered mask is presentation data, not a protocol sentinel: a
-        // legitimate printable API key can equal e.g. `abcd****wxyz`. Preserve
-        // only when the client explicitly asks us to, so an edited literal is
-        // never silently replaced with the old credential.
-        const savedApiKey = rawApiKey(current)
-        const currentMasked = savedApiKey ? maskApiKey(savedApiKey) : ''
-        if (preserveConfiguredKey) {
-          if (cleaned.apiKey && cleaned.apiKey !== currentMasked) {
-            throw new Error('preserveConfiguredKey cannot be combined with a new API key')
-          }
-          const effectiveCurrent = loadVisionConfig()
-          const replacementBaseUrl = getReplacementConfigBaseUrl(cleaned)
-          if (!sameNormalizedBaseUrl(replacementBaseUrl, effectiveCurrent.baseUrl)) {
-            throw new Error('The configured API key cannot be preserved after changing Base URL; enter the full API key')
-          }
-          if (savedApiKey) {
-            const savedConfig = loadFileOnlyVisionConfig()
-            if (!sameNormalizedBaseUrl(replacementBaseUrl, savedConfig.baseUrl)) {
-              throw new Error('The persisted API key cannot be preserved because the Base URL differs from its saved configuration; enter the full API key')
-            }
-            cleaned.apiKey = savedApiKey
-          } else {
-            delete cleaned.apiKey
-          }
+      // The rendered mask is presentation data, not a protocol sentinel: a
+      // legitimate printable API key can equal e.g. `abcd****wxyz`. Preserve
+      // only when the client explicitly asks us to, so an edited literal is
+      // never silently replaced with the old credential.
+      const savedApiKey = rawApiKey(current)
+      if (preserveConfiguredKey) {
+        // Mask-intent rules first (shared with /api/test-connection), then the
+        // PUT-specific scope checks with their actionable messages.
+        resolveApiKeyChoice({ echoed: cleaned.apiKey ?? '', preserve: true, keepKeys: [savedApiKey] })
+        const effectiveCurrent = loadVisionConfig()
+        const replacementBaseUrl = getReplacementConfigBaseUrl(cleaned)
+        if (!sameNormalizedBaseUrl(replacementBaseUrl, effectiveCurrent.baseUrl)) {
+          throw new Error('The configured API key cannot be preserved after changing Base URL; enter the full API key')
         }
+        if (savedApiKey) {
+          const savedConfig = loadFileOnlyVisionConfig()
+          if (!sameNormalizedBaseUrl(replacementBaseUrl, savedConfig.baseUrl)) {
+            throw new Error('The persisted API key cannot be preserved because the Base URL differs from its saved configuration; enter the full API key')
+          }
+          cleaned.apiKey = savedApiKey
+        } else {
+          delete cleaned.apiKey
+        }
+      }
 
       saveVisionConfig(cleaned)
 
-      const masked = { ...cleaned }
+      const masked = { ...cleaned, baseUrl: maskWelfareBaseUrl(cleaned.baseUrl) }
       if (cleaned.apiKey) {
         masked.apiKey = maskApiKey(cleaned.apiKey)
       }
@@ -319,7 +361,11 @@ async function handleApi(method, url, req, res) {
 
   // GET /api/presets
   if (method === 'GET' && pathname === '/api/presets') {
-    sendJson(res, 200, VISION_MODEL_PRESETS)
+    // The welfare preset's real endpoint never leaves the process; clients
+    // match/select it via the public alias instead.
+    sendJson(res, 200, VISION_MODEL_PRESETS.map((p) => (
+      p.welfare ? { ...p, baseUrl: WELFARE_BASE_URL_ALIAS } : p
+    )))
     return true
   }
 
@@ -472,7 +518,9 @@ async function handleApi(method, url, req, res) {
         return true
       }
       const apiKeyInput = body.apiKey?.trim() ?? ''
-      const baseUrlInput = body.baseUrl?.trim() ?? ''
+      // Accept the welfare alias from the WebUI and resolve it server-side so
+      // a connection probe never requires the client to know the real URL.
+      const baseUrlInput = resolveWelfareBaseUrl(body.baseUrl?.trim() ?? '', body.model)
       const modelInput = body.model?.trim() ?? ''
       if (body.baseUrl !== undefined && !baseUrlInput) {
         sendJson(res, 400, { error: 'baseUrl must not be empty' })
@@ -514,29 +562,24 @@ async function handleApi(method, url, req, res) {
       }
       const sameBaseUrl = sameNormalizedBaseUrl(tempConfig.baseUrl, current.baseUrl)
 
-        // The WebUI carries explicit preservation intent. Never infer it from
-        // a masked display value: a valid new key can happen to equal that
-        // string, and must then be used literally.
-        const currentMasked = current.apiKey ? maskApiKey(current.apiKey) : ''
-        const savedApiKey = rawApiKey(loadRawConfig())
-        const savedMasked = savedApiKey ? maskApiKey(savedApiKey) : ''
-        const currentMaskMatch = Boolean(currentMasked && apiKeyInput === currentMasked)
-        const savedMaskMatch = Boolean(savedMasked && apiKeyInput === savedMasked)
-        if (body.preserveConfiguredKey === true) {
-          if (apiKeyInput && !currentMaskMatch && !savedMaskMatch) {
-            sendJson(res, 400, { error: 'preserveConfiguredKey cannot be combined with a new API key' })
-            return true
-          }
-          // Always use the effective key from loadVisionConfig(). A file key may
-          // coexist with an OPENAI_API_KEY env key; the latter is the credential
-          // the running server actually uses when preservation was requested.
-          tempConfig.apiKey = sameBaseUrl ? current.apiKey : ''
-        } else if (apiKeyInput) {
-        tempConfig.apiKey = apiKeyInput
-      } else if (body.apiKey !== undefined) {
-        tempConfig.apiKey = body.preserveConfiguredKey === true && sameBaseUrl ? current.apiKey : ''
-      } else if (!sameBaseUrl) {
-        tempConfig.apiKey = ''
+      // The WebUI carries explicit preservation intent; resolveApiKeyChoice
+      // holds the shared mask/new-literal/scope rules (also used by
+      // PUT /api/config). The kept credential is always the effective key
+      // from loadVisionConfig(): a file key may coexist with an
+      // OPENAI_API_KEY env key, and the env key is what the running server
+      // actually uses when preservation was requested.
+      try {
+        tempConfig.apiKey = resolveApiKeyChoice({
+          echoed: apiKeyInput,
+          echoedDefined: body.apiKey !== undefined,
+          preserve: body.preserveConfiguredKey === true,
+          sameScope: sameBaseUrl,
+          keepKeys: [current.apiKey, rawApiKey(loadRawConfig())],
+          keepWhenUnspecified: sameBaseUrl ? current.apiKey : '',
+        })
+      } catch (err) {
+        sendJson(res, 400, { error: err.message })
+        return true
       }
 
       if (!tempConfig.apiKey) {
@@ -565,7 +608,7 @@ async function handleApi(method, url, req, res) {
 
   // GET /api/export?agent=claude
   if (method === 'GET' && pathname === '/api/export') {
-    const u = new URL(url, 'http://localhost')
+    const u = new URL(req.url || '/', 'http://localhost')
     const agent = u.searchParams.get('agent') || 'claude'
 
     // Always export the published npx form — this is what installed users run.
@@ -616,8 +659,10 @@ export function startWebuiServer(port) {
     const server = createServer(async (req, res) => {
       try {
         const method = req.method || 'GET'
-        const url = (req.url || '/').split('?')[0]
-        const fullUrl = req.url || '/'
+        // Strip the query once for route matching so cache-busting or proxy
+        // parameters never turn a valid endpoint into a 404. handleApi gets
+        // this pathname; /api/export reads the full URL for its parameters.
+        const pathname = (req.url || '/').split('?')[0]
 
         if (method === 'OPTIONS') {
           setCommonSecurityHeaders(res)
@@ -626,23 +671,23 @@ export function startWebuiServer(port) {
           return
         }
 
-        if (url.startsWith('/api/')) {
+        if (pathname.startsWith('/api/')) {
           const apiError = validateIncomingApiRequest(req, method)
           if (apiError) {
             sendJson(res, 403, { error: apiError })
             return
           }
-          const handled = await handleApi(method, fullUrl, req, res)
+          const handled = await handleApi(method, pathname, req, res)
           if (!handled) sendJson(res, 404, { error: 'Not Found' })
           return
         }
 
-        if (method === 'GET' && url === '/assets/alpine.min.js') {
+        if (method === 'GET' && pathname === '/assets/alpine.min.js') {
           sendText(res, 200, loadAlpineScript(), 'text/javascript; charset=utf-8')
           return
         }
 
-        if (url === '/' || url === '/index.html') {
+        if (pathname === '/' || pathname === '/index.html') {
           setHtmlSecurityHeaders(res)
           res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' })
           res.end(indexHtml)

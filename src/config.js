@@ -38,6 +38,63 @@ const MAX_CONFIG_FILE_BYTES = 1024 * 1024
 const MAX_API_KEY_BYTES = 16 * 1024
 const MAX_MODEL_CHARS = 256
 
+// The welfare gateway endpoint is distributed privately (the API key is handed
+// out by the author). The WebUI and its HTTP API never expose the real URL:
+// clients only ever see WELFARE_BASE_URL_ALIAS, and the server resolves the
+// alias back to the real endpoint before the value reaches config validation
+// or the model call.
+//
+// The URL itself is stored as an XOR+Base64 cipher rather than plaintext so a
+// casual read/grep of the published source (npm tarball, GitHub, the bundled
+// Skill/dsh artifacts) does not reveal it. This only raises the bar — anyone
+// determined can still decode it from a running process — it is not secrecy.
+const WELFARE_BASE_URL_CIPHER = 'HgRZBxZWSU4TFURJEQYMBAwYREFER1IfHwMPHBZcV0RWAhFQ'
+const WELFARE_BASE_URL_KEY = 'vp-welfare-gateway-2026'
+
+function decodeWelfareBaseUrl() {
+  const cipher = Buffer.from(WELFARE_BASE_URL_CIPHER, 'base64')
+  let out = ''
+  for (let i = 0; i < cipher.length; i++) {
+    out += String.fromCharCode(cipher[i] ^ WELFARE_BASE_URL_KEY.charCodeAt(i % WELFARE_BASE_URL_KEY.length))
+  }
+  return out
+}
+
+function welfareHostname() {
+  try {
+    return new URL(decodeWelfareBaseUrl()).hostname.toLowerCase()
+  } catch {
+    return ''
+  }
+}
+
+export const WELFARE_BASE_URL_ALIAS = 'builtin:welfare'
+const WELFARE_MODEL_IDS = new Set(['minimax-m3'])
+
+export function isWelfareBaseUrl(value) {
+  if (typeof value !== 'string') return false
+  const normalized = value.trim().replace(/\/+$/, '')
+  return normalized === decodeWelfareBaseUrl() || normalized === WELFARE_BASE_URL_ALIAS
+}
+
+// Maps the public alias to the real endpoint, but ONLY for the model the
+// welfare channel actually serves. Any other model is rejected with a clear
+// error — so neither a WebUI preset whose model name was edited nor a
+// hand-crafted API call can point an arbitrary model at the private gateway.
+export function resolveWelfareBaseUrl(value, model) {
+  if (typeof value !== 'string') return value
+  const trimmed = value.trim()
+  if (trimmed !== WELFARE_BASE_URL_ALIAS) return value
+  if (model !== undefined && !WELFARE_MODEL_IDS.has(String(model).toLowerCase())) {
+    throw new Error('The built-in welfare channel only serves MiniMax-M3; select a custom Base URL for other models')
+  }
+  return decodeWelfareBaseUrl()
+}
+
+export function maskWelfareBaseUrl(value) {
+  return isWelfareBaseUrl(value) ? WELFARE_BASE_URL_ALIAS : value
+}
+
 // Provider/model behavior belongs in one registry instead of being inferred by
 // scattered error-string branches. Entries are ordered from most specific to
 // most general. Unknown/custom endpoints intentionally remain `auto`: the
@@ -75,7 +132,8 @@ export const VISION_PROVIDER_CAPABILITIES = [
     auth: 'bearer', vision: true, supportsPublicImageUrl: true, lastVerified: '2026-08-11',
   },
   {
-    provider: 'minimax-gateway', hosts: ['api.prismaistudio.xyz'], region: 'custom',
+    // Hostname derived from the obfuscated welfare cipher, never spelled out.
+    provider: 'minimax-gateway', hosts: [welfareHostname()].filter(Boolean), region: 'custom',
     tokenParameter: 'auto', supportsSystemRole: 'auto',
     auth: 'bearer', vision: true, supportsPublicImageUrl: 'auto', lastVerified: null,
   },
@@ -168,7 +226,7 @@ export const VISION_MODEL_PRESETS = [
   // 不对外公布获取入口。welfare:true 让 WebUI 隐藏官方「获取 API Key」链接。
   // 注意保持官方大小写 MiniMax-M3：该中转站的「福利」分组同样大小写敏感，
   // 写成全小写会 503「无可用渠道」。
-  { model: 'MiniMax-M3', label: { zh: 'MiniMax-M3 (福利)', en: 'MiniMax-M3 (Welfare)' }, baseUrl: 'https://api.prismaistudio.xyz:663/v1', welfare: true },
+  { model: 'MiniMax-M3', label: { zh: 'MiniMax-M3 (福利)', en: 'MiniMax-M3 (Welfare)' }, baseUrl: decodeWelfareBaseUrl(), welfare: true },
   { model: 'glm-4.6v', label: { zh: 'GLM-4.6V (智谱 BigModel 国内)', en: 'GLM-4.6V (Zhipu China)' }, baseUrl: 'https://open.bigmodel.cn/api/paas/v4' },
   { model: 'glm-4.6v', label: { zh: 'GLM-4.6V (智谱 Z.AI 海外)', en: 'GLM-4.6V (Zhipu Global)' }, baseUrl: 'https://api.z.ai/api/paas/v4' },
   { model: 'glm-5v-turbo', label: { zh: 'GLM-5V-Turbo (智谱 BigModel 国内)', en: 'GLM-5V-Turbo (Zhipu China)' }, baseUrl: 'https://open.bigmodel.cn/api/paas/v4' },
@@ -599,8 +657,14 @@ export function loadVisionConfig(env = process.env) {
 
 function normalizeModelForKnownEndpoint(model, baseUrl) {
   if (model !== 'minimax-m3') return model
-  const hostname = new URL(baseUrl).hostname.toLowerCase()
-  if (['api.minimaxi.com', 'api.minimax.io', 'api.prismaistudio.xyz'].includes(hostname)) {
+  let hostname = ''
+  try {
+    hostname = new URL(baseUrl).hostname.toLowerCase()
+  } catch {
+    // normalizeBaseUrl reports the actionable configuration error elsewhere.
+    return model
+  }
+  if (['api.minimaxi.com', 'api.minimax.io', welfareHostname()].includes(hostname)) {
     return 'MiniMax-M3'
   }
   return model

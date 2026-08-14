@@ -8,7 +8,7 @@ import { fileURLToPath } from 'node:url'
 import { Script } from 'node:vm'
 import { buildSkillScript } from './build-skill.mjs'
 import { buildDshCoreBundle } from './build-dsh.mjs'
-import { DEFAULT_VISION_BASE_URL, getConfigFilePath, getInboxDir, getSkillStateFilePath, getDefaultBaseUrlForModel, loadVisionConfig, markSkillConfigNeedsSetup, markSkillConfigVerified, normalizeConfigObject, resolveModelCapabilities, saveVisionConfig } from '../src/config.js'
+import { DEFAULT_VISION_BASE_URL, getConfigFilePath, getInboxDir, getSkillStateFilePath, getDefaultBaseUrlForModel, loadVisionConfig, markSkillConfigNeedsSetup, markSkillConfigVerified, normalizeConfigObject, resolveModelCapabilities, saveVisionConfig, VISION_MODEL_PRESETS, resolveWelfareBaseUrl, maskWelfareBaseUrl } from '../src/config.js'
 import { toolInputSchema } from '../src/schema.js'
 import { describeImage, normalizeBase64Image, parseRetryAfterMs, resolvePublicImageUrl } from '../src/vision-core.js'
 import { startWebuiServer } from '../src/webui/server.js'
@@ -156,6 +156,10 @@ function localHttpRequest(url, { method = 'GET', body, rawBody } = {}) {
 }
 
 const tempDir = mkdtempSync(join(tmpdir(), 'visionpower-test-'))
+
+// Derived from the module (never spelled out here) so the tests themselves do
+// not leak the private welfare endpoint into the repository.
+const welfareRealBaseUrl = VISION_MODEL_PRESETS.find((p) => p.welfare).baseUrl
 try {
   const pngPath = join(tempDir, 'one.png')
   writeFileSync(pngPath, pngBytes)
@@ -1916,6 +1920,34 @@ try {
     VISIONPOWER_MODEL: 'minimax-m3',
     VISIONPOWER_BASE_URL: 'https://gateway.example.com/v1',
   }).model, 'minimax-m3')
+
+  // Welfare channel privacy: the alias never resolves for an unrelated model
+  // (clear error instead of a confusing URL-validation failure later),
+  // resolves only for the MiniMax-M3 model, and masks both the alias and the
+  // real (obfuscated) endpoint back to the public alias.
+  assertThrowsMessage(() => resolveWelfareBaseUrl('builtin:welfare', 'gpt-4o'), /welfare channel only serves MiniMax-M3/i)
+  assertThrowsMessage(() => resolveWelfareBaseUrl('builtin:welfare', 'kimi-k3'), /welfare channel only serves MiniMax-M3/i)
+  assert.equal(resolveWelfareBaseUrl('builtin:welfare', 'MiniMax-M3'), welfareRealBaseUrl)
+  assert.equal(resolveWelfareBaseUrl('builtin:welfare'), welfareRealBaseUrl)
+  assert.equal(resolveWelfareBaseUrl('https://api.example.com/v1', 'MiniMax-M3'), 'https://api.example.com/v1')
+  assert.equal(maskWelfareBaseUrl(welfareRealBaseUrl), 'builtin:welfare')
+  assert.equal(maskWelfareBaseUrl('builtin:welfare'), 'builtin:welfare')
+  assert.equal(maskWelfareBaseUrl('https://api.example.com/v1'), 'https://api.example.com/v1')
+  // The welfare preset remains functional end-to-end: the obfuscated endpoint
+  // loads as a normal config and resolves to the gateway capabilities entry.
+  assert.equal(loadVisionConfig({
+    VISIONPOWER_CONFIG: join(tempDir, 'absent-welfare-config.json'),
+    VISIONPOWER_MODEL: 'MiniMax-M3',
+    VISIONPOWER_BASE_URL: welfareRealBaseUrl,
+    VISIONPOWER_API_KEY: 'welfare-key',
+  }).baseUrl, welfareRealBaseUrl)
+  assert.equal(resolveModelCapabilities('MiniMax-M3', welfareRealBaseUrl).provider, 'minimax-gateway')
+  // The legacy lowercase migration also applies to the obfuscated gateway.
+  assert.equal(loadVisionConfig({
+    VISIONPOWER_CONFIG: join(tempDir, 'absent-welfare-lower-config.json'),
+    VISIONPOWER_MODEL: 'minimax-m3',
+    VISIONPOWER_BASE_URL: welfareRealBaseUrl,
+  }).model, 'MiniMax-M3')
 
   // Full round-trip: a validated object survives save -> load.
   {
