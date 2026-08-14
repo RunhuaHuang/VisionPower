@@ -15,6 +15,8 @@ VisionPower gives Codex, Claude Desktop, Cursor, Cline, Cherry Studio, and other
 
 It is **not tied to any single model**: it defaults to Qwen-VL via Alibaba Cloud Model Studio / DashScope's OpenAI-compatible endpoint, and you can switch to Zhipu GLM, MiniMax, Kimi, Volcengine Doubao, Google Gemini, GPT-4o, or any provider that supports OpenAI `/chat/completions` vision input by configuring the model name and base URL. The same core ships in **two forms** — [MCP](#use-as-an-mcp-server) and [Skill](#use-as-a-skill) — pick either or install both.
 
+📖 Chinese tutorial (Feishu): [DeepSeek Harness 配置 Vision Power 飞书教程](https://my.feishu.cn/wiki/NQ4HwMcPJiMO0hkOiIgcvTblng9)
+
 ---
 
 ## ✨ Features

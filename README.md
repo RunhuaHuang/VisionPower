@@ -15,6 +15,8 @@ VisionPower 让 Codex、Claude Desktop、Cursor、Cline、Cherry Studio 等 Agen
 
 它**不绑定任何模型**：默认走阿里云百炼 / DashScope 的 Qwen-VL（OpenAI-compatible 接口），也可通过模型名和 Base URL 配置切换到智谱 GLM、MiniMax、Kimi、火山方舟豆包、Google Gemini、GPT-4o 或任何兼容 OpenAI `/chat/completions` 视觉输入的服务。同一套内核提供**两种接入形态**——[MCP](#作为-mcp-使用) 和 [Skill](#作为-skill-使用)，按你的 Agent 能力任选其一或都装。
 
+📖 **DeepSeek Harness 配置 Vision Power 飞书教程**：[点击查看](https://my.feishu.cn/wiki/NQ4HwMcPJiMO0hkOiIgcvTblng9)
+
 ---
 
 ## ✨ 特性
