@@ -1,5 +1,10 @@
 # Changelog
 
+## 2.7.1 — 2026-08-14
+
+- Updated the welfare preset's Base URL placeholder copy in the WebUI to make
+  it clear the built-in channel needs no user modification.
+
 ## 2.7.0 — 2026-08-14
 
 - Hid the private welfare gateway endpoint everywhere the browser can see:
