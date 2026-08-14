@@ -1,5 +1,30 @@
 # Changelog
 
+## 2.7.2 — 2026-08-14
+
+- Added Anthropic Messages API protocol support for custom model presets. Users
+  can now select between OpenAI-compatible and Anthropic protocols in the WebUI;
+  built-in presets continue to use the OpenAI protocol by default.
+- Added a `protocol` config field (env: `VISIONPOWER_PROTOCOL`, file: `protocol`)
+  accepted values: `openai` (default) or `anthropic`.
+- The Anthropic adapter converts OpenAI-formatted message payloads to the
+  Messages API shape on the wire: `/messages` endpoint, `x-api-key` and
+  `anthropic-version` headers, top-level `system` field, and base64 image sources.
+- Switching to "Custom Model Preset" no longer carries over the previous
+  preset's Base URL; the field starts empty for the user's own endpoint.
+- The Anthropic Base URL accepts the bare official host
+  (`https://api.anthropic.com`): the required `/v1` path segment is filled in
+  automatically when the request URL is built, so the stored/displayed value
+  stays exactly what the user typed. Custom gateways keep whatever path the
+  user configures, and the credential-scope checks treat the bare host and its
+  `/v1` form as the same endpoint.
+- The dsh (DeepSeek Harness) plugin now re-derives the protocol after a
+  `model`/`baseUrl` override (an explicit `protocol` option was added too), so
+  an overridden Anthropic endpoint is never sent an OpenAI-shaped request.
+- A connection test whose Anthropic reply contains only hidden thinking blocks
+  (token budget exhausted by reasoning) now counts as verified instead of
+  failing with "no text content".
+
 ## 2.7.1 — 2026-08-14
 
 - Updated the welfare preset's Base URL placeholder copy in the WebUI to make
