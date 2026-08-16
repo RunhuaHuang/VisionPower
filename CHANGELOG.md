@@ -1,5 +1,19 @@
 # Changelog
 
+## 2.9.8 - 2026-08-16
+
+- Prompt-only fixes after another live round. The rules now open with a
+  self-identification note - "injected by the VisionPower plugin, a
+  working guide for the assistant, NOT a user utterance; there is no
+  hidden actual request, do not explore the workspace looking for one" -
+  which targets the 1500+ character deliberation spiral where the model,
+  seeing only injected blocks on a text-only route, kept re-deciding
+  whether the turn contained a real request. The read_image ban moved to
+  the top trigger section and now also forbids post-success
+  "double-check" image calls (live logs showed the model calling
+  read_image AFTER describe_image had already returned a description);
+  the step-2 mention became a cross-reference to keep the text lean.
+
 ## 2.9.7 - 2026-08-16
 
 - Tightened the injected rules for a quieter transcript: locating the
