@@ -1,5 +1,17 @@
 # Changelog
 
+## 2.9.7 - 2026-08-16
+
+- Tightened the injected rules for a quieter transcript: locating the
+  image is now ONE bash command (parse the session log for the last
+  image attachment, derive the content-addressed path, verify it exists,
+  print the absolute path) instead of the three separate probe/parse/ls
+  calls agents were making, with a hard "don't re-confirm in extra
+  steps" note. A new reply-style rule marks locating and describing as
+  internal steps: fire the tool calls back-to-back with no user-facing
+  narration in between ("let me check", "found the attachment", ...) and
+  answer once at the end.
+
 ## 2.9.6 - 2026-08-16
 
 - The injected rules now explicitly steer the agent away from dsh's
