@@ -417,7 +417,9 @@ async function ensureConsole(profile, noConsole, waitSecs, forceConsole) {
     return { status: 'configured' }
   }
 
-  log(`请在浏览器打开 http://127.0.0.1:${PORT} → CONFIG 页选择视觉模型预设、粘贴 API Key、点「保存并应用配置」。`)
+  // 尚未配置时直接把配置控制台弹到浏览器，省掉用户手抄地址
+  if (openBrowser(`http://127.0.0.1:${PORT}`)) log(`已在浏览器打开 http://127.0.0.1:${PORT}`)
+  log(`请在 CONFIG 页选择视觉模型预设、粘贴 API Key、点「保存并应用配置」。`)
   const deadline = Date.now() + waitSecs * 1000
   while (Date.now() < deadline) {
     await sleep(3000)

@@ -328,9 +328,13 @@ npx -y visionpower@latest setup-dsh --launch
         injectRules: false    # 关闭运行时规则注入（默认 true）
 ```
 
-### 交给 dsh 自动安装（备用）
+### 让 dsh 自己装（备用）
 
-若你更愿意让 dsh 里的 agent 代劳，把下面这段提示词发给你的 dsh 即可（pnpm 不在 PATH 也没关系，脚本会依次尝试 corepack / `npm install -g pnpm` 自动引导）：
+其实对 dsh 说一句自然语言就够了（意思到位即可，不必逐字）：
+
+> 请你帮我按照 GitHub 项目 RunhuaHuang/visionpower，来完成 DeepSeek Harness 版 VisionPower 插件的配置
+
+agent 会克隆仓库、按其中的 `AGENTS.md` 指引运行一键安装器（幂等），需要配置时 VisionPower 配置控制台会自动弹到浏览器；装好后 agent 还会看到 `setup_visionpower` 工具，后续任何「配置 / 修复 / 检查 VisionPower」的说法都能直接触发。如果你的 dsh 或模型较老、一句话没跑通，再用下面这段更明确的提示词（pnpm 不在 PATH 也没关系，脚本会依次尝试 corepack / `npm install -g pnpm` 自动引导）：
 
 ```text
 请帮我在 dsh（DeepSeek Harness）上完成 VisionPower 的安装与配置，目标是让拖入或粘贴（Cmd/Ctrl+V）进会话的图片能被自动识图。按以下顺序执行，遇到失败先自行排查重试，仍失败再停下来问我：

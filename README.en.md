@@ -320,7 +320,11 @@ Turn either off via the plugin `config` block:
 
 ### Let dsh install it for you (fallback)
 
-Prefer delegating to the agent inside dsh? Send it this prompt (pnpm missing from PATH is fine - the script bootstraps it via corepack or `npm install -g pnpm`):
+Honestly, one natural sentence to dsh is enough (any reasonable phrasing works):
+
+> Please set up the VisionPower plugin for DeepSeek Harness following the GitHub project RunhuaHuang/visionpower
+
+The agent clones the repo, follows its `AGENTS.md` quick path into the one-command installer (idempotent), the VisionPower config console pops up in the browser when configuration is needed, and once installed the agent also sees a `setup_visionpower` tool - any later "configure / fix / check VisionPower" phrasing triggers it directly. If your dsh or model is older and the one-liner stalls, use this more explicit prompt (pnpm missing from PATH is fine - the script bootstraps it via corepack or `npm install -g pnpm`):
 
 ```text
 Please install and configure VisionPower on dsh (DeepSeek Harness) for me. The goal: images dragged into or pasted (Cmd/Ctrl+V) into a conversation are understood automatically. Execute in order; troubleshoot failures yourself before asking me:

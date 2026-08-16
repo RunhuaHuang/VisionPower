@@ -1,5 +1,21 @@
 # Changelog
 
+## 2.9.11 - 2026-08-16
+
+- One natural sentence to dsh now installs everything ("请你帮我按照
+  GitHub 项目 RunhuaHuang/visionpower，完成 DeepSeek Harness 版
+  VisionPower 插件的配置" - any reasonable phrasing). Three layers make
+  it work: a repo-root `AGENTS.md` quick path (dsh auto-loads workspace
+  AGENTS.md, so an agent that clones the repo immediately knows to run
+  the installer), a new `setup_visionpower` tool registered by the
+  plugin (post-install, any "configure / fix / check VisionPower"
+  phrasing maps straight to a tool call instead of README
+  re-derivation; it runs scripts/setup-dsh.mjs in an isolated child
+  process with a short 20s API-key wait and returns the full report for
+  the agent to relay), and the installer now pops the config console
+  into the browser when the API key is still missing (it used to only
+  spawn the server and print the URL).
+
 ## 2.9.10 - 2026-08-16
 
 - Removed the multimodal-route detection introduced in 2.9.9: rules now

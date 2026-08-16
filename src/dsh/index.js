@@ -38,9 +38,11 @@
 import z from '@deepseek-ai/schemastery'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
+import { spawnSync } from 'node:child_process'
 import { readFileSync } from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { describeImage, loadVisionConfig, resolveModelCapabilities } from './core.bundle.js'
 import { RULES_MARKER, RULES_TEXT } from './rules.js'
 
@@ -200,6 +202,56 @@ export function apply(ctx, config) {
     },
     async execute(args, exec) {
       return describeImage(args, resolveConfig(config), exec.signal)
+    },
+  }))
+
+  // ─────────────────────────────────────────────────────────────────────────
+  // setup_visionpower: agent-facing entry into the idempotent installer.
+  // After the plugin is installed, ANY user phrasing of "install / configure /
+  // fix / check VisionPower" maps to this tool — far more reliable than hoping
+  // the model re-derives the flow from a README. Runs scripts/setup-dsh.mjs in
+  // a child process (isolates exit codes and captures its stdout/stderr), with
+  // a short API-key wait: an unconfigured user is guided to the console and the
+  // agent simply re-runs this tool after they finish.
+  // ─────────────────────────────────────────────────────────────────────────
+  ctx.tools.register(defineTool({
+    name: 'setup_visionpower',
+    description: 'Install, configure, or verify the VisionPower image-understanding plugin for dsh (drag-and-drop / paste image recognition). Run this whenever the user asks to install, set up, configure, repair, or check VisionPower (e.g. "配置一下 VisionPower", "拖图识图不好使了", "check the visionpower plugin"). Idempotent and safe to re-run: it chains plugin install, cordis mount, the image-accept patch (auto re-applied after dsh upgrades), the config console (http://127.0.0.1:17900), and verification, then returns a full report.',
+    parameters: {
+      profile: {
+        type: 'string',
+        description: 'Target dsh profile (default "web").',
+      },
+      launch: {
+        type: 'boolean',
+        description: 'Also launch dsh web and open the browser at the end (default false).',
+      },
+    },
+    output: {
+      schema: { type: 'string' },
+      render: (_args, value) => [{ type: 'text', text: String(value) }],
+    },
+    async execute(args, exec) {
+      const script = fileURLToPath(new URL('../../scripts/setup-dsh.mjs', import.meta.url))
+      const argv = ['--wait-secs', '20']
+      if (args?.profile) argv.push('--profile', String(args.profile))
+      if (args?.launch) argv.push('--launch')
+      let result
+      try {
+        result = spawnSync(process.execPath, [script, ...argv], {
+          encoding: 'utf8',
+          timeout: 300000,
+          signal: exec.signal,
+          cwd: os.homedir(),
+        })
+      } catch (error) {
+        return `[setup_visionpower] 运行安装器失败：${error instanceof Error ? error.message : String(error)}`
+      }
+      const out = `${result.stdout || ''}${result.stderr ? `\n${result.stderr}` : ''}`.trim()
+      if (result.status === 0) {
+        return `${out}\n\n[setup_visionpower] 成功。若上方显示 VisionPower 已配置（含 API key），全部就绪；若尚未配置，请引导用户在浏览器完成 http://127.0.0.1:17900 的 CONFIG 页配置（选视觉模型 + 粘贴 API Key + 保存），然后再次调用本工具验证。`
+      }
+      return `${out}\n\n[setup_visionpower] 未完全成功（退出码 ${result.status}）。请把上方关键输出转告用户；若是等待 API key 超时，引导用户在 http://127.0.0.1:17900 完成配置后重试本工具；其余报错按上方 ✗/⚠ 提示处理。`
     },
   }))
 
