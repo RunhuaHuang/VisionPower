@@ -306,7 +306,7 @@ Common flags:
 After installation the plugin adds two **zero-effort** behaviours (both configurable):
 
 - **Rules injection** (`injectRules`, default on): the canonical image-locating rules are injected into the agent context on the first step of every turn; skipped automatically if identical rules are already present (e.g. written to `~/.dsh/AGENTS.md`).
-- **Auto-describe** (`autoDescribe`, default on): when a user message carries image blocks (drag-and-drop or paste - same pipeline), the plugin reads the attachment bytes, runs the vision core, and injects the description into the next turn - **the user never has to mention the image, or even type anything at all**.
+- **Auto-describe** (`autoDescribe`, default on): when a user message carries image blocks (drag-and-drop or paste - same pipeline), the plugin reads the attachment bytes, runs the vision core, and injects a **concise summary** (≤150 chars) into the turn - **the user never has to mention the image, or even type anything at all**. Waits at most 15s by default (`autoDescribeWaitMs`), then falls back to the rules route; when the description lands, the rules are skipped for that turn - at most one VisionPower message per turn.
 
 Turn either off via the plugin `config` block:
 

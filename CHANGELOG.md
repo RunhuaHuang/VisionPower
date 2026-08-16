@@ -1,5 +1,20 @@
 # Changelog
 
+## 2.9.4 - 2026-08-16
+
+- First live end-to-end run surfaced two UX problems, both fixed. The
+  turn now shows at most ONE VisionPower injection: when auto-describe
+  succeeds only the description is injected (the locating rules are
+  redundant - the agent no longer needs to find the image); on
+  error/timeout the rules are merged into that same fallback message
+  instead of a second one; with no image the rules inject as before.
+- The dead-air wait dropped sharply: the auto-describe prompt now asks
+  for a concise <=150-char summary (output length dominates vision
+  latency; details remain one describe_image call away), and the wait
+  cap fell from timeoutMs+5s to a new `autoDescribeWaitMs` (default
+  15s, never above timeoutMs) - on timeout the turn proceeds
+  immediately via the rules route instead of stalling silently.
+
 ## 2.9.3 — 2026-08-16
 
 - Fixed the last auto-describe link: staged descriptions were keyed by

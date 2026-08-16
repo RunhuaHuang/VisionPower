@@ -34,6 +34,8 @@
 //           timeoutMs: 60000
 //           firstByteTimeoutMs: 15000
 //           autoDescribe: true   # auto-recognize dragged/pasted images (default true)
+//           autoDescribeWaitMs: 15000  # max wait for the description before
+//                                 # falling back to the rules route
 //           injectRules: true    # inject image-locating rules each turn (default true)
 
 import z from '@deepseek-ai/schemastery'
@@ -61,6 +63,7 @@ export const Config = z.object({
   timeoutMs: z.number(),
   firstByteTimeoutMs: z.number(),
   autoDescribe: z.boolean(),
+  autoDescribeWaitMs: z.number(),
   injectRules: z.boolean(),
   debug: z.boolean(),
 }).default({})
@@ -183,8 +186,11 @@ function userGlobalAgentsHasRules() {
   }
 }
 
+// 自动识图的注入每轮只保留一条 VisionPower 消息：成功时只注描述（此时规则
+// 是冗余的——agent 无需再定位图片）；失败/超时才把规则合入同一条兜底消息。
+// prompt 要求精简摘要：输出长度是延迟的主导因素，细节留给 agent 按需自调工具。
 const AUTO_DESCRIBE_PROMPT =
-  '请详细描述这张图片的内容：它是什么（截图/照片/图表/文档/界面等），包含哪些文字或关键信息？请尽量完整转录图中文字。'
+  '用不超过 150 字简要描述这张图片：它是什么（截图/照片/图表/界面等）、主体内容、图中关键文字（如有，只摘要点）。不需要穷尽细节，后续可再询问。'
 
 export function apply(ctx, config) {
   ctx.tools.register(defineTool({
@@ -314,10 +320,12 @@ export function apply(ctx, config) {
       if (pending) {
         pendingDescriptions.delete(sessionKey)
         try {
-          // Cap the wait so a slow vision provider cannot stall the agent turn;
-          // on abort/timeout the rules fallback still lets the agent find the
-          // image on its own.
-          const capMs = Math.max(Number(config.timeoutMs) || 0, 60000) + 5000
+          // 等待上限默认 15s（autoDescribeWaitMs 可调）：成功注入描述可让 agent
+          // 一步作答；超时则立即退回规则链路，不再让回合长时间无反馈地干等。
+          const capMs = Math.min(
+            Number(config.autoDescribeWaitMs) || 15000,
+            Math.max(Number(config.timeoutMs) || 60000, 1000),
+          )
           let timer
           const timeout = new Promise((resolve) => { timer = setTimeout(() => resolve({ timeout: true }), capMs) })
           // 若 signal 已中止，监听器永远不会触发——必须先判 aborted
@@ -344,7 +352,7 @@ export function apply(ctx, config) {
               ? '用户消息附带图片，但自动识图失败：'
               : '用户只发了一张图片、没有附带文字，自动识图失败：'
             additions.push(createUserMessage({
-              content: [{ type: 'text', text: `[VisionPower 自动识图] ${lead}${result.error}。请按识图规则定位图片并调用 describe_image，把内容总结直接告诉用户。` }],
+              content: [{ type: 'text', text: `[VisionPower 自动识图] ${lead}${result.error}。请按下面的识图规则定位图片并调用 describe_image，把内容总结直接告诉用户。\n\n${RULES_TEXT}` }],
               source: { kind: 'plugin', plugin: 'visionpower' },
             }))
           } else if (result?.timeout) {
@@ -352,7 +360,7 @@ export function apply(ctx, config) {
               ? '图片描述生成超时'
               : '用户只发了一张图片、没有附带文字，图片描述生成超时'
             additions.push(createUserMessage({
-              content: [{ type: 'text', text: `[VisionPower 自动识图] ${lead}（>${Math.round(capMs / 1000)}s）。请按识图规则定位图片并调用 describe_image，把内容总结直接告诉用户。` }],
+              content: [{ type: 'text', text: `[VisionPower 自动识图] ${lead}（>${Math.round(capMs / 1000)}s）。请按下面的识图规则定位图片并调用 describe_image，把内容总结直接告诉用户。\n\n${RULES_TEXT}` }],
               source: { kind: 'plugin', plugin: 'visionpower' },
             }))
           }
@@ -364,7 +372,9 @@ export function apply(ctx, config) {
         }
       }
 
-      if (config.injectRules !== false && !rulesAlreadyPresent(decision.messages) && !userGlobalAgentsHasRules()) {
+      // 本轮已注入识图结果时规则是冗余的（agent 无需再定位图片）；失败/超时
+      // 路径已把规则并入同一条兜底消息——保证每轮至多一条 VisionPower 注入。
+      if (additions.length === 0 && config.injectRules !== false && !rulesAlreadyPresent(decision.messages) && !userGlobalAgentsHasRules()) {
         additions.push(createUserMessage({
           content: [{ type: 'text', text: RULES_TEXT }],
           source: { kind: 'plugin', plugin: 'visionpower' },
