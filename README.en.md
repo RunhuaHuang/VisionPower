@@ -273,6 +273,76 @@ Full script usage is in [Interface Reference · Skill script](#skill-script).
 
 ---
 
+## Use as a dsh (DeepSeek Harness) Cordis plugin
+
+VisionPower also ships a **native Cordis plugin for DeepSeek Harness (dsh)** (subpath `visionpower/dsh` of this package): it registers `describe_image` as a first-class dsh tool - in-process core calls, no MCP subprocess, no cold-start timeout, and cooperative cancellation (aborting the call in dsh aborts the upstream request immediately).
+
+### One-line install (recommended)
+
+Already running dsh? One command does everything: **install plugin -> mount cordis -> apply the image-accept patch (with state tracking; re-running after a dsh upgrade re-patches automatically) -> start the config console -> verify -> launch dsh web**:
+
+```bash
+npx -y visionpower@latest setup-dsh --launch
+```
+
+Common flags:
+
+| Flag | Effect |
+|---|---|
+| `--launch` | Start dsh web and open the browser when done |
+| `--write-agents` | Also append the image rules to `~/.dsh/AGENTS.md` (by default the plugin injects them at runtime instead - no user file is written) |
+| `--check` | Verify the current state only (plugin / cordis / patch / API key), change nothing |
+| `--profile <name>` | Target profile (default `web`) |
+| `--plugin-source <spec>` | Plugin source (default `github:RunhuaHuang/visionpower`; `visionpower` for the npm registry; `file:~/visionpower` for local development) |
+| `--no-console` | Skip starting the config console |
+| `--wait-secs <n>` | Max seconds to wait for console configuration (default 180) |
+
+After installation the plugin adds two **zero-effort** behaviours (both configurable):
+
+- **Rules injection** (`injectRules`, default on): the canonical image-locating rules are injected into the agent context on the first step of every turn; skipped automatically if identical rules are already present (e.g. written to `~/.dsh/AGENTS.md`).
+- **Auto-describe** (`autoDescribe`, default on): when a user message carries image blocks (drag-and-drop or paste - same pipeline), the plugin reads the attachment bytes, runs the vision core, and injects the description into the next turn - **the user never has to mention the image, or even type anything at all**.
+
+Turn either off via the plugin `config` block:
+
+```yaml
+- insert:
+    - id: visionpower
+      name: 'visionpower/dsh'
+      config:
+        timeoutMs: 120000
+        autoDescribe: false   # default true
+        injectRules: false    # default true
+```
+
+### Let dsh install it for you (fallback)
+
+Prefer delegating to the agent inside dsh? Send it this prompt (pnpm missing from PATH is fine - the script bootstraps it via corepack or `npm install -g pnpm`):
+
+```text
+Please install and configure VisionPower on dsh (DeepSeek Harness) for me. The goal: images dragged into or pasted (Cmd/Ctrl+V) into a conversation are understood automatically. Execute in order; troubleshoot failures yourself before asking me:
+
+1. Run (as a background task, do not block the session):
+   npx -y visionpower@latest setup-dsh --launch
+   If npx is unavailable or the registry fetch fails, fall back to:
+   git clone https://github.com/RunhuaHuang/VisionPower.git /tmp/VisionPower
+   node /tmp/VisionPower/scripts/setup-dsh.mjs --launch
+   (For slow networks, set registry=https://registry.npmmirror.com in ~/.npmrc first, or pass --plugin-source visionpower.)
+2. The script handles: plugin install -> cordis mount -> image-accept patch -> config console -> verify -> launch dsh web. Relay the key output of each step to me.
+3. When the console http://127.0.0.1:17900 opens, remind me: pick a vision model preset on the CONFIG page, paste the API key, click "保存并应用配置" (Save & apply); the script waits for me automatically (default up to 180s).
+4. If the script says the plugin/patch was updated and dsh web must be restarted, restart it as instructed.
+5. When done, tell me: drag or paste images into a new conversation to have them recognized; re-run the same command after a dsh upgrade to re-apply the patch.
+
+Strictly forbidden: do NOT manually install @deepseek-ai/cordis, @deepseek-ai/dsh-tools, @deepseek-ai/dsh-llm, or @deepseek-ai/schemastery, and do NOT enable autoInstallPeers - they are optional peer dependencies that must resolve through dsh's built-in symlink fallback; otherwise the profile copies shadow the built-ins and every tool call fails with "Cannot read properties of undefined (reading 'prepare')".
+```
+
+Local development: `node /path/to/VisionPower/scripts/setup-dsh.mjs --plugin-source file:/path/to/VisionPower --launch`.
+
+> ⚠️ Install trap: the plugin's dependencies on the `@deepseek-ai/*` built-in packages (cordis / dsh-tools / dsh-llm / schemastery) are **optional peer dependencies**; a normal install does not bring them into the profile. dsh symlinks them from its install dir into `$DSH_HOME/profiles/node_modules` as a fallback. **Do not install them manually and do not enable `autoInstallPeers`** - a profile-local copy shadows that fallback and misaligns the tool scheduler's symbols (every tool call fails with `Cannot read properties of undefined (reading 'prepare')`).
+
+Plugin sources: `src/dsh/index.js`; plugin and pipeline details: `src/dsh/README.md`; the installer: `scripts/setup-dsh.mjs`; the rules single source: `src/dsh/rules.js`; the server-side rejection patch: `scripts/patch-dsh.mjs` (auto re-applied by setup-dsh after a dsh upgrade).
+
+---
+
 ## 🧩 How It Works
 
 ```mermaid

@@ -1,6 +1,6 @@
 {
   "name": "visionpower",
-  "version": "2.8.0",
+  "version": "2.9.0",
   "description": "VisionPower: a portable image understanding MCP server for Codex, Claude Desktop, Cursor, and other agents.",
   "type": "module",
   "bin": {
@@ -18,6 +18,7 @@
     "src",
     "VisionPower-Skill",
     "scripts/patch-dsh.mjs",
+    "scripts/setup-dsh.mjs",
     "docs/images",
     "README.md",
     "README.en.md",
@@ -59,11 +60,15 @@
   },
   "peerDependencies": {
     "@deepseek-ai/cordis": "^4.0.1",
+    "@deepseek-ai/dsh-llm": "^0.1.0-rc.6",
     "@deepseek-ai/dsh-tools": "^0.1.0-rc.6",
     "@deepseek-ai/schemastery": ">=3.18.1 <4"
   },
   "peerDependenciesMeta": {
     "@deepseek-ai/cordis": {
+      "optional": true
+    },
+    "@deepseek-ai/dsh-llm": {
       "optional": true
     },
     "@deepseek-ai/dsh-tools": {

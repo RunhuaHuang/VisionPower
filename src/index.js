@@ -18,6 +18,11 @@ Usage:
   visionpower                       Run in stdio MCP mode (default, for Claude/Cursor/Cline)
   visionpower --webui               Start local WebUI configuration and testing console
   visionpower --webui --port <port> Specify WebUI port (default 17900)
+  visionpower setup-dsh [flags]     One-command install into dsh (DeepSeek Harness):
+                                      install plugin → mount cordis → apply image-accept
+                                      patch → write rules (--write-agents) → open config
+                                      console → verify → launch dsh web (--launch)
+                                    See scripts/setup-dsh.mjs header for all flags.
   visionpower --version             Show version number
   visionpower --help                Show this help message
 
@@ -116,6 +121,13 @@ function parseArgs(argv) {
 }
 
 async function main() {
+  // setup-dsh 子命令：完整的一键安装流程，参数由其自身解析
+  if (process.argv[2] === 'setup-dsh') {
+    const { main: runSetupDsh } = await import('../scripts/setup-dsh.mjs')
+    await runSetupDsh(process.argv.slice(3))
+    return
+  }
+
   let args
   try {
     args = parseArgs(process.argv.slice(2))

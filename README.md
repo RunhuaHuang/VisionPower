@@ -285,59 +285,71 @@ VisionPower 还提供 **DeepSeek Harness (dsh) 的原生 Cordis 插件**：随�
         timeoutMs: 120000
 ```
 
-### 交给 dsh 自动安装（推荐）
+### 一行命令安装（推荐）
 
-把下面这段提示词发给你的 dsh（需要 pnpm 可用），它会自动完成**安装（GitHub 源）→ 挂载 cordis 插件 → 验证 → 打开 WebUI 配置控制台**全流程：
+已装 dsh 的用户，一条命令完成全部：**装插件 → 挂载 cordis → 打「拖图不拒绝」补丁（含状态追踪，dsh 升级后重跑自动重打）→ 启动配置控制台 → 验证 → 启动 dsh web**：
 
-```text
-请帮我完成 VisionPower 在 dsh（DeepSeek Harness）上的完整安装与配置，最后打开 VisionPower 的本地配置控制台（WebUI）让我填写视觉模型与 API Key。按以下步骤执行：
-
-【0. 前置检查】
-- 执行 node --version，确认 >= 20.19.0；不满足则告知我先安装新版 Node.js 后停止。
-- 执行 pnpm --version；若找不到 pnpm，先 corepack enable pnpm；若 /usr/local/bin 不可写，则在 PATH 中的用户目录（如 ~/.npm-global/bin）放一个指向 corepack pnpm 的 shim，确认 pnpm --version 可用后再继续。
-
-【1. 安装 visionpower（从 GitHub）】
-优先执行：
-  dsh plugin --profile web add github:RunhuaHuang/visionpower
-若 git 协议安装失败，回退为：
-  git clone https://github.com/RunhuaHuang/visionpower.git ~/visionpower
-  dsh plugin --profile web add file:~/visionpower
-（目标 profile 默认为 web；用户若指定其他 profile 名则相应替换。）
-严格禁止：不要手动安装 @deepseek-ai/cordis、@deepseek-ai/dsh-tools、@deepseek-ai/schemastery，也不要开启 autoInstallPeers——它们是可选 peer 依赖，必须经 dsh 内置软链回退解析，否则会遮蔽内置副本，导致所有工具调用报 "Cannot read properties of undefined (reading 'prepare')"。
-
-【2. 挂载 cordis 插件】
-在 ~/.dsh/profiles/web/cordis.patch.yml 中 insert 一行（保留文件原有注释与内容；写入 ~/.dsh 若被沙箱拒绝，用 sandbox_permissions 提权重试一次，用户会看到确认提示）：
-  - insert:
-      - id: visionpower
-        name: 'visionpower/dsh'
-        config:            # 全部可选
-          timeoutMs: 120000
-想让所有 profile 生效则改写到 $DSH_HOME/cordis.patch.yml。
-
-【3. 验证组合】
-执行 dsh --profile web --dump-config，确认输出包含 id: visionpower、name: visionpower/dsh 行；如有报错，回读第 1、2 步修正。
-
-【4. 打开 WebUI 配置控制台】
-用后台任务启动（不要阻塞当前会话）：
-  ~/.dsh/profiles/web/node_modules/.bin/visionpower --webui
-（若该路径不存在，兜底：npx -y --package visionpower@latest visionpower --webui）
-启动成功后，把地址 http://127.0.0.1:17900 交给用户，并说明：
-- 在 CONFIG 页选择视觉模型预设（如 qwen3-vl-flash），粘贴 API Key，按需调整超时等高级项，点「保存并应用配置」；
-- 在 PLAYGROUND 页上传一张图片试测；
-- 配置会写入 ~/.visionpower/config.json（0600 权限），插件每次调用实时读取，改完无需重启 WebUI。
-
-【5. 收尾】
-- 告知用户：WebUI 随时可用同一条命令再次启动；cordis 插件需要在配置完成后重启 dsh web 才生效（web 的 HMR 关闭），重启后新会话里即可使用原生 describe_image 工具，可直接传入无扩展名图片路径（JPEG/PNG/WEBP/GIF/BMP/TIFF 六种格式按内容自动识别）。
-- 可选自检：把第 2 步的 insert 行写进一个临时 patch 文件（如 /tmp/visionpower-dsh-smoke.yml），执行
-  dsh --profile headless --patch /tmp/visionpower-dsh-smoke.yml "调用 describe_image 分析一张测试图片并总结内容"
-  能返回正常描述即链路全部打通。
+```bash
+npx -y visionpower@latest setup-dsh --launch
 ```
 
-本地开发（未发布前）可跳过 GitHub 安装，直接 `dsh plugin --profile web add file:/path/to/VisionPower`，其余步骤不变。
+常用开关：
 
-> ⚠️ 安装陷阱：插件对 `@deepseek-ai/*` 内置包的依赖是**可选 peer 依赖**，普通安装不会带入 profile。dsh 会从安装目录软链这些内置包到 `$DSH_HOME/profiles/node_modules` 作回退。**不要手动安装它们，也不要开启 `autoInstallPeers`**，否则会遮蔽该回退，引发工具调度器 Symbol 错位（所有工具调用报 `Cannot read properties of undefined (reading 'prepare')`）。
+| 开关 | 作用 |
+|---|---|
+| `--launch` | 完成后自动启动 dsh web 并打开浏览器 |
+| `--write-agents` | 同时把识图规则追加到 `~/.dsh/AGENTS.md`（默认由插件在运行时注入，不写用户文件） |
+| `--check` | 只验证现状（插件/cordis/补丁/API key），不改任何东西 |
+| `--profile <name>` | 目标 profile（默认 `web`） |
+| `--plugin-source <spec>` | 插件源（默认 `github:RunhuaHuang/visionpower`；国内网络可用 `visionpower` 走 npm 源；本地开发用 `file:~/visionpower`） |
+| `--no-console` | 跳过启动配置控制台 |
+| `--wait-secs <n>` | 等待用户完成控制台配置的最长秒数（默认 180） |
 
-插件源码与工具说明见仓库 `src/dsh/index.js` 与 `src/dsh/README.md`。
+流程：① 装插件（优先 `dsh plugin --profile web add`，失败兜底 pnpm，pnpm 缺失自动 `corepack enable`）→ ② 挂载 `cordis.patch.yml` → ③ 打补丁 + 状态追踪（记录 dsh 版本与文件哈希到 `~/.dsh/.visionpower-state.json`；dsh 升级 / npx 重装后补丁失效，**重跑本命令自动重打**）→ ④ 启动 VisionPower 配置控制台（`http://127.0.0.1:17900`，首次需选视觉模型 + 填 API Key）→ ⑤ 验证（补丁 / cordis / API key 缺一即停）→ ⑥ `--launch` 时启动 dsh web。
+
+安装完成后插件自带两项**零操作**能力（均可关）：
+
+- **规则注入**（`injectRules`，默认开）：每轮第一步把「图片定位与识图规则」注入 agent 上下文；若上下文已含相同规则（如 `~/.dsh/AGENTS.md` 已写入）自动跳过，不重复。
+- **自动识图**（`autoDescribe`，默认开）：用户消息带图（拖拽或粘贴）时，插件自动读取附件字节、调用视觉内核，把描述注入下一轮上下文——**用户不提「图」字、甚至只发一张空消息带图，也能被识别**。
+
+在 `cordis.patch.yml` 的 `config` 里可关闭：
+
+```yaml
+- insert:
+    - id: visionpower
+      name: 'visionpower/dsh'
+      config:
+        timeoutMs: 120000
+        autoDescribe: false   # 关闭自动识图（默认 true）
+        injectRules: false    # 关闭运行时规则注入（默认 true）
+```
+
+### 交给 dsh 自动安装（备用）
+
+若你更愿意让 dsh 里的 agent 代劳，把下面这段提示词发给你的 dsh 即可（pnpm 不在 PATH 也没关系，脚本会依次尝试 corepack / `npm install -g pnpm` 自动引导）：
+
+```text
+请帮我在 dsh（DeepSeek Harness）上完成 VisionPower 的安装与配置，目标是让拖入或粘贴（Cmd/Ctrl+V）进会话的图片能被自动识图。按以下顺序执行，遇到失败先自行排查重试，仍失败再停下来问我：
+
+1. 执行（用后台任务跑，不要阻塞会话）：
+   npx -y visionpower@latest setup-dsh --launch
+   若 npx 不可用或 registry 拉取失败，兜底：
+   git clone https://github.com/RunhuaHuang/VisionPower.git /tmp/VisionPower
+   node /tmp/VisionPower/scripts/setup-dsh.mjs --launch
+   （国内网络可先在 ~/.npmrc 配 registry=https://registry.npmmirror.com，或给脚本加 --plugin-source visionpower 走 npm 源装插件。）
+2. 脚本会自动完成：装插件 -> 挂载 cordis -> 打「拖图不拒绝」补丁（含状态追踪）-> 启动配置控制台 -> 验证 -> 启动 dsh web 并打开浏览器。把每步关键输出转述给我。
+3. 配置控制台 http://127.0.0.1:17900 打开后提醒我：在 CONFIG 页选视觉模型预设（如 qwen3-vl-flash）、粘贴 API Key、点「保存并应用配置」；脚本会自动等我配置完成（默认最长 180 秒）。
+4. 脚本若提示「安装更新了插件/补丁，需重启 dsh web」，按提示重启后再继续。
+5. 完成后告诉我：新会话里直接拖图或粘贴图片即可识图（插件自动注入规则与识图结果）；dsh 升级后重跑同一条命令即可自动重打补丁。
+
+严格禁止：不要手动安装 @deepseek-ai/cordis、@deepseek-ai/dsh-tools、@deepseek-ai/dsh-llm、@deepseek-ai/schemastery，也不要开启 autoInstallPeers--它们是可选 peer 依赖，必须经 dsh 内置软链回退解析，否则会遮蔽内置副本，导致所有工具调用报 "Cannot read properties of undefined (reading 'prepare')"。
+```
+
+本地开发：`node /path/to/VisionPower/scripts/setup-dsh.mjs --plugin-source file:/path/to/VisionPower --launch`。
+
+> ⚠️ 安装陷阱：插件对 `@deepseek-ai/*` 内置包（cordis / dsh-tools / dsh-llm / schemastery）的依赖是**可选 peer 依赖**，普通安装不会带入 profile。dsh 会从安装目录软链这些内置包到 `$DSH_HOME/profiles/node_modules` 作回退。**不要手动安装它们，也不要开启 `autoInstallPeers`**，否则会遮蔽该回退，引发工具调度器 Symbol 错位（所有工具调用报 `Cannot read properties of undefined (reading 'prepare')`）。
+
+插件源码见 `src/dsh/index.js`，插件与识图闭环详细说明见 `src/dsh/README.md`，一键安装器见 `scripts/setup-dsh.mjs`，识图规则单一来源见 `src/dsh/rules.js`，服务端图片拒绝补丁见 `scripts/patch-dsh.mjs`（dsh 升级后由 setup-dsh 自动重打）。
 
 ---
 

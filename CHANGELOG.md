@@ -1,5 +1,48 @@
 # Changelog
 
+## 2.9.0 — 2026-08-16
+
+- Added `visionpower setup-dsh` (also `node scripts/setup-dsh.mjs`): a
+  one-command, idempotent installer for dsh that chains plugin install
+  (prefer `dsh plugin add`, fall back to pnpm; version-aware skip/upgrade)
+  -> cordis mount -> patch-dsh application with state tracking
+  (`~/.dsh/.visionpower-state.json` records the dsh version and target
+  file hashes, so re-running after a dsh upgrade/npx reinstall re-patches
+  automatically) -> optional rules write (`--write-agents`) -> config
+  console (background spawn, waits for the API key) -> verification ->
+  optional `--launch` of dsh web with browser open. `--check` verifies
+  everything without changing anything. Cross-platform (Windows .cmd
+  shims handled); the pnpm bootstrap now falls through corepack to
+  `npm install -g pnpm`, so Node 25+ (which ships no corepack) no longer
+  dead-ends.
+- The dsh plugin gained two zero-effort behaviours for text-only model
+  routes, both default-on and individually disableable in the plugin
+  `config`:
+  - `autoDescribe`: on user messages carrying image blocks (drag-and-drop
+    and paste share the same pipeline), the plugin reads the attachment
+    bytes, runs the vision core, and injects the description into the
+    next turn via `agent/pre-step` - the user never has to mention the
+    image. Per-session dedup, supersede-abort, a timeout cap with
+    graceful degradation to the rules fallback, and composition failures
+    that never break the agent turn.
+  - `injectRules`: the canonical image-locating rules are injected into
+    the agent context on the first step of every turn, skipped when
+    identical rules are already present (context or `~/.dsh/AGENTS.md`).
+- New `src/dsh/rules.js` is the single source of truth for the rules
+  text, shared by the runtime injection (Route A, default) and
+  `setup-dsh --write-agents` (Route B, visible/editable in
+  `~/.dsh/AGENTS.md`). `@deepseek-ai/dsh-llm` joins the optional peer
+  dependencies (resolved via dsh's built-in symlink fallback).
+- Rewrote the dsh install docs around the one-liner: the guided agent
+  prompt is now a thin fallback that runs setup-dsh instead of manual
+  steps; documented the plugin flags (`autoDescribe`, `injectRules`) and
+  the npm-registry `--plugin-source` for slow networks; added the dsh
+  section (one-liner + fallback prompt + install trap) to README.en.md;
+  `src/dsh/README.md` gains the drag/paste pipeline section.
+- Version bumped to 2.9.0: existing 2.8.0 installs would otherwise be
+  wrongly skipped as "same version" by the installer's upgrade check,
+  and npm does not allow republishing a version.
+
 ## 2.8.0 — 2026-08-14
 
 - Provider requests are now sent streamed (`stream: true`) and aggregated
