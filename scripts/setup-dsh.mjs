@@ -592,8 +592,11 @@ export async function main(argv = process.argv.slice(2)) {
 
 const directPath = fileURLToPath(import.meta.url)
 const argv1 = process.argv[1] ? path.resolve(process.argv[1]) : ''
+// 经符号链接调用时（如 macOS 的 /tmp -> /private/tmp）两侧路径不相等，先做 realpath 归一化
+const realPath = (p) => { try { return fs.realpathSync(p) } catch { return p } }
 // Windows 路径大小写不敏感；大小写不同会误判为「非直接运行」
-const isDirectRun = argv1 === directPath || (IS_WIN && argv1.toLowerCase() === directPath.toLowerCase())
+const isDirectRun = realPath(argv1) === realPath(directPath)
+  || (IS_WIN && argv1.toLowerCase() === directPath.toLowerCase())
 if (isDirectRun) {
   main().catch((error) => {
     process.stderr.write(`[setup-dsh] ✗ ${error instanceof Error ? error.message : String(error)}\n`)
