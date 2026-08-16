@@ -38,7 +38,7 @@
 import z from '@deepseek-ai/schemastery'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
-import { spawnSync } from 'node:child_process'
+import { spawn } from 'node:child_process'
 import { readFileSync } from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
@@ -171,6 +171,38 @@ function userGlobalAgentsHasRules() {
   }
 }
 
+// 异步运行一键安装器：绝不能 spawnSync——那会阻塞 dsh web 宿主的事件循环长达
+// 数分钟，期间 UI 无响应且取消信号无法派发。收集 stdout/stderr，超时与取消都
+// 先 kill 子进程、由 close 事件统一收尾（保留已产生的输出）。
+function runInstaller(argv, signal) {
+  const script = fileURLToPath(new URL('../../scripts/setup-dsh.mjs', import.meta.url))
+  return new Promise((resolve) => {
+    let out = ''
+    let settled = false
+    const finish = (payload) => {
+      if (settled) return
+      settled = true
+      clearTimeout(timer)
+      resolve({ out, ...payload })
+    }
+    const child = spawn(process.execPath, [script, ...argv], { cwd: os.homedir() })
+    const timer = setTimeout(() => {
+      child.kill('SIGKILL')
+      finish({ status: null, error: 'timeout after 300s' })
+    }, 300000)
+    child.stdout.on('data', (chunk) => { out += chunk })
+    child.stderr.on('data', (chunk) => { out += chunk })
+    child.on('error', (error) => finish({ status: null, error: error instanceof Error ? error.message : String(error) }))
+    child.on('close', (status) => finish({ status, error: null }))
+    const onAbort = () => child.kill('SIGKILL')
+    if (signal?.aborted) {
+      onAbort()
+      return
+    }
+    signal?.addEventListener('abort', onAbort, { once: true })
+  })
+}
+
 export function apply(ctx, config) {
   ctx.tools.register(defineTool({
     name: 'describe_image',
@@ -232,22 +264,14 @@ export function apply(ctx, config) {
       render: (_args, value) => [{ type: 'text', text: String(value) }],
     },
     async execute(args, exec) {
-      const script = fileURLToPath(new URL('../../scripts/setup-dsh.mjs', import.meta.url))
       const argv = ['--wait-secs', '20']
       if (args?.profile) argv.push('--profile', String(args.profile))
       if (args?.launch) argv.push('--launch')
-      let result
-      try {
-        result = spawnSync(process.execPath, [script, ...argv], {
-          encoding: 'utf8',
-          timeout: 300000,
-          signal: exec.signal,
-          cwd: os.homedir(),
-        })
-      } catch (error) {
-        return `[setup_visionpower] 运行安装器失败：${error instanceof Error ? error.message : String(error)}`
+      const result = await runInstaller(argv, exec.signal)
+      const out = result.out.trim()
+      if (result.error) {
+        return `[setup_visionpower] 安装器未能完成运行（${result.error}）。已有输出：\n${out}`
       }
-      const out = `${result.stdout || ''}${result.stderr ? `\n${result.stderr}` : ''}`.trim()
       if (result.status === 0) {
         return `${out}\n\n[setup_visionpower] 成功。若上方显示 VisionPower 已配置（含 API key），全部就绪；若尚未配置，请引导用户在浏览器完成 http://127.0.0.1:17900 的 CONFIG 页配置（选视觉模型 + 粘贴 API Key + 保存），然后再次调用本工具验证。`
       }

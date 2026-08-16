@@ -13,7 +13,7 @@
 
 VisionPower gives Codex, Claude Desktop, Cursor, Cline, Cherry Studio, and other agents the ability to **understand image content, read screenshot text (OCR), interpret charts, and analyze multiple images in order**.
 
-It is **not tied to any single model**: it defaults to Qwen-VL via Alibaba Cloud Model Studio / DashScope's OpenAI-compatible endpoint, and you can switch to Zhipu GLM, MiniMax, Kimi, Volcengine Doubao, Google Gemini, GPT-4o, or any provider that supports OpenAI `/chat/completions` vision input by configuring the model name and base URL. The same core ships in **two forms** — [MCP](#use-as-an-mcp-server) and [Skill](#use-as-a-skill) — pick either or install both.
+It is **not tied to any single model**: it defaults to Qwen-VL via Alibaba Cloud Model Studio / DashScope's OpenAI-compatible endpoint, and you can switch to Zhipu GLM, MiniMax, Kimi, Volcengine Doubao, Google Gemini, GPT-4o, or any provider that supports OpenAI `/chat/completions` vision input by configuring the model name and base URL. The same core ships in **two forms** — [MCP](#use-as-an-mcp-server-strongly-recommended) and [Skill](#use-as-a-skill) — pick either or install both.
 
 📖 Chinese tutorial (Feishu): [DeepSeek Harness 配置 Vision Power 飞书教程](https://my.feishu.cn/wiki/NQ4HwMcPJiMO0hkOiIgcvTblng9)
 
@@ -72,7 +72,7 @@ The two forms are **functionally equivalent** — they differ only in how the ag
 
 | Your agent | Pick | Why |
 | --- | --- | --- |
-| Claude Desktop, Cursor, Cline, Cherry Studio (MCP, maybe no code execution) | **[MCP](#use-as-an-mcp-server)** | Exposes the structured `describe_image` tool with schema-validated, deterministic calls |
+| Claude Desktop, Cursor, Cline, Cherry Studio (MCP, maybe no code execution) | **[MCP](#use-as-an-mcp-server-strongly-recommended)** | Exposes the structured `describe_image` tool with schema-validated, deterministic calls |
 | Codex, Claude Code, and other agents **with a shell / code execution** | **[Skill](#use-as-a-skill)** | Runs its own zero-dependency script — no install, no long-running process |
 | Pure chat MCP hosts with no code execution | **MCP** | The Skill form has nothing to run its script |
 
@@ -307,7 +307,7 @@ After installation: `describe_image` is a **plain tool** the agent calls during 
 
 - **Rules injection** (`injectRules`, default on): the canonical image-locating rules are injected only on image-relevant turns (message carries an image, text mentions one, or an empty text-only image send) - purely textual turns are never touched, and the rules' own step 0 steers genuinely multimodal models to answer straight from the image, so multimodal routes are not disturbed either. Dragged or pasted images are located and described through them - the user never has to mention the image, or even type anything at all.
 
-Turn either off via the plugin `config` block:
+Turn it off via the plugin `config` block:
 
 ```yaml
 - insert:

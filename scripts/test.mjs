@@ -2901,6 +2901,37 @@ try {
     }
   }
 
+  // ── setup-dsh 纯函数与补丁自测 ────────────────────────────────────────────
+  {
+    const { compareVersions, composeCordisContent } = await import('./setup-dsh.mjs')
+    assert.equal(compareVersions('2.8.0', '3.0.0'), -1)
+    assert.equal(compareVersions('3.0.0', '3.0.0'), 0)
+    assert.equal(compareVersions('3.0.1', '3.0.0'), 1)
+    assert.equal(compareVersions('0.1.0-rc.10', '0.1.0-rc.6'), 1)
+    assert.equal(compareVersions('1.0.0', '1.0.0-rc.1'), 1) // 无预发布 > 有预发布
+    // dsh 默认文件（注释 + 独立 [] 行）追加后必须剥掉 []，否则 YAML 非法、profile 起不来
+    const dshDefault = '# comment\n# more\n[]\n'
+    const mounted = composeCordisContent(dshDefault)
+    assert.ok(!/^\[\]$/m.test(mounted), 'bare [] line must be stripped')
+    assert.ok(mounted.includes("name: 'visionpower/dsh'"))
+    assert.ok(mounted.startsWith('# comment'))
+    const fromEmpty = composeCordisContent('')
+    assert.ok(fromEmpty.startsWith('- insert:'))
+    const noTrailing = composeCordisContent('- insert:\n    - id: other')
+    assert.ok(noTrailing.includes('\n\n- insert:\n    - id: visionpower'))
+    const inlined = composeCordisContent('items: []\n')
+    assert.ok(inlined.includes('items: []'), 'inline arrays must not be stripped')
+  }
+  {
+    // patch-dsh.mjs --self-test：dsh 结构漂移要在 CI 暴露，而不是用户装机时
+    const selfTest = await new Promise((resolve) => {
+      execFile(process.execPath, [fileURLToPath(new URL('./patch-dsh.mjs', import.meta.url)), '--self-test'],
+        (error, stdout) => resolve({ error, stdout }))
+    })
+    assert.ok(!selfTest.error, `patch-dsh self-test failed: ${selfTest.error}`)
+    assert.ok(selfTest.stdout.includes('SELF-TEST PASS'))
+  }
+
   console.log('Unit tests passed.')
 } finally {
   rmSync(tempDir, { recursive: true, force: true })

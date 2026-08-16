@@ -125,7 +125,7 @@ function installedPluginVersion(dir) {
 }
 
 // 简单 semver 比较（数字段 + rc 预发布），够用即可
-function compareVersions(a, b) {
+export function compareVersions(a, b) {
   const parse = (v) => {
     const [core, pre] = String(v).split('-')
     return { core: core.split('.').map((n) => parseInt(n, 10) || 0), pre }
@@ -244,6 +244,15 @@ function installPlugin(profile, source) {
 // ② 挂载 cordis
 // ─────────────────────────────────────────────────────────────────────────────
 
+// 把 visionpower 的 insert 行合并进既有 cordis.patch.yml 内容（纯函数，便于测试）：
+// dsh 生成的默认文件是「注释 + 独立一行的空数组 []」，空数组是流式节点，其后不能
+// 直接续块序列（否则 YAML 解析失败、整个 profile 起不来），先把独立的 [] 行剥掉再追加。
+export function composeCordisContent(content) {
+  const stripped = content.replace(/^[ \t]*\[\][ \t]*\r?$/m, '')
+  const addition = (stripped.length > 0 && !stripped.endsWith('\n') ? '\n' : '') + (stripped.length > 0 ? '\n' : '') + CORDIS_ROW
+  return stripped + addition
+}
+
 function mountCordis(profile) {
   const dir = profileDir(profile)
   const file = path.join(dir, 'cordis.patch.yml')
@@ -253,17 +262,11 @@ function mountCordis(profile) {
     log(`cordis.patch.yml 已挂载 visionpower/dsh，跳过`)
     return { status: 'skip' }
   }
-  // dsh 生成的默认文件是「注释 + 独立一行的空数组 []」。空数组是流式节点，其后不能
-  // 直接续块序列（否则 YAML 解析失败、整个 profile 起不来），先把独立的 [] 行剥掉再追加。
-  content = content.replace(/^[ \t]*\[\][ \t]*\r?$/m, '')
-  const addition = (content.length > 0 && !content.endsWith('\n') ? '\n' : '') + (content.length > 0 ? '\n' : '') + CORDIS_ROW
   fs.mkdirSync(dir, { recursive: true })
-  fs.writeFileSync(file, content + addition)
+  fs.writeFileSync(file, composeCordisContent(content))
   log(`已挂载 visionpower/dsh -> ${file}`)
   return { status: 'mounted' }
 }
-
-// ─────────────────────────────────────────────────────────────────────────────
 // ③ 打补丁 + 状态追踪
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -342,14 +345,14 @@ function patchStep() {
 }
 
 function patchCheck() {
-  // --check 模式：跑一遍补丁（幂等），用其输出作为现状
+  // --check 模式：跑一遍补丁探测（dry-run，绝不写入），用其输出作为现状
   const selfTest = runPatchScript(['--self-test'])
   process.stdout.write(selfTest.stdout)
   process.stderr.write(selfTest.stderr)
   if (selfTest.status !== 0 || !selfTest.stdout.includes('SELF-TEST PASS')) {
     return { ok: false, reason: '补丁自测 FAIL（dsh 结构可能已变化）' }
   }
-  const patch = runPatchScript([])
+  const patch = runPatchScript(['--dry-run'])
   process.stdout.write(patch.stdout)
   process.stderr.write(patch.stderr)
   const summaryMatch = patch.stdout.match(/结构不匹配 (\d+) 处，语法失败 (\d+) 处/)
@@ -393,6 +396,7 @@ async function ensureConsole(profile, noConsole, waitSecs, forceConsole) {
     return { status: 'skipped' }
   }
   const PORT = 17900
+  let spawned = false
   if (await portListening(PORT)) {
     log(`VisionPower 配置控制台已在运行 http://127.0.0.1:${PORT}，跳过启动`)
     if (!visionConfigHasKey()) warn('控制台在运行但 ~/.visionpower/config.json 尚无 API key')
@@ -400,6 +404,7 @@ async function ensureConsole(profile, noConsole, waitSecs, forceConsole) {
     // 复跑场景（如新增/更换模型后重跑）：配置已就绪就不再拉起常驻进程；
     // 需要调整视觉模型/API Key 时用 --console 强制启动。
     log('VisionPower 已配置（~/.visionpower/config.json 含 API key），跳过启动配置控制台（如需调整视觉模型/API Key，加 --console 强制启动）')
+    return { status: 'configured' }
   } else {
     // 用 node 直接跑包内 src/index.js，避免平台相关的 .bin shim（visionpower(.cmd/.ps1)）；
     // node 是真实可执行文件，不加 shell（避免路径含空格时被 shell 拆分）
@@ -409,16 +414,24 @@ async function ensureConsole(profile, noConsole, waitSecs, forceConsole) {
       ? spawn(process.execPath, [bin, '--webui'], { detached: true, stdio: ['ignore', 'ignore', fs.openSync(logFile, 'a')] })
       : spawn('npx', ['-y', '--package', 'visionpower@latest', 'visionpower', '--webui'], shimOpts({ detached: true, stdio: ['ignore', 'ignore', fs.openSync(logFile, 'a')] }))
     child.unref()
+    spawned = true
     log(`已启动 VisionPower 配置控制台 → http://127.0.0.1:${PORT}（日志 ${logFile}）`)
+  }
+
+  // 等端口真正就绪再弹浏览器，避免浏览器先于服务出现「连接被拒」
+  const budgetMs = spawned ? 30000 : 3000
+  const readyDeadline = Date.now() + budgetMs
+  while (!(await portListening(PORT)) && Date.now() < readyDeadline) await sleep(500)
+  if (await portListening(PORT)) {
+    if (openBrowser(`http://127.0.0.1:${PORT}`)) log(`已在浏览器打开 http://127.0.0.1:${PORT}`)
+  } else {
+    warn(`配置控制台 ${Math.round(budgetMs / 1000)}s 内未就绪（日志 ${path.join(DSH_HOME, '.visionpower-console.log')}），请稍后手动访问 http://127.0.0.1:${PORT}`)
   }
 
   if (visionConfigHasKey()) {
     log('VisionPower 已配置（~/.visionpower/config.json 含 API key）✓')
     return { status: 'configured' }
   }
-
-  // 尚未配置时直接把配置控制台弹到浏览器，省掉用户手抄地址
-  if (openBrowser(`http://127.0.0.1:${PORT}`)) log(`已在浏览器打开 http://127.0.0.1:${PORT}`)
   log(`请在 CONFIG 页选择视觉模型预设、粘贴 API Key、点「保存并应用配置」。`)
   const deadline = Date.now() + waitSecs * 1000
   while (Date.now() < deadline) {
@@ -598,7 +611,7 @@ export async function main(argv = process.argv.slice(2)) {
     warn('本次安装更新了插件/补丁。若 dsh web 已在运行，需重启才生效：Ctrl+C 停掉后重新执行 npm exec @deepseek-ai/dsh web')
   }
 
-  log('完成。拖图/粘贴图片后，插件会自动识图并注入描述。这条命令随时可重跑（幂等，已就位的步骤自动跳过）：dsh 升级/重装后重跑会自动重打补丁；在 dsh 里新增/更换纯文本模型不需要任何操作——补丁按模型无关方式放行图片消息，新模型自动被覆盖，重跑一遍可顺便验证链路完好。')
+  log('完成。拖图/粘贴图片后，插件会在图片相关回合注入识图规则，agent 会自动定位图片并调用 describe_image 完成识图。这条命令随时可重跑（幂等，已就位的步骤自动跳过）：dsh 升级/重装后重跑会自动重打补丁；在 dsh 里新增/更换纯文本模型不需要任何操作——补丁按模型无关方式放行图片消息，新模型自动被覆盖，重跑一遍可顺便验证链路完好。')
 }
 
 const directPath = fileURLToPath(import.meta.url)

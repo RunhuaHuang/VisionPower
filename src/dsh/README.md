@@ -40,7 +40,7 @@ dsh plugin --profile web add file:/path/to/VisionPower
         debug: false
 ```
 
-重启 `dsh web` 后，模型即可看到原生工具 **`describe_image`**（不再有 `mcp__` 前缀）。
+重启 `dsh web` 后，模型即可看到原生工具 **`describe_image`**（不再有 `mcp__` 前缀）；插件同时注册 **`setup_visionpower`** 工具——agent 可凭它随时重跑一键安装器（幂等）完成配置/修复/检查。
 
 ## 拖图 / 粘贴识图闭环
 
@@ -59,14 +59,15 @@ dsh plugin --profile web add file:/path/to/VisionPower
 |---|---|---|
 | `model` | 配置文件/环境 | 视觉模型名（如 `qwen3-vl-flash`、`MiniMax-M3`、`gpt-5.6`） |
 | `baseUrl` | 配置文件/环境 | OpenAI 兼容端点，覆盖 `VISIONPOWER_BASE_URL` |
+| `protocol` | 按模型/端点推断 | `openai` 或 `anthropic`；覆盖 `baseUrl` 时建议显式指定 |
 | `apiKeyEnv` | 无 | 从指定环境变量读取 API Key（如 `VISIONPOWER_API_KEY`） |
 | `configPath` | `~/.visionpower/config.json` | 覆盖配置文件路径 |
 | `timeoutMs` | 60000 | 上游模型请求超时（毫秒）；上游视觉模型偶发较慢，建议 120000 |
 | `firstByteTimeoutMs` | 15000 | 首字响应超时（毫秒）：流式请求若在此时限内未吐出首个字符则提前中断并重试，不超过 `timeoutMs` |
-| `injectRules` | true | 每轮注入识图规则（已存在则跳过） |
+| `injectRules` | true | 在图片相关回合注入识图规则（消息带图 / 文本提到图 / 纯图片空文本；上下文或 `~/.dsh/AGENTS.md` 已有规则时跳过） |
 | `debug` | false | 输出 `[visionpower]` 调试日志到 stderr |
 
-优先级：**cordis.yml 配置 > 环境变量 > `~/.visionpower/config.json`**。API Key 建议继续放在 `~/.visionpower/config.json`（mode 600），不写进 cordis.yml。
+优先级：**cordis.patch.yml 配置 > 环境变量 > `~/.visionpower/config.json`**。API Key 建议继续放在 `~/.visionpower/config.json`（mode 600），不写进 cordis.yml。
 
 ## 工具参数（与 MCP 形态一致）
 

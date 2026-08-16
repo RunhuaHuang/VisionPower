@@ -44,7 +44,7 @@ export const RULES_TEXT = `# 图片的定位与识图规则（VisionPower）
    - 打印出一个绝对路径即成功，直接进第 2 步，**不要再 ls/echo/分步确认**。
    - 输出为空或报错才排查：
      - 必须读 $DSH_SESSION_JSONL（当前会话自己的日志，dsh 已注入 shell）；未设置时用
-       find ~/.dsh/sessions -name 'session.jsonl.zstd' -type f -print0 | xargs -0 ls -t 2>/dev/null | head -1
+       find "\${DSH_HOME:-$HOME/.dsh}/sessions" -name 'session.jsonl.zstd' -type f -print0 | xargs -0 ls -t 2>/dev/null | head -1
        并校验该日志最后一条 user/message 文本与当前消息对得上；对不上换次新日志重试。
      - 不要用 grep sha256: 之类的文本匹配——agent 自己的工具输出会把历史 sha256 写进日志，grep 会误判。
      - 仍查不到 → 兜底：find "$DSH_HOME/attachments/v1/objects" -type f ! -name '.DS_Store' -exec ls -lt {} + | head

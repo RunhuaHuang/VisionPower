@@ -1,5 +1,31 @@
 # Changelog
 
+## 3.0.1 - 2026-08-16
+
+Acceptance-review fixes (three parallel reviewers over the full dsh
+suite):
+- setup_visionpower no longer blocks the host: spawnSync (which froze
+  the dsh web event loop for up to 5 minutes, uncancellable) became an
+  async spawn that collects output, honors the abort signal, enforces a
+  300s kill timer, and reports timeout/abort/error distinctly.
+- setup-dsh --check is now genuinely read-only: patch-dsh gained
+  --dry-run (probe and report without writing), and the check path uses
+  it - previously a fresh/changed dsh install would get patched "while
+  only checking", contradicting the documented contract.
+- The config console now waits for port 17900 to actually listen before
+  opening the browser (fresh spawns up to 30s), and --console opens it
+  even when an API key already exists.
+- The injected rules' session-log fallback now respects
+  $DSH_HOME instead of hardcoding ~/.dsh/sessions.
+- Docs: injectRules described as per-turn (stale - it is per
+  image-relevant turn), README.en "Turn either off" leftover, installer
+  closing message still describing the removed auto-describe, missing
+  protocol row and setup_visionpower mention in src/dsh/README.md,
+  cordis.patch.yml naming, and four broken MCP anchor links.
+- Tests: compareVersions and the cordis content transformation are now
+  unit-tested, and patch-dsh --self-test runs as part of npm test so
+  dsh structure drift surfaces in CI instead of at user install time.
+
 ## 3.0.0 - 2026-08-16
 
 Major: the complete dsh (DeepSeek Harness) image-understanding suite,
