@@ -337,10 +337,10 @@ function main() {
     if (r.status !== 0) { syntaxFail++; console.error(`  ✗ node --check 失败: ${file}\n${r.stderr}`); }
   }
 
-  // 提醒：识图规则文件（用户数据，升级不清除，但误删时提醒）
+  // 提示：识图规则默认由 visionpower 插件在运行时注入，无需 AGENTS.md 文件（可选写入）
   const dshHome = process.env.DSH_HOME || path.join(os.homedir(), '.dsh');
   const agents = path.join(dshHome, 'AGENTS.md');
-  if (!fs.existsSync(agents)) console.warn(`\n⚠ 未找到识图规则文件 ${agents}，请恢复它（拖图定位与识图规则）。`);
+  if (!fs.existsSync(agents)) console.log(`\nℹ 识图规则默认由 visionpower 插件运行时注入，无需 ${agents}；如需可见可编辑的规则文件，运行 setup-dsh --write-agents 写入。`);
 
   console.log('\n──────────────────────────────────────────');
   console.log(`应用补丁 ${applied} 处，已打过 ${alreadyOk} 处，结构不匹配 ${structureFail} 处，语法失败 ${syntaxFail} 处。`);

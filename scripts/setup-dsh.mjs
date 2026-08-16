@@ -253,10 +253,13 @@ function mountCordis(profile) {
     log(`cordis.patch.yml 已挂载 visionpower/dsh，跳过`)
     return { status: 'skip' }
   }
+  // dsh 生成的默认文件是「注释 + 独立一行的空数组 []」。空数组是流式节点，其后不能
+  // 直接续块序列（否则 YAML 解析失败、整个 profile 起不来），先把独立的 [] 行剥掉再追加。
+  content = content.replace(/^[ \t]*\[\][ \t]*\r?$/m, '')
   const addition = (content.length > 0 && !content.endsWith('\n') ? '\n' : '') + (content.length > 0 ? '\n' : '') + CORDIS_ROW
   fs.mkdirSync(dir, { recursive: true })
   fs.writeFileSync(file, content + addition)
-  log(`已挂载 visionpower/dsh → ${file}`)
+  log(`已挂载 visionpower/dsh -> ${file}`)
   return { status: 'mounted' }
 }
 

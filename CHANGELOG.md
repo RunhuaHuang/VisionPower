@@ -39,6 +39,15 @@
   the npm-registry `--plugin-source` for slow networks; added the dsh
   section (one-liner + fallback prompt + install trap) to README.en.md;
   `src/dsh/README.md` gains the drag/paste pipeline section.
+- Fixed two setup-dsh bugs caught by a from-scratch install test: the
+  direct-run guard silently skipped `main()` when the script was invoked
+  through a symlinked path (macOS `/tmp` vs `/private/tmp` - both sides
+  are now realpath-normalized), and mounting cordis appended the insert
+  block after dsh's default bare `[]` line, which is invalid YAML and
+  broke the whole profile overlay (the bare empty-array line is now
+  stripped before appending). patch-dsh's stale "AGENTS.md missing"
+  warning became an informational note now that rules are injected at
+  runtime by default.
 - Version bumped to 2.9.0: existing 2.8.0 installs would otherwise be
   wrongly skipped as "same version" by the installer's upgrade check,
   and npm does not allow republishing a version.
