@@ -1,5 +1,18 @@
 # Changelog
 
+## 3.0.0 - 2026-08-16
+
+Major: the complete dsh (DeepSeek Harness) image-understanding suite,
+iterated live on main as 2.9.0-2.9.11 (never published to npm) and
+hardened by from-scratch install tests against dsh 0.1.0-rc.6. Ships
+the `visionpower setup-dsh` one-command installer (idempotent, state
+tracked, auto re-patch after dsh upgrades, model-agnostic image
+admission), the native cordis plugin (describe_image as a plain tool +
+image-locating rules injected on image-relevant turns, with a
+battle-tested rule text covering drag-and-drop and paste), the
+`setup_visionpower` agent tool, the repo-root AGENTS.md quick path for
+one-sentence installs, and docs in Chinese and English.
+
 ## 2.9.11 - 2026-08-16
 
 - One natural sentence to dsh now installs everything ("请你帮我按照
