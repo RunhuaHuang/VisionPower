@@ -44,4 +44,4 @@ export const RULES_TEXT = `# 图片的定位与识图规则（VisionPower）
 2. 图片路径 = $DSH_HOME/attachments/v1/objects/<attachmentId 去掉 sha256: 前缀后的前 2 位>/<完整 hex>。
    - 查不到/为空 → 兜底：取 objects 下 mtime 最新的普通文件（排除 .DS_Store）。
    - 重复拖/贴同一张图会被内容寻址去重（无新文件、不刷新 mtime），此时 mtime 兜底会指错，必须回到日志法。
-3. 识图：调 describe_image（image_path / image_url / image_base64 / image_ref / images[]）——文件名是 sha256、无扩展名是正常的，内核按 magic bytes 自动识别六种格式（JPEG/PNG/WEBP/GIF/BMP/TIFF）；报 not a supported raster image 时用 file <路径> 排查。消息文本里直接给出了图片路径时，优先用它，跳过第 1–2 步。`
+3. 识图：**直接调 describe_image**（image_path / image_url / image_base64 / image_ref / images[]）——文件名是 sha256、无扩展名是正常的，内核按 magic bytes 自动识别六种格式（JPEG/PNG/WEBP/GIF/BMP/TIFF）；报 not a supported raster image 时用 file <路径> 排查。**不要先试 dsh 内置的 read_image**——它把图片原件交给模型、要求模型本身接受图片输入，纯文本路由下必然失败，也不接受无扩展名路径；read_image 只在第 0 步上半分支（多模态路由）才有意义。消息文本里直接给出了图片路径时，优先用它，跳过第 1–2 步。`

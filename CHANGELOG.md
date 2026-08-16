@@ -1,5 +1,15 @@
 # Changelog
 
+## 2.9.6 - 2026-08-16
+
+- The injected rules now explicitly steer the agent away from dsh's
+  built-in `read_image` tool on text-only routes: it hands the image
+  itself to the model (requiring an image-capable route) and only
+  accepts extensioned PNG/JPEG/WebP/GIF paths, so on a text-only route
+  it fails 100% of the time - and dsh's content-addressed attachments
+  have no extension anyway. Live logs showed the agent trying read_image
+  first and wasting a step before falling back to describe_image.
+
 ## 2.9.5 - 2026-08-16
 
 - Removed the pre-turn auto-describe machinery entirely: describe_image is
