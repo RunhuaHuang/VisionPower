@@ -1,5 +1,21 @@
 # Changelog
 
+## 2.9.5 - 2026-08-16
+
+- Removed the pre-turn auto-describe machinery entirely: describe_image is
+  now a plain tool the agent calls during its normal tool-calling phase.
+  Live testing showed the blocking design was structurally at odds with
+  dsh's rendering - the turn's messages (including the user's own image)
+  only materialize when step 1 starts, so waiting for a vision result
+  before composing step 1 rendered as dead air with the sent image
+  invisible, at any wait cap. The normal tool flow has visible progress,
+  exactly one vision call per image, and no stall; the injected rules
+  (which already carry a positive action for textless image sends) drive
+  the agent to locate and describe the image on its own. Dropped the
+  `autoDescribe` / `autoDescribeWaitMs` config keys, the session-event
+  staging, and the `attachments` service injection; docs updated
+  accordingly.
+
 ## 2.9.4 - 2026-08-16
 
 - First live end-to-end run surfaced two UX problems, both fixed. The

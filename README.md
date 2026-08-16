@@ -313,10 +313,9 @@ npx -y visionpower@latest setup-dsh --launch
 
 流程：① 装插件（优先 `dsh plugin --profile web add`，失败兜底 pnpm，pnpm 缺失自动 `corepack enable`）→ ② 挂载 `cordis.patch.yml` → ③ 打补丁 + 状态追踪（记录 dsh 版本与文件哈希到 `~/.dsh/.visionpower-state.json`；dsh 升级 / npx 重装后补丁失效，**重跑本命令自动重打**）→ ④ 启动 VisionPower 配置控制台（`http://127.0.0.1:17900`，首次需选视觉模型 + 填 API Key）→ ⑤ 验证（补丁 / cordis / API key 缺一即停）→ ⑥ `--launch` 时启动 dsh web。
 
-安装完成后插件自带两项**零操作**能力（均可关）：
+安装完成后：`describe_image` 是一个**普通工具**，agent 在正常工具调用阶段按需调用（dsh 界面有可见进度，每张图一次视觉调用，回合开始绝不被识图阻塞）；插件另自带一项**零操作**能力（可关）：
 
-- **规则注入**（`injectRules`，默认开）：每轮第一步把「图片定位与识图规则」注入 agent 上下文；若上下文已含相同规则（如 `~/.dsh/AGENTS.md` 已写入）自动跳过，不重复。
-- **自动识图**（`autoDescribe`，默认开）：用户消息带图（拖拽或粘贴）时，插件自动读取附件字节、调用视觉内核，把**精简摘要**（≤150 字）注入本轮上下文——**用户不提「图」字、甚至只发一张空消息带图，也能被识别**。等待上限默认 15 秒（`autoDescribeWaitMs` 可调），超时立即退回规则链路；识图成功时本轮不再注入规则，每轮至多一条 VisionPower 消息。
+- **规则注入**（`injectRules`，默认开）：每轮第一步把「图片定位与识图规则」注入 agent 上下文；若上下文已含相同规则（如 `~/.dsh/AGENTS.md` 已写入）自动跳过，不重复。拖拽或粘贴的图片由此被 agent 自动定位并识图——不提「图」字、甚至只发一张图不带字，也能被识别。
 
 在 `cordis.patch.yml` 的 `config` 里可关闭：
 
@@ -326,7 +325,6 @@ npx -y visionpower@latest setup-dsh --launch
       name: 'visionpower/dsh'
       config:
         timeoutMs: 120000
-        autoDescribe: false   # 关闭自动识图（默认 true）
         injectRules: false    # 关闭运行时规则注入（默认 true）
 ```
 

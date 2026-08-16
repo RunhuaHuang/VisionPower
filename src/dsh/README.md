@@ -36,7 +36,6 @@ dsh plugin --profile web add file:/path/to/VisionPower
         model: MiniMax-M3
         baseUrl: https://api.minimaxi.com/v1
         timeoutMs: 120000
-        autoDescribe: true   # 自动识图（默认 true）
         injectRules: true    # 运行时注入识图规则（默认 true）
         debug: false
 ```
@@ -47,9 +46,8 @@ dsh plugin --profile web add file:/path/to/VisionPower
 
 「把图片**拖进**或**粘贴**（Cmd/Ctrl+V）进会话」在纯文本模型路由下能识图，靠三件套配合（一键安装器 `setup-dsh` 会全部就位）：
 
-1. **插件本体**：提供 `describe_image` 工具，外加两项零操作能力（`config` 可关）：
-   - **自动识图**（`autoDescribe`，默认开）：监听 `session/event`，用户消息带 image 块（拖拽与粘贴流程完全相同）时自动读取附件字节、调用视觉内核，把描述经 `agent/pre-step` 注入下一轮上下文--用户不提「图」字也能被识别；失败/超时自动降级为规则兜底。
-   - **规则注入**（`injectRules`，默认开）：把「图片定位与识图规则」（`src/dsh/rules.js`，单一来源）注入 agent 上下文；上下文或 `~/.dsh/AGENTS.md` 已有相同规则时自动跳过。**每轮至多一条 VisionPower 注入**：自动识图成功时只注精简描述（规则冗余、跳过）；识图失败/超时把规则并入同一条兜底消息；无图或关闭自动识图时才单独注入规则。
+1. **插件本体**：`describe_image` 就是一个**普通工具**——agent 在正常工具调用阶段按需调用，dsh 界面有可见进度，每张图一次视觉调用，回合开始绝不被识图阻塞。外加一项零操作能力（`config` 可关）：
+   - **规则注入**（`injectRules`，默认开）：每轮第一步把「图片定位与识图规则」（`src/dsh/rules.js`，单一来源）注入 agent 上下文；上下文或 `~/.dsh/AGENTS.md` 已有相同规则时自动跳过。规则教会 agent 定位拖拽/粘贴图片对应的内容寻址附件文件并调用 `describe_image`。
 2. **服务端补丁**（`scripts/patch-dsh.mjs`）：移除 dsh 对纯文本模型路由的图片消息拒绝（否则拖图/粘贴在服务端就被 `Model does not support image input` 拦下）。幂等；dsh 升级/重装后重跑 `setup-dsh` 自动重打。
 3. **识图规则**（`src/dsh/rules.js`）：默认走插件运行时注入（Route A，不写用户文件）；`setup-dsh --write-agents` 可改为追加进 `~/.dsh/AGENTS.md`（Route B，规则可见可编辑）。两条通道读同一模块，文本永不漂移。
 
@@ -65,8 +63,6 @@ dsh plugin --profile web add file:/path/to/VisionPower
 | `configPath` | `~/.visionpower/config.json` | 覆盖配置文件路径 |
 | `timeoutMs` | 60000 | 上游模型请求超时（毫秒）；上游视觉模型偶发较慢，建议 120000 |
 | `firstByteTimeoutMs` | 15000 | 首字响应超时（毫秒）：流式请求若在此时限内未吐出首个字符则提前中断并重试，不超过 `timeoutMs` |
-| `autoDescribe` | true | 自动识图：消息带图时自动预跑视觉内核并注入描述 |
-| `autoDescribeWaitMs` | 15000 | 自动识图结果的最大等待毫秒数；超时立即退回规则链路，不让回合长时间无反馈 |
 | `injectRules` | true | 每轮注入识图规则（已存在则跳过） |
 | `debug` | false | 输出 `[visionpower]` 调试日志到 stderr |
 

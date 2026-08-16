@@ -7,20 +7,20 @@
 // ~/.visionpower/config.json plus the VISIONPOWER_* / OPENAI_API_KEY
 // environment variables, with this plugin's cordis.yml `config` applied last.
 //
-// Beyond the tool, the plugin wires two zero-friction behaviours for text-only
-// (non-multimodal) model routes:
+// describe_image stays a plain tool: the agent calls it during its normal
+// tool-calling phase, with visible progress in the dsh UI and one vision call
+// per image. Vision never blocks the start of a turn — an earlier design
+// pre-described images in agent/pre-step, but dsh only materializes the turn's
+// messages (including the user's own image) when step 1 starts, so the wait
+// rendered as dead air with the sent image invisible.
 //
-//  1. Rules injection (config `injectRules`, default true): on the first step
-//     of every turn the canonical image-locating rules (src/dsh/rules.js) are
-//     injected into the agent context via `agent/pre-step`, unless the same
-//     rules are already present (e.g. loaded from ~/.dsh/AGENTS.md).
-//
-//  2. Auto-describe (config `autoDescribe`, default true): when the session
-//     inbox splices in image blocks (drag-and-drop or paste — the event fires
-//     before the turn starts), the plugin reads the attachment bytes via the
-//     `attachments` service, runs the vision core, and injects the description
-//     into the turn's first `agent/pre-step` — the user never has to mention
-//     the image or ask the agent to find it.
+// Beyond the tool, one zero-friction behaviour for text-only (non-multimodal)
+// model routes: rules injection (config `injectRules`, default true) — on the
+// first step of every turn the canonical image-locating rules (src/dsh/rules.js)
+// are injected into the agent context via `agent/pre-step`, unless the same
+// rules are already present (e.g. loaded from ~/.dsh/AGENTS.md). The rules tell
+// the agent how to locate the content-addressed attachment files behind
+// dragged/pasted images and to call describe_image on them.
 //
 // cordis.patch.yml row:
 //
@@ -33,9 +33,6 @@
 //           protocol: openai    # or anthropic; inferred from model/baseUrl when omitted
 //           timeoutMs: 60000
 //           firstByteTimeoutMs: 15000
-//           autoDescribe: true   # auto-recognize dragged/pasted images (default true)
-//           autoDescribeWaitMs: 15000  # max wait for the description before
-//                                 # falling back to the rules route
 //           injectRules: true    # inject image-locating rules each turn (default true)
 
 import z from '@deepseek-ai/schemastery'
@@ -49,7 +46,7 @@ import { RULES_MARKER, RULES_TEXT } from './rules.js'
 
 export const name = 'visionpower'
 
-export const inject = ['tools', 'attachments']
+export const inject = ['tools']
 
 // All fields optional: the core resolves the persistent config file and the
 // environment on its own; these overrides apply on top for operators who
@@ -62,8 +59,6 @@ export const Config = z.object({
   configPath: z.string(),
   timeoutMs: z.number(),
   firstByteTimeoutMs: z.number(),
-  autoDescribe: z.boolean(),
-  autoDescribeWaitMs: z.number(),
   injectRules: z.boolean(),
   debug: z.boolean(),
 }).default({})
@@ -130,33 +125,6 @@ function resolveConfig(overrides) {
   return base
 }
 
-// 图片块来自 inbox 的 splice 事件：payload.data.inserted[] 是消息数组，
-// 每条消息的 content[] 里带 image 块（与 user/message 事件里的同一对象）。
-function imageBlocksOfSplice(splice) {
-  const blocks = []
-  for (const message of splice?.inserted ?? []) {
-    const content = message?.content
-    if (!Array.isArray(content)) continue
-    for (const block of content) {
-      if (block?.type === 'image' && block?.attachment?.attachmentId) blocks.push(block)
-    }
-  }
-  return blocks
-}
-
-// 纯图片消息（无文字）在文本线路上整轮都看不到用户输入，模型容易把注入的
-// 规则/上下文当成「用户消息」并反问要干嘛——注入文案需要给出正向动作指令。
-function spliceHasText(splice) {
-  for (const message of splice?.inserted ?? []) {
-    const content = message?.content
-    if (!Array.isArray(content)) continue
-    for (const block of content) {
-      if (block?.type === 'text' && typeof block.text === 'string' && block.text.trim()) return true
-    }
-  }
-  return false
-}
-
 function textOf(message) {
   const content = message?.content
   if (typeof message?.text === 'string') return message.text
@@ -185,12 +153,6 @@ function userGlobalAgentsHasRules() {
     return false
   }
 }
-
-// 自动识图的注入每轮只保留一条 VisionPower 消息：成功时只注描述（此时规则
-// 是冗余的——agent 无需再定位图片）；失败/超时才把规则合入同一条兜底消息。
-// prompt 要求精简摘要：输出长度是延迟的主导因素，细节留给 agent 按需自调工具。
-const AUTO_DESCRIBE_PROMPT =
-  '用不超过 150 字简要描述这张图片：它是什么（截图/照片/图表/界面等）、主体内容、图中关键文字（如有，只摘要点）。不需要穷尽细节，后续可再询问。'
 
 export function apply(ctx, config) {
   ctx.tools.register(defineTool({
@@ -227,162 +189,25 @@ export function apply(ctx, config) {
   }))
 
   // ─────────────────────────────────────────────────────────────────────────
-  // Auto-describe: user message carries image blocks → read attachment bytes
-  // → run the vision core → stage the description for the next pre-step.
+  // pre-step: inject the locating rules on step 1 unless already present
+  // (e.g. ~/.dsh/AGENTS.md workspace instructions). Vision itself never
+  // happens here — describe_image is a plain tool the agent calls during
+  // its normal tool-calling phase, with visible progress in the dsh UI.
   // ─────────────────────────────────────────────────────────────────────────
-  const pendingDescriptions = new Map() // sessionId -> Promise<string>
-  const seenImageDigests = new Map() // sessionId -> Set<digest>（按会话去重，跨会话不误判）
-
-  async function describeAttachmentImages(blocks, overrides, signal) {
-    const resolved = []
-    for (const block of blocks) {
-      const stored = await ctx.attachments.readImage(block.attachment, signal)
-      resolved.push({
-        image_base64: Buffer.from(stored.data).toString('base64'),
-        image_mime_type: block.attachment.mediaType,
-      })
-    }
-    const params = resolved.length === 1
-      ? { ...resolved[0], prompt: AUTO_DESCRIBE_PROMPT }
-      : { images: resolved, prompt: AUTO_DESCRIBE_PROMPT }
-    return describeImage(params, resolveConfig(overrides), signal)
-  }
-
-  if (config.autoDescribe !== false) {
-    // 事件选择（实测结论，dsh 0.1.0-rc.6）：user/message 事件在 step 1 的
-    // pre-step **之后**才落到会话日志，那时本回合的注入窗口已过；inbox 的
-    // splice 事件（agent/inbox/spliced）在回合开始前携带相同的 image 块，
-    // 在此刻起跑识图才能赶上 step 1 的注入。removed 类 splice（无 inserted
-    // 图片）自然被 blocks.length === 0 过滤。
-    // global 标志（实测结论）：web 宿主里会话事件以 per-session carrier 为
-    // thisArg 派发，非 global 监听会被 carrier 的作用域过滤器剔除——headless
-    // 宿主无此过滤，首次验证时容易漏判；必须 global 才能在两个宿主都收到。
-    ctx.on('session/event', (session, event) => {
-      try {
-        if (event?.type !== 'agent/inbox/spliced') return
-        const blocks = imageBlocksOfSplice(event.data)
-        if (blocks.length === 0) return
-        const hasText = spliceHasText(event.data)
-        const digest = blocks.map((b) => b.attachment.attachmentId).join('|')
-        const sessionKey = session?.id ?? 'default'
-        // 会话键上限：长驻进程下防止旧会话的 Set 无限累积
-        if (seenImageDigests.size >= 32 && !seenImageDigests.has(sessionKey)) {
-          const oldestKey = seenImageDigests.keys().next().value
-          seenImageDigests.delete(oldestKey)
-        }
-        let seen = seenImageDigests.get(sessionKey)
-        if (!seen) {
-          seen = new Set()
-          seenImageDigests.set(sessionKey, seen)
-        }
-        if (seen.has(digest)) return
-        if (seen.size > 64) {
-          const oldest = seen.values().next().value
-          seen.delete(oldest)
-        }
-        seen.add(digest)
-        const controller = new AbortController()
-        const task = describeAttachmentImages(blocks, config, controller.signal)
-          .then((text) => ({ text }))
-          .catch((error) => ({ error: error instanceof Error ? error.message : String(error) }))
-        // 同会话已有未消费的识图任务（连发多图）→ 中止旧的，只保留最新
-        const previous = pendingDescriptions.get(sessionKey)
-        if (previous) previous.controller.abort()
-        if (pendingDescriptions.size >= 32 && !pendingDescriptions.has(sessionKey)) {
-          const oldestKey = pendingDescriptions.keys().next().value
-          const stale = pendingDescriptions.get(oldestKey)
-          if (stale) stale.controller.abort()
-          pendingDescriptions.delete(oldestKey)
-        }
-        pendingDescriptions.set(sessionKey, { task, controller, hasText })
-        if (config.debug) ctx.logger?.info?.(`[visionpower] auto-describe staged: session=${sessionKey} images=${blocks.length} hasText=${hasText}`)
-      } catch (error) {
-        ctx.logger?.warn?.('[visionpower] auto-describe hook failed: %o', error)
-      }
-    }, { global: true })
-  }
-
-  // ─────────────────────────────────────────────────────────────────────────
-  // pre-step: inject staged auto-descriptions, then the locating rules unless
-  // already present (e.g. ~/.dsh/AGENTS.md workspace instructions).
-  // ─────────────────────────────────────────────────────────────────────────
-  ctx.on('agent/pre-step', async ({ agent, step, signal }, next) => {
+  ctx.on('agent/pre-step', async (input, next) => {
     const decision = await next()
-    if (decision?.kind !== 'enter' || step !== 1) return decision
+    if (decision?.kind !== 'enter' || input?.step !== 1) return decision
 
     // 组合失败绝不能破坏 agent 回合——出错时降级为原样返回 decision
     try {
-      const additions = []
-      // 消费键与 staging 键（session.id）同值：实测 agent.sessionId 为
-      // undefined、真字段是 agent.id（dsh 0.1.0-rc.6），两者都兜到 'default'。
-      const sessionKey = agent?.id ?? agent?.sessionId ?? 'default'
-      const pending = pendingDescriptions.get(sessionKey)
-      if (pending) {
-        pendingDescriptions.delete(sessionKey)
-        try {
-          // 等待上限默认 15s（autoDescribeWaitMs 可调）：成功注入描述可让 agent
-          // 一步作答；超时则立即退回规则链路，不再让回合长时间无反馈地干等。
-          const capMs = Math.min(
-            Number(config.autoDescribeWaitMs) || 15000,
-            Math.max(Number(config.timeoutMs) || 60000, 1000),
-          )
-          let timer
-          const timeout = new Promise((resolve) => { timer = setTimeout(() => resolve({ timeout: true }), capMs) })
-          // 若 signal 已中止，监听器永远不会触发——必须先判 aborted
-          const aborted = signal.aborted
-            ? Promise.resolve({ aborted: true })
-            : new Promise((resolve) => signal.addEventListener('abort', () => resolve({ aborted: true }), { once: true }))
-          let result
-          try {
-            result = await Promise.race([pending.task, timeout, aborted])
-          } finally {
-            clearTimeout(timer)
-          }
-          if (result?.text) {
-            const lead = pending.hasText
-              ? '[VisionPower 自动识图] 用户消息附带图片，自动识图结果：\n'
-              : '[VisionPower 自动识图] 用户只发了一张图片、没有附带文字。自动识图结果如下——请直接把图片内容总结告诉用户，不要反问用户想做什么：\n'
-            if (config.debug) ctx.logger?.info?.(`[visionpower] auto-describe injected into session=${sessionKey}`)
-            additions.push(createUserMessage({
-              content: [{ type: 'text', text: lead + result.text }],
-              source: { kind: 'plugin', plugin: 'visionpower' },
-            }))
-          } else if (result?.error) {
-            const lead = pending.hasText
-              ? '用户消息附带图片，但自动识图失败：'
-              : '用户只发了一张图片、没有附带文字，自动识图失败：'
-            additions.push(createUserMessage({
-              content: [{ type: 'text', text: `[VisionPower 自动识图] ${lead}${result.error}。请按下面的识图规则定位图片并调用 describe_image，把内容总结直接告诉用户。\n\n${RULES_TEXT}` }],
-              source: { kind: 'plugin', plugin: 'visionpower' },
-            }))
-          } else if (result?.timeout) {
-            const lead = pending.hasText
-              ? '图片描述生成超时'
-              : '用户只发了一张图片、没有附带文字，图片描述生成超时'
-            additions.push(createUserMessage({
-              content: [{ type: 'text', text: `[VisionPower 自动识图] ${lead}（>${Math.round(capMs / 1000)}s）。请按下面的识图规则定位图片并调用 describe_image，把内容总结直接告诉用户。\n\n${RULES_TEXT}` }],
-              source: { kind: 'plugin', plugin: 'visionpower' },
-            }))
-          }
-          // result.aborted → 回合已被取消，不注入任何内容
-        } catch (error) {
-          ctx.logger?.warn?.('[visionpower] auto-describe injection failed: %o', error)
-        } finally {
-          pending.controller.abort()
-        }
-      }
-
-      // 本轮已注入识图结果时规则是冗余的（agent 无需再定位图片）；失败/超时
-      // 路径已把规则并入同一条兜底消息——保证每轮至多一条 VisionPower 注入。
-      if (additions.length === 0 && config.injectRules !== false && !rulesAlreadyPresent(decision.messages) && !userGlobalAgentsHasRules()) {
-        additions.push(createUserMessage({
+      if (config.injectRules !== false && !rulesAlreadyPresent(decision.messages) && !userGlobalAgentsHasRules()) {
+        const rules = createUserMessage({
           content: [{ type: 'text', text: RULES_TEXT }],
           source: { kind: 'plugin', plugin: 'visionpower' },
-        }))
+        })
+        return { ...decision, messages: [...decision.messages, rules] }
       }
-
-      if (additions.length === 0) return decision
-      return { ...decision, messages: [...decision.messages, ...additions] }
+      return decision
     } catch (error) {
       ctx.logger?.warn?.('[visionpower] pre-step composition failed: %o', error)
       return decision

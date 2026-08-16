@@ -303,10 +303,9 @@ Common flags:
 - **After a dsh upgrade / npx reinstall**: the official image rejection returns with the new sources — re-run the same command and the patch is re-applied automatically.
 - **After adding or swapping text-only models in dsh**: nothing to do — the patch admits image messages **model-agnostically**, so new models are covered automatically; re-running simply re-verifies the pipeline (this supersedes the old `curl … patch-dsh.mjs && node …` flow).
 
-After installation the plugin adds two **zero-effort** behaviours (both configurable):
+After installation: `describe_image` is a **plain tool** the agent calls during its normal tool-calling phase (visible progress in the dsh UI, one vision call per image, and the start of a turn is never blocked by vision work). The plugin adds one **zero-effort** behaviour (configurable):
 
-- **Rules injection** (`injectRules`, default on): the canonical image-locating rules are injected into the agent context on the first step of every turn; skipped automatically if identical rules are already present (e.g. written to `~/.dsh/AGENTS.md`).
-- **Auto-describe** (`autoDescribe`, default on): when a user message carries image blocks (drag-and-drop or paste - same pipeline), the plugin reads the attachment bytes, runs the vision core, and injects a **concise summary** (≤150 chars) into the turn - **the user never has to mention the image, or even type anything at all**. Waits at most 15s by default (`autoDescribeWaitMs`), then falls back to the rules route; when the description lands, the rules are skipped for that turn - at most one VisionPower message per turn.
+- **Rules injection** (`injectRules`, default on): the canonical image-locating rules are injected into the agent context on the first step of every turn; skipped automatically if identical rules are already present (e.g. written to `~/.dsh/AGENTS.md`). Dragged or pasted images are located and described through them - the user never has to mention the image, or even type anything at all.
 
 Turn either off via the plugin `config` block:
 
@@ -316,7 +315,6 @@ Turn either off via the plugin `config` block:
       name: 'visionpower/dsh'
       config:
         timeoutMs: 120000
-        autoDescribe: false   # default true
         injectRules: false    # default true
 ```
 
