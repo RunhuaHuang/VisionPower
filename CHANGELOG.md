@@ -1,5 +1,23 @@
 # Changelog
 
+## 2.9.2 — 2026-08-16
+
+- Fixed auto-describe still not firing in the web host: session events are
+  dispatched with a per-session carrier as `thisArg`, and the carrier's
+  scope filter dropped the plugin's non-global listener (the headless host
+  has no such filter, which is why the earlier probe passed). The
+  `session/event` listener is now registered with `{ global: true }`.
+- Image-only messages no longer bounce back as "what do you want me to
+  do?": on a text-only route the dropped image leaves the turn with no
+  user-visible input at all, and the model mistook the injected
+  instructions for the user's message. The auto-describe injection now
+  carries a positive instruction for textless sends ("summarize the image
+  content directly, do not ask back"), the error/timeout fallback notices
+  tell the agent to describe it to the user, and the injected rules'
+  empty-message guidance changed from a prohibition ("don't reply 'got
+  nothing'") to an action ("locate the image, describe it, tell the
+  user").
+
 ## 2.9.1 — 2026-08-16
 
 - Fixed auto-describe never firing: the plugin staged vision runs from the

@@ -141,6 +141,19 @@ function imageBlocksOfSplice(splice) {
   return blocks
 }
 
+// 纯图片消息（无文字）在文本线路上整轮都看不到用户输入，模型容易把注入的
+// 规则/上下文当成「用户消息」并反问要干嘛——注入文案需要给出正向动作指令。
+function spliceHasText(splice) {
+  for (const message of splice?.inserted ?? []) {
+    const content = message?.content
+    if (!Array.isArray(content)) continue
+    for (const block of content) {
+      if (block?.type === 'text' && typeof block.text === 'string' && block.text.trim()) return true
+    }
+  }
+  return false
+}
+
 function textOf(message) {
   const content = message?.content
   if (typeof message?.text === 'string') return message.text
@@ -235,11 +248,15 @@ export function apply(ctx, config) {
     // splice 事件（agent/inbox/spliced）在回合开始前携带相同的 image 块，
     // 在此刻起跑识图才能赶上 step 1 的注入。removed 类 splice（无 inserted
     // 图片）自然被 blocks.length === 0 过滤。
+    // global 标志（实测结论）：web 宿主里会话事件以 per-session carrier 为
+    // thisArg 派发，非 global 监听会被 carrier 的作用域过滤器剔除——headless
+    // 宿主无此过滤，首次验证时容易漏判；必须 global 才能在两个宿主都收到。
     ctx.on('session/event', (session, event) => {
       try {
         if (event?.type !== 'agent/inbox/spliced') return
         const blocks = imageBlocksOfSplice(event.data)
         if (blocks.length === 0) return
+        const hasText = spliceHasText(event.data)
         const digest = blocks.map((b) => b.attachment.attachmentId).join('|')
         const sessionKey = session?.id ?? 'default'
         // 会话键上限：长驻进程下防止旧会话的 Set 无限累积
@@ -271,11 +288,11 @@ export function apply(ctx, config) {
           if (stale) stale.controller.abort()
           pendingDescriptions.delete(oldestKey)
         }
-        pendingDescriptions.set(sessionKey, { task, controller })
+        pendingDescriptions.set(sessionKey, { task, controller, hasText })
       } catch (error) {
         ctx.logger?.warn?.('[visionpower] auto-describe hook failed: %o', error)
       }
-    })
+    }, { global: true })
   }
 
   // ─────────────────────────────────────────────────────────────────────────
@@ -310,18 +327,27 @@ export function apply(ctx, config) {
             clearTimeout(timer)
           }
           if (result?.text) {
+            const lead = pending.hasText
+              ? '[VisionPower 自动识图] 用户消息附带图片，自动识图结果：\n'
+              : '[VisionPower 自动识图] 用户只发了一张图片、没有附带文字。自动识图结果如下——请直接把图片内容总结告诉用户，不要反问用户想做什么：\n'
             additions.push(createUserMessage({
-              content: [{ type: 'text', text: `[VisionPower 自动识图] 用户消息附带图片，自动识图结果：\n${result.text}` }],
+              content: [{ type: 'text', text: lead + result.text }],
               source: { kind: 'plugin', plugin: 'visionpower' },
             }))
           } else if (result?.error) {
+            const lead = pending.hasText
+              ? '用户消息附带图片，但自动识图失败：'
+              : '用户只发了一张图片、没有附带文字，自动识图失败：'
             additions.push(createUserMessage({
-              content: [{ type: 'text', text: `[VisionPower 自动识图] 用户消息附带图片，但自动识图失败：${result.error}。需要时请按规则手动调用 describe_image 定位并识别。` }],
+              content: [{ type: 'text', text: `[VisionPower 自动识图] ${lead}${result.error}。请按识图规则定位图片并调用 describe_image，把内容总结直接告诉用户。` }],
               source: { kind: 'plugin', plugin: 'visionpower' },
             }))
           } else if (result?.timeout) {
+            const lead = pending.hasText
+              ? '图片描述生成超时'
+              : '用户只发了一张图片、没有附带文字，图片描述生成超时'
             additions.push(createUserMessage({
-              content: [{ type: 'text', text: `[VisionPower 自动识图] 图片描述生成超时（>${Math.round(capMs / 1000)}s），需要时请按规则手动调用 describe_image 定位并识别。` }],
+              content: [{ type: 'text', text: `[VisionPower 自动识图] ${lead}（>${Math.round(capMs / 1000)}s）。请按识图规则定位图片并调用 describe_image，把内容总结直接告诉用户。` }],
               source: { kind: 'plugin', plugin: 'visionpower' },
             }))
           }
