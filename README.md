@@ -302,8 +302,14 @@ npx -y visionpower@latest setup-dsh --launch
 | `--check` | 只验证现状（插件/cordis/补丁/API key），不改任何东西 |
 | `--profile <name>` | 目标 profile（默认 `web`） |
 | `--plugin-source <spec>` | 插件源（默认 `github:RunhuaHuang/visionpower`；国内网络可用 `visionpower` 走 npm 源；本地开发用 `file:~/visionpower`） |
+| `--console` | 强制启动配置控制台（默认仅在尚未配置 API key 时启动；复跑场景不会多起进程） |
 | `--no-console` | 跳过启动配置控制台 |
 | `--wait-secs <n>` | 等待用户完成控制台配置的最长秒数（默认 180） |
+
+**一条通吃，随时可重跑**（所有步骤幂等，已就位的自动跳过，已配置时也不再拉起控制台）：
+
+- **dsh 升级 / npx 重装后**：官方的图片拒绝逻辑随源码回来——重跑同一条命令自动重打补丁；
+- **在 dsh 里新增/更换了纯文本模型**：不需要任何操作，补丁按**模型无关**方式放行图片消息，新模型自动被覆盖；重跑一遍可顺便验证链路完好（等效并取代旧的 `curl … patch-dsh.mjs && node …` 打法）。
 
 流程：① 装插件（优先 `dsh plugin --profile web add`，失败兜底 pnpm，pnpm 缺失自动 `corepack enable`）→ ② 挂载 `cordis.patch.yml` → ③ 打补丁 + 状态追踪（记录 dsh 版本与文件哈希到 `~/.dsh/.visionpower-state.json`；dsh 升级 / npx 重装后补丁失效，**重跑本命令自动重打**）→ ④ 启动 VisionPower 配置控制台（`http://127.0.0.1:17900`，首次需选视觉模型 + 填 API Key）→ ⑤ 验证（补丁 / cordis / API key 缺一即停）→ ⑥ `--launch` 时启动 dsh web。
 

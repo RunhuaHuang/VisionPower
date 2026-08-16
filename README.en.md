@@ -294,8 +294,14 @@ Common flags:
 | `--check` | Verify the current state only (plugin / cordis / patch / API key), change nothing |
 | `--profile <name>` | Target profile (default `web`) |
 | `--plugin-source <spec>` | Plugin source (default `github:RunhuaHuang/visionpower`; `visionpower` for the npm registry; `file:~/visionpower` for local development) |
+| `--console` | Force-start the config console (by default it only starts when no API key is configured yet; re-runs spawn no extra process) |
 | `--no-console` | Skip starting the config console |
 | `--wait-secs <n>` | Max seconds to wait for console configuration (default 180) |
+
+**One command for everything, safe to re-run at any time** (every step is idempotent — finished steps are skipped, and no console process is spawned once configured):
+
+- **After a dsh upgrade / npx reinstall**: the official image rejection returns with the new sources — re-run the same command and the patch is re-applied automatically.
+- **After adding or swapping text-only models in dsh**: nothing to do — the patch admits image messages **model-agnostically**, so new models are covered automatically; re-running simply re-verifies the pipeline (this supersedes the old `curl … patch-dsh.mjs && node …` flow).
 
 After installation the plugin adds two **zero-effort** behaviours (both configurable):
 

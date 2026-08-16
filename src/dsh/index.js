@@ -289,6 +289,7 @@ export function apply(ctx, config) {
           pendingDescriptions.delete(oldestKey)
         }
         pendingDescriptions.set(sessionKey, { task, controller, hasText })
+        if (config.debug) ctx.logger?.info?.(`[visionpower] auto-describe staged: session=${sessionKey} images=${blocks.length} hasText=${hasText}`)
       } catch (error) {
         ctx.logger?.warn?.('[visionpower] auto-describe hook failed: %o', error)
       }
@@ -306,9 +307,12 @@ export function apply(ctx, config) {
     // 组合失败绝不能破坏 agent 回合——出错时降级为原样返回 decision
     try {
       const additions = []
-      const pending = pendingDescriptions.get(agent?.sessionId ?? 'default')
+      // 消费键与 staging 键（session.id）同值：实测 agent.sessionId 为
+      // undefined、真字段是 agent.id（dsh 0.1.0-rc.6），两者都兜到 'default'。
+      const sessionKey = agent?.id ?? agent?.sessionId ?? 'default'
+      const pending = pendingDescriptions.get(sessionKey)
       if (pending) {
-        pendingDescriptions.delete(agent?.sessionId ?? 'default')
+        pendingDescriptions.delete(sessionKey)
         try {
           // Cap the wait so a slow vision provider cannot stall the agent turn;
           // on abort/timeout the rules fallback still lets the agent find the
@@ -330,6 +334,7 @@ export function apply(ctx, config) {
             const lead = pending.hasText
               ? '[VisionPower 自动识图] 用户消息附带图片，自动识图结果：\n'
               : '[VisionPower 自动识图] 用户只发了一张图片、没有附带文字。自动识图结果如下——请直接把图片内容总结告诉用户，不要反问用户想做什么：\n'
+            if (config.debug) ctx.logger?.info?.(`[visionpower] auto-describe injected into session=${sessionKey}`)
             additions.push(createUserMessage({
               content: [{ type: 'text', text: lead + result.text }],
               source: { kind: 'plugin', plugin: 'visionpower' },

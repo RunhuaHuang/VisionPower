@@ -387,7 +387,7 @@ async function loadRulesText() {
 // ⑤ VisionPower 配置控制台
 // ─────────────────────────────────────────────────────────────────────────────
 
-async function ensureConsole(profile, noConsole, waitSecs) {
+async function ensureConsole(profile, noConsole, waitSecs, forceConsole) {
   if (noConsole) {
     if (!visionConfigHasKey()) warn('跳过控制台启动；但 ~/.visionpower/config.json 尚无 API key，识图会失败')
     return { status: 'skipped' }
@@ -396,6 +396,10 @@ async function ensureConsole(profile, noConsole, waitSecs) {
   if (await portListening(PORT)) {
     log(`VisionPower 配置控制台已在运行 http://127.0.0.1:${PORT}，跳过启动`)
     if (!visionConfigHasKey()) warn('控制台在运行但 ~/.visionpower/config.json 尚无 API key')
+  } else if (visionConfigHasKey() && !forceConsole) {
+    // 复跑场景（如新增/更换模型后重跑）：配置已就绪就不再拉起常驻进程；
+    // 需要调整视觉模型/API Key 时用 --console 强制启动。
+    log('VisionPower 已配置（~/.visionpower/config.json 含 API key），跳过启动配置控制台（如需调整视觉模型/API Key，加 --console 强制启动）')
   } else {
     // 用 node 直接跑包内 src/index.js，避免平台相关的 .bin shim（visionpower(.cmd/.ps1)）；
     // node 是真实可执行文件，不加 shell（避免路径含空格时被 shell 拆分）
@@ -471,6 +475,7 @@ const USAGE = `VisionPower setup-dsh v${PKG_VERSION} —— 一键安装/配置 
   --check             只验证现状（插件/cordis/补丁/API key），不改任何东西
   --profile <name>    目标 profile（默认 web）
   --plugin-source <spec>  插件源（默认 github:RunhuaHuang/visionpower）
+  --console           强制启动 VisionPower 配置控制台（默认仅在尚未配置 API key 时启动）
   --no-console        跳过启动 VisionPower 配置控制台
   --wait-secs <n>     等待用户完成控制台配置的最长秒数（默认 180）
   --help, -h          显示本帮助
@@ -483,7 +488,7 @@ const USAGE = `VisionPower setup-dsh v${PKG_VERSION} —— 一键安装/配置 
 
 function parseArgs(argv) {
   const parsed = {
-    launch: false, writeAgents: false, check: false, noConsole: false, help: false,
+    launch: false, writeAgents: false, check: false, noConsole: false, forceConsole: false, help: false,
     profile: 'web', pluginSource: DEFAULT_PLUGIN_SOURCE, waitSecs: 180,
   }
   for (let i = 0; i < argv.length; i++) {
@@ -491,6 +496,7 @@ function parseArgs(argv) {
     if (a === '--launch') parsed.launch = true
     else if (a === '--write-agents') parsed.writeAgents = true
     else if (a === '--check') parsed.check = true
+    else if (a === '--console') parsed.forceConsole = true
     else if (a === '--no-console') parsed.noConsole = true
     else if (a === '--help' || a === '-h') parsed.help = true
     else if (a === '--profile') { parsed.profile = argv[++i]; if (!parsed.profile) throw new Error('--profile 需要一个值') }
@@ -565,7 +571,7 @@ export async function main(argv = process.argv.slice(2)) {
   }
 
   log(`── ⑤ VisionPower 配置控制台 ──`)
-  await ensureConsole(args.profile, args.noConsole, args.waitSecs)
+  await ensureConsole(args.profile, args.noConsole, args.waitSecs, args.forceConsole)
 
   log(`── ⑥ 验证 ──`)
   const pluginVersion = installedPluginVersion(profileDir(args.profile))
@@ -590,7 +596,7 @@ export async function main(argv = process.argv.slice(2)) {
     warn('本次安装更新了插件/补丁。若 dsh web 已在运行，需重启才生效：Ctrl+C 停掉后重新执行 npm exec @deepseek-ai/dsh web')
   }
 
-  log('完成。拖图/粘贴图片后，插件会自动识图并注入描述；dsh 升级后重跑本脚本即可自动重打补丁。')
+  log('完成。拖图/粘贴图片后，插件会自动识图并注入描述。这条命令随时可重跑（幂等，已就位的步骤自动跳过）：dsh 升级/重装后重跑会自动重打补丁；在 dsh 里新增/更换纯文本模型不需要任何操作——补丁按模型无关方式放行图片消息，新模型自动被覆盖，重跑一遍可顺便验证链路完好。')
 }
 
 const directPath = fileURLToPath(import.meta.url)

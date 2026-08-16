@@ -1,5 +1,22 @@
 # Changelog
 
+## 2.9.3 — 2026-08-16
+
+- Fixed the last auto-describe link: staged descriptions were keyed by
+  `session.id` but consumed under `agent.sessionId`, which is `undefined`
+  in dsh 0.1.0-rc.6 (the real field is `agent.id`) — so the pending task
+  was never found and nothing was ever injected, even after the listener
+  fixes. Consumption now uses `agent.id ?? agent.sessionId ?? 'default'`,
+  and staging/injection emit debug log lines when `debug: true`.
+- setup-dsh is now a genuinely one-command-fits-all re-run: with an API
+  key already configured it no longer spawns the config console (new
+  `--console` flag forces it for vision-model changes), and the closing
+  summary states the model story explicitly — the image-accept patch is
+  model-agnostic, so newly added or swapped text-only models in dsh need
+  nothing and are covered automatically; re-running the same command
+  re-verifies the pipeline (superseding the old
+  `curl … patch-dsh.mjs && node …` flow).
+
 ## 2.9.2 — 2026-08-16
 
 - Fixed auto-describe still not firing in the web host: session events are
