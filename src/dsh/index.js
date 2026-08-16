@@ -15,11 +15,12 @@
 //     injected into the agent context via `agent/pre-step`, unless the same
 //     rules are already present (e.g. loaded from ~/.dsh/AGENTS.md).
 //
-//  2. Auto-describe (config `autoDescribe`, default true): when a user message
-//     carries image blocks, the plugin reads the attachment bytes via the
+//  2. Auto-describe (config `autoDescribe`, default true): when the session
+//     inbox splices in image blocks (drag-and-drop or paste — the event fires
+//     before the turn starts), the plugin reads the attachment bytes via the
 //     `attachments` service, runs the vision core, and injects the description
-//     into the next `agent/pre-step` — the user never has to mention the image
-//     or ask the agent to find it.
+//     into the turn's first `agent/pre-step` — the user never has to mention
+//     the image or ask the agent to find it.
 //
 // cordis.patch.yml row:
 //
@@ -126,10 +127,18 @@ function resolveConfig(overrides) {
   return base
 }
 
-function imageBlocksOf(message) {
-  const content = message?.content
-  if (!Array.isArray(content)) return []
-  return content.filter((b) => b?.type === 'image' && b?.attachment?.attachmentId)
+// 图片块来自 inbox 的 splice 事件：payload.data.inserted[] 是消息数组，
+// 每条消息的 content[] 里带 image 块（与 user/message 事件里的同一对象）。
+function imageBlocksOfSplice(splice) {
+  const blocks = []
+  for (const message of splice?.inserted ?? []) {
+    const content = message?.content
+    if (!Array.isArray(content)) continue
+    for (const block of content) {
+      if (block?.type === 'image' && block?.attachment?.attachmentId) blocks.push(block)
+    }
+  }
+  return blocks
 }
 
 function textOf(message) {
@@ -221,10 +230,15 @@ export function apply(ctx, config) {
   }
 
   if (config.autoDescribe !== false) {
+    // 事件选择（实测结论，dsh 0.1.0-rc.6）：user/message 事件在 step 1 的
+    // pre-step **之后**才落到会话日志，那时本回合的注入窗口已过；inbox 的
+    // splice 事件（agent/inbox/spliced）在回合开始前携带相同的 image 块，
+    // 在此刻起跑识图才能赶上 step 1 的注入。removed 类 splice（无 inserted
+    // 图片）自然被 blocks.length === 0 过滤。
     ctx.on('session/event', (session, event) => {
       try {
-        if (event?.type !== 'user/message') return
-        const blocks = imageBlocksOf(event.data)
+        if (event?.type !== 'agent/inbox/spliced') return
+        const blocks = imageBlocksOfSplice(event.data)
         if (blocks.length === 0) return
         const digest = blocks.map((b) => b.attachment.attachmentId).join('|')
         const sessionKey = session?.id ?? 'default'

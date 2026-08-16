@@ -1,5 +1,17 @@
 # Changelog
 
+## 2.9.1 — 2026-08-16
+
+- Fixed auto-describe never firing: the plugin staged vision runs from the
+  `user/message` session event, but that event only lands in the session
+  log **after** the turn's first `agent/pre-step` has already run — the
+  only injection point — so no description was ever injected (images were
+  still handled via the injected-rules fallback, at the cost of extra
+  agent steps). Staging now listens to `agent/inbox/spliced`, which
+  carries the same image blocks before the turn starts, letting the
+  vision call race the turn and the description reach step 1. Verified
+  against dsh 0.1.0-rc.6 by probing both hosts' event ordering.
+
 ## 2.9.0 — 2026-08-16
 
 - Added `visionpower setup-dsh` (also `node scripts/setup-dsh.mjs`): a
