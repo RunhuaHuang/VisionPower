@@ -147,23 +147,6 @@ function turnMentionsImages(messages) {
   return false
 }
 
-// 路由模态检测：当前模型明确支持图片输入（多模态）时不注入规则——模型直接看图，
-// 无需磁盘定位流程。任何检测失败（服务缺失/解析异常/inputModalities 未声明）都
-// 返回 false（视为需要规则）：规则自身的第 0 步也会让多模态模型直接看图作答，
-// 误注入只是轻微冗余，漏注入才会让纯文本路由的图片无人处理。
-function routeAcceptsImages(agent) {
-  try {
-    const llm = agent?.ctx?.get?.('llm')
-    const { provider, model } = agent?.options ?? {}
-    if (!llm?.resolveModelInfo || !provider || !model) return Promise.resolve(false)
-    return Promise.resolve(llm.resolveModelInfo(provider, model))
-      .then((info) => Array.isArray(info?.inputModalities) && info.inputModalities.includes('image'))
-      .catch(() => false)
-  } catch {
-    return Promise.resolve(false)
-  }
-}
-
 function rulesAlreadyPresent(messages) {
   for (const message of messages) {
     const text = textOf(message)
@@ -232,11 +215,10 @@ export function apply(ctx, config) {
 
     // 组合失败绝不能破坏 agent 回合——出错时降级为原样返回 decision
     try {
-      const needsRules = config.injectRules !== false
+      if (config.injectRules !== false
         && turnMentionsImages(decision.messages)
         && !rulesAlreadyPresent(decision.messages)
-        && !userGlobalAgentsHasRules()
-      if (needsRules && !(await routeAcceptsImages(input?.agent))) {
+        && !userGlobalAgentsHasRules()) {
         const rules = createUserMessage({
           content: [{ type: 'text', text: RULES_TEXT }],
           source: { kind: 'plugin', plugin: 'visionpower' },

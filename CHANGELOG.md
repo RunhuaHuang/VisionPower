@@ -1,5 +1,17 @@
 # Changelog
 
+## 2.9.10 - 2026-08-16
+
+- Removed the multimodal-route detection introduced in 2.9.9: rules now
+  inject on every image-relevant turn regardless of the route's model.
+  A live session exposed that `agent.options` (provider/model) is
+  captured when the agent is created and is NOT updated when the user
+  switches models mid-session - so after switching from a multimodal to
+  a text-only model the stale check kept skipping injection and the
+  image went unhandled. Always injecting is strictly safer; the rules'
+  own step 0 already steers genuinely multimodal models to answer
+  directly from the image, so the cost is mild redundancy at most.
+
 ## 2.9.9 - 2026-08-16
 
 - Rules injection is now scoped to where it matters. It fires only on

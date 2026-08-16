@@ -47,7 +47,7 @@ dsh plugin --profile web add file:/path/to/VisionPower
 「把图片**拖进**或**粘贴**（Cmd/Ctrl+V）进会话」在纯文本模型路由下能识图，靠三件套配合（一键安装器 `setup-dsh` 会全部就位）：
 
 1. **插件本体**：`describe_image` 就是一个**普通工具**——agent 在正常工具调用阶段按需调用，dsh 界面有可见进度，每张图一次视觉调用，回合开始绝不被识图阻塞。外加一项零操作能力（`config` 可关）：
-   - **规则注入**（`injectRules`，默认开）：把「图片定位与识图规则」（`src/dsh/rules.js`，单一来源）注入 agent 上下文——**只在图片相关回合注入**（消息带图 / 文本提到图 / 纯图片空文本），且**当前路由是多模态模型时自动跳过**（模型直接看图，无需定位流程；检测失败一律回退为注入）。上下文或 `~/.dsh/AGENTS.md` 已有相同规则时也跳过。规则教会 agent 定位拖拽/粘贴图片对应的内容寻址附件文件并调用 `describe_image`。
+   - **规则注入**（`injectRules`，默认开，运维可在 cordis 配置里关）：把「图片定位与识图规则」（`src/dsh/rules.js`，单一来源）注入 agent 上下文——**只在图片相关回合注入**（消息带图 / 文本提到图 / 纯图片空文本），纯文本回合零打扰。上下文或 `~/.dsh/AGENTS.md` 已有相同规则时也跳过。规则教会 agent 定位拖拽/粘贴图片对应的内容寻址附件文件并调用 `describe_image`；规则第 0 步会让真多模态的模型直接看图作答，因此多模态路由误注入也无害。
 2. **服务端补丁**（`scripts/patch-dsh.mjs`）：移除 dsh 对纯文本模型路由的图片消息拒绝（否则拖图/粘贴在服务端就被 `Model does not support image input` 拦下）。幂等；dsh 升级/重装后重跑 `setup-dsh` 自动重打。
 3. **识图规则**（`src/dsh/rules.js`）：默认走插件运行时注入（Route A，不写用户文件）；`setup-dsh --write-agents` 可改为追加进 `~/.dsh/AGENTS.md`（Route B，规则可见可编辑）。两条通道读同一模块，文本永不漂移。
 
