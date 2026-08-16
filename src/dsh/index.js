@@ -132,6 +132,38 @@ function textOf(message) {
   return content.map((b) => (b?.type === 'text' ? b.text : '')).join('\n')
 }
 
+// 规则只在图片相关回合注入：消息带 image 块、用户文本提到图/截图/照片/screenshot、
+// 或用户文本为空（纯图片消息在文本线路上就长这样）。纯文本回合不注入，避免每轮
+// 一份 ~1.5KB 的规则在会话历史里线性累积。
+function turnMentionsImages(messages) {
+  for (const message of messages) {
+    if (message?.source?.kind !== 'user') continue
+    const content = message?.content
+    if (Array.isArray(content) && content.some((b) => b?.type === 'image')) return true
+    const text = textOf(message)
+    if (!text.trim()) return true
+    if (/图|图片|截图|照片|screenshot|image/i.test(text)) return true
+  }
+  return false
+}
+
+// 路由模态检测：当前模型明确支持图片输入（多模态）时不注入规则——模型直接看图，
+// 无需磁盘定位流程。任何检测失败（服务缺失/解析异常/inputModalities 未声明）都
+// 返回 false（视为需要规则）：规则自身的第 0 步也会让多模态模型直接看图作答，
+// 误注入只是轻微冗余，漏注入才会让纯文本路由的图片无人处理。
+function routeAcceptsImages(agent) {
+  try {
+    const llm = agent?.ctx?.get?.('llm')
+    const { provider, model } = agent?.options ?? {}
+    if (!llm?.resolveModelInfo || !provider || !model) return Promise.resolve(false)
+    return Promise.resolve(llm.resolveModelInfo(provider, model))
+      .then((info) => Array.isArray(info?.inputModalities) && info.inputModalities.includes('image'))
+      .catch(() => false)
+  } catch {
+    return Promise.resolve(false)
+  }
+}
+
 function rulesAlreadyPresent(messages) {
   for (const message of messages) {
     const text = textOf(message)
@@ -200,7 +232,11 @@ export function apply(ctx, config) {
 
     // 组合失败绝不能破坏 agent 回合——出错时降级为原样返回 decision
     try {
-      if (config.injectRules !== false && !rulesAlreadyPresent(decision.messages) && !userGlobalAgentsHasRules()) {
+      const needsRules = config.injectRules !== false
+        && turnMentionsImages(decision.messages)
+        && !rulesAlreadyPresent(decision.messages)
+        && !userGlobalAgentsHasRules()
+      if (needsRules && !(await routeAcceptsImages(input?.agent))) {
         const rules = createUserMessage({
           content: [{ type: 'text', text: RULES_TEXT }],
           source: { kind: 'plugin', plugin: 'visionpower' },

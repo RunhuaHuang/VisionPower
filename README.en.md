@@ -305,7 +305,7 @@ Common flags:
 
 After installation: `describe_image` is a **plain tool** the agent calls during its normal tool-calling phase (visible progress in the dsh UI, one vision call per image, and the start of a turn is never blocked by vision work). The plugin adds one **zero-effort** behaviour (configurable):
 
-- **Rules injection** (`injectRules`, default on): the canonical image-locating rules are injected into the agent context on the first step of every turn; skipped automatically if identical rules are already present (e.g. written to `~/.dsh/AGENTS.md`). Dragged or pasted images are located and described through them - the user never has to mention the image, or even type anything at all.
+- **Rules injection** (`injectRules`, default on): the canonical image-locating rules are injected only on image-relevant turns (message carries an image, text mentions one, or an empty text-only image send), and are **skipped automatically when the current route runs a multimodal model** (the model sees images natively - zero interference with the native pipeline; any detection failure falls back to injecting). Dragged or pasted images are located and described through them - the user never has to mention the image, or even type anything at all.
 
 Turn either off via the plugin `config` block:
 

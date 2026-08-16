@@ -1,5 +1,21 @@
 # Changelog
 
+## 2.9.9 - 2026-08-16
+
+- Rules injection is now scoped to where it matters. It fires only on
+  image-relevant turns (a message carries image blocks, the user text
+  mentions 图/截图/照片/screenshot/image, or the user text is empty -
+  the pure-image shape), instead of every turn, so ~1.5KB of rules no
+  longer accumulate into the history of purely textual conversations.
+- When the current route runs a multimodal model, the rules are skipped
+  entirely: the agent's provider/model is read from `agent.options` and
+  modality resolved via the dsh `llm` service's `resolveModelInfo`; an
+  `inputModalities` containing "image" means the model sees images
+  natively and needs no locating pipeline. Any detection failure
+  (missing service, unknown model, undeclared modalities) conservatively
+  falls back to injecting - the rules' own step 0 already steers
+  multimodal models to answer directly from the image.
+
 ## 2.9.8 - 2026-08-16
 
 - Prompt-only fixes after another live round. The rules now open with a
