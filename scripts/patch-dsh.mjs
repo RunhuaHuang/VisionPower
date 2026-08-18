@@ -21,6 +21,23 @@ import path from 'node:path';
 
 const T = (n) => '\t'.repeat(n);
 
+function patchedPiStream(replayBlock = '') {
+  const lines = [
+    "const containsImage = options.messages.some((message) => contentHasImage(message.content));",
+    'const supportsImage = model.input.includes("image");',
+    "const messages = containsImage && !supportsImage",
+    "? options.messages.map((message) => ({ ...message, content: withoutImages(message.content) }))",
+    ": options.messages;",
+    "const attachments = containsImage && supportsImage ? this.config.resolveAttachments?.() : void 0;",
+    'if (containsImage && supportsImage && attachments === void 0) throw new LlmError("pi-ai image input requires the durable attachment service", "UNSUPPORTED_CONTENT");',
+  ].map((line, i) => (i === 3 || i === 4 ? T(5) : T(4)) + line)
+  if (replayBlock) lines.push(replayBlock)
+  lines.push(T(4) + (replayBlock
+    ? 'const context = attachments === void 0 ? toPiContext({ ...options, messages }, void 0, onReplayDegrade) : await toPiContext({ ...options, messages }, attachments, onReplayDegrade);'
+    : 'const context = attachments === void 0 ? toPiContext({ ...options, messages }) : await toPiContext({ ...options, messages }, attachments);'))
+  return lines.join('\n')
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // 补丁定义：每个补丁针对一个包内的 .js 文件。
 //   already(source)  已打过补丁的判据（幂等跳过）
@@ -101,19 +118,14 @@ const patches = [
     pkg: 'dsh-llm-pi-ai',
     already: (s) => /const supportsImage = model\.input\.includes\("image"\);/.test(s),
     anchor: (s) => /pi-ai model .*does not support image input/.test(s),
-    apply: (s) => s.replace(
-      /const containsImage = options\.messages\.some\(\(message\) => contentHasImage\(message\.content\)\);\n[ \t]*if \(containsImage && !model\.input\.includes\("image"\)\) throw new LlmError\([\s\S]*?UNSUPPORTED_CONTENT"\);\n[ \t]*const attachments = containsImage \? this\.config\.resolveAttachments\?\.\(\) : void 0;\n[ \t]*if \(containsImage && attachments === void 0\) throw new LlmError\("pi-ai image input requires the durable attachment service", "UNSUPPORTED_CONTENT"\);\n[ \t]*const context = attachments === void 0 \? toPiContext\(options\) : await toPiContext\(options, attachments\);/,
-      [
-        "const containsImage = options.messages.some((message) => contentHasImage(message.content));",
-        'const supportsImage = model.input.includes("image");',
-        "const messages = containsImage && !supportsImage",
-        "? options.messages.map((message) => ({ ...message, content: withoutImages(message.content) }))",
-        ": options.messages;",
-        "const attachments = containsImage && supportsImage ? this.config.resolveAttachments?.() : void 0;",
-        'if (containsImage && supportsImage && attachments === void 0) throw new LlmError("pi-ai image input requires the durable attachment service", "UNSUPPORTED_CONTENT");',
-        "const context = attachments === void 0 ? toPiContext({ ...options, messages }) : await toPiContext({ ...options, messages }, attachments);"
-      ].map((line, i) => (i === 3 || i === 4 ? T(4) + T(1) : T(4)) + line).join('\n')
-    )
+    apply: (s) => {
+      const common = /const containsImage = options\.messages\.some\(\(message\) => contentHasImage\(message\.content\)\);\n[ \t]*if \(containsImage && !model\.input\.includes\("image"\)\) throw new LlmError\([\s\S]*?UNSUPPORTED_CONTENT"\);\n[ \t]*const attachments = containsImage \? this\.config\.resolveAttachments\?\.\(\) : void 0;\n[ \t]*if \(containsImage && attachments === void 0\) throw new LlmError\("pi-ai image input requires the durable attachment service", "UNSUPPORTED_CONTENT"\);\n/
+      const rc7 = new RegExp(common.source + '([ \\t]*const onReplayDegrade = \\(reason\\) => \\{\\n[\\s\\S]*?\\n[ \\t]*\\};)\\n[ \\t]*const context = attachments === void 0 \\? toPiContext\\(options, void 0, onReplayDegrade\\) : await toPiContext\\(options, attachments, onReplayDegrade\\);')
+      const withRc7 = s.replace(rc7, (_match, replayBlock) => patchedPiStream(replayBlock))
+      if (withRc7 !== s) return withRc7
+      const rc6 = new RegExp(common.source + '[ \\t]*const context = attachments === void 0 \\? toPiContext\\(options\\) : await toPiContext\\(options, attachments\\);')
+      return s.replace(rc6, () => patchedPiStream())
+    }
   }
 ];
 
@@ -251,6 +263,20 @@ function selfTest() {
     T(4) + 'if (containsImage && attachments === void 0) throw new LlmError("pi-ai image input requires the durable attachment service", "UNSUPPORTED_CONTENT");',
     T(4) + 'const context = attachments === void 0 ? toPiContext(options) : await toPiContext(options, attachments);'
   ].join('\n');
+  const S5rc7 = [
+    T(4) + 'const containsImage = options.messages.some((message) => contentHasImage(message.content));',
+    T(4) + 'if (containsImage && !model.input.includes("image")) throw new LlmError(`pi-ai model "${model.id}" does not support image input`, "UNSUPPORTED_CONTENT");',
+    T(4) + 'const attachments = containsImage ? this.config.resolveAttachments?.() : void 0;',
+    T(4) + 'if (containsImage && attachments === void 0) throw new LlmError("pi-ai image input requires the durable attachment service", "UNSUPPORTED_CONTENT");',
+    T(4) + 'const onReplayDegrade = (reason) => {',
+    T(5) + 'this.config.onReplayDegrade?.({',
+    T(6) + 'provider: options.provider,',
+    T(6) + 'model: options.model,',
+    T(6) + 'reason',
+    T(5) + '});',
+    T(4) + '};',
+    T(4) + 'const context = attachments === void 0 ? toPiContext(options, void 0, onReplayDegrade) : await toPiContext(options, attachments, onReplayDegrade);'
+  ].join('\n');
 
   const cases = [
     { id: 'apiproxy: prompt 提交处理器图片拒绝', before: S1, mustHave: 'Image content is admitted regardless', mustNotHave: 'MODEL_DOES_NOT_SUPPORT_IMAGES' },
@@ -259,7 +285,8 @@ function selfTest() {
     { id: 'apiproxy: selectModel 处理器图片拒绝', before: S2b, mustHave: 'Model selection is admitted regardless', mustNotHave: 'does not accept image input' },
     { id: 'deepseek 适配器 assertTextOnly', before: S3, mustHave: 'no-op', mustNotHave: 'does not support image content' },
     { id: 'pi-ai 辅助函数 withoutImages', before: S4, mustHave: 'function withoutImages(content)', mustNotHave: '' },
-    { id: 'pi-ai stream() 非多模态不拒绝', before: S5, mustHave: 'const supportsImage', mustNotHave: 'does not support image input' }
+    { id: 'pi-ai stream() 非多模态不拒绝', before: S5, mustHave: 'const supportsImage', mustNotHave: 'does not support image input' },
+    { id: 'pi-ai stream() 非多模态不拒绝', before: S5rc7, mustHave: 'onReplayDegrade', mustNotHave: 'does not support image input' }
   ];
   let failed = 0;
   for (const c of cases) {
@@ -298,10 +325,10 @@ function main() {
   let applied = 0, alreadyOk = 0, structureFail = 0, touched = [];
   for (const root of roots) {
     console.log(`\n== 安装位置: ${root}`);
-    // 版本戳：打印该安装的 dsh 版本，便于对照补丁适用性（补丁按 0.1.0-rc.6 结构编写）
+    // 版本戳：打印该安装的 dsh 版本，便于对照补丁适用性。
     try {
       const dshPkg = JSON.parse(fs.readFileSync(path.join(root, '@deepseek-ai', 'dsh', 'package.json'), 'utf8'));
-      console.log(`   dsh 版本: ${dshPkg.version}（补丁按 0.1.0-rc.6 结构编写，版本差异较大时请升级本脚本）`);
+      console.log(`   dsh 版本: ${dshPkg.version}（补丁覆盖 0.1.0-rc.6 / rc.7，版本差异较大时请升级本脚本）`);
     } catch { /* 无 dsh 主包则跳过 */ }
     for (const p of patches) {
       const files = pkgJsFiles(root, p.pkg);

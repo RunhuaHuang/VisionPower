@@ -9,6 +9,9 @@ export const WEBUI_HTML = `<!DOCTYPE html>
 <script>
 (function(){
   try {
+    if (new URLSearchParams(location.search).get('embed') === 'dsh') {
+      document.documentElement.dataset.embed = 'dsh';
+    }
     var theme = localStorage.getItem('vp-theme') || 'dark';
     document.documentElement.setAttribute('data-theme', theme);
   } catch(e) { document.documentElement.setAttribute('data-theme','dark'); }
@@ -74,6 +77,7 @@ export const WEBUI_HTML = `<!DOCTYPE html>
   --font-mono:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,monospace;
 }
 *{box-sizing:border-box;margin:0;padding:0}
+[x-cloak]{display:none!important}
 html,body{
   background:var(--surface-0);
   color:var(--text-primary);
@@ -92,6 +96,10 @@ body::before{
   opacity:var(--grid-opacity);
   mask-image:radial-gradient(ellipse at top,#000 0%,transparent 75%);
 }
+[data-embed="dsh"] body::before{display:none}
+[data-embed="dsh"] .wrap{max-width:none;padding:var(--space-md)}
+[data-embed="dsh"] header{display:none}
+[data-embed="dsh"] .card{box-shadow:none}
 .mono{font-family:var(--font-mono);font-feature-settings:"ss01","ss02"}
 .wrap{max-width:1000px;margin:0 auto;padding:var(--space-xl) var(--space-md) var(--space-xl)}
 .label{font-family:var(--font-mono);font-size:var(--fs-mono-xs);font-weight:500;
@@ -215,8 +223,16 @@ code-block{display:block;background:var(--code-bg);color:var(--code-text);font-f
         <h2 class="card-title" x-text="i18n[lang].credentialsTitle"></h2>
         <div style="display:flex;align-items:center;gap:var(--space-sm)">
           <span class="label" x-text="i18n[lang].statusLabel"></span>
-          <span class="badge" :class="status.ready ? 'badge-ready' : 'badge-not-ready'" x-text="status.ready ? i18n[lang].statusLive : i18n[lang].statusUnconfigured"></span>
+          <span class="badge" :class="status.ready && (!isDshEmbed || status.dshEnabled) ? 'badge-ready' : 'badge-not-ready'" x-text="isDshEmbed && !status.dshEnabled ? i18n[lang].statusDisabled : (status.ready ? i18n[lang].statusLive : i18n[lang].statusUnconfigured)"></span>
         </div>
+      </div>
+
+      <div class="toggle-group" x-cloak x-show="isDshEmbed" style="margin-bottom:var(--space-lg);border-color:var(--signal)">
+        <div>
+          <div class="label" style="color:var(--text-primary)" x-text="i18n[lang].enabledTitle"></div>
+          <div style="font-size:var(--fs-mono-xs);color:var(--text-muted);line-height:1.5" x-text="i18n[lang].enabledDesc"></div>
+        </div>
+        <input type="checkbox" x-model="config.dshEnabled" @change="saveDshEnabled()" :disabled="dshToggleSaving" :aria-label="i18n[lang].enabledTitle" style="width:auto;cursor:pointer" />
       </div>
 
       <div class="grid-2">
@@ -263,6 +279,10 @@ code-block{display:block;background:var(--code-bg);color:var(--code-text);font-f
           :value="currentPreset?.welfare ? i18n[lang].welfareBaseUrlMasked : config.baseUrl"
           @input="config.baseUrl = $event.target.value" />
         <div class="mono" style="font-size:var(--fs-mono-xs);color:var(--text-muted);margin-top:var(--space-xs)" x-show="config.presetId === 'custom'" x-text="i18n[lang].baseUrlHint"></div>
+        <label x-show="config.presetId === 'custom'" style="display:flex;gap:8px;align-items:center;margin-top:var(--space-sm);font-family:var(--font-mono);font-size:var(--fs-mono-xs);color:var(--danger)">
+          <input type="checkbox" x-model="config.allowInsecureHttp" />
+          <span x-text="i18n[lang].allowInsecureHttpLabel"></span>
+        </label>
       </div>
 
       <div style="border-top:1px solid var(--line);margin-top:var(--space-lg);padding-top:var(--space-md)">
@@ -328,6 +348,10 @@ code-block{display:block;background:var(--code-bg);color:var(--code-text);font-f
             <label class="label" x-text="i18n[lang].maxRetriesLabel"></label>
             <input type="number" min="0" x-model.number="config.maxRetries" />
           </div>
+          <div class="form-group">
+            <label class="label" x-text="i18n[lang].maxProviderSubmissionsLabel"></label>
+            <input type="number" min="1" max="10" x-model.number="config.maxProviderSubmissions" />
+          </div>
         </div>
 
         <div class="toggle-group">
@@ -359,7 +383,7 @@ code-block{display:block;background:var(--code-bg);color:var(--code-text);font-f
       </div>
 
       <div class="config-actions">
-        <span class="mono" style="font-size:var(--fs-mono-xs);color:var(--text-muted)" x-text="i18n[lang].configPathLabel + status.configPath"></span>
+        <span class="mono" style="font-size:var(--fs-mono-xs);color:var(--text-muted)" x-text="i18n[lang].autoSaveHint"></span>
         <div class="config-actions-buttons">
           <button class="btn" style="background:var(--surface-3);color:var(--text-primary);border:1px solid var(--line)" @click="testConnection()" :disabled="testingConnection || saving">
             <span x-text="testingConnection ? i18n[lang].testingConnBtn : i18n[lang].testConnBtn"></span>
@@ -399,6 +423,7 @@ code-block{display:block;background:var(--code-bg);color:var(--code-text);font-f
           <div class="form-group">
             <label class="label" x-text="i18n[lang].urlLabel"></label>
             <input type="text" x-model="playground.imageUrl" :placeholder="i18n[lang].urlPlaceholder" @input="onUrlInput()" />
+            <div x-show="playground.imageUrl" class="mono" style="font-size:var(--fs-mono-xs);color:var(--text-muted);margin-top:var(--space-xs)" x-text="i18n[lang].urlPreviewDisabled"></div>
           </div>
 
           <div class="form-group">
@@ -495,6 +520,7 @@ function removeLocalPreference(key) {
 
 function consoleApp() {
   return {
+    isDshEmbed: new URLSearchParams(window.location.search).get('embed') === 'dsh',
     lang: readLocalPreference('vp-lang', 'zh'),
     activeTab: 'config',
     theme: 'dark',
@@ -506,9 +532,11 @@ function consoleApp() {
     // turn the mask into the persisted credential).
     loadedApiKeyMask: '',
     saving: false,
+    dshToggleSaving: false,
     testingConnection: false,
     presets: [],
     config: {
+      dshEnabled: true,
       presetId: 'qwen3-vl-flash|https://dashscope.aliyuncs.com/compatible-mode/v1',
       model: 'qwen3-vl-flash',
       baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
@@ -523,12 +551,13 @@ function consoleApp() {
       maxTokens: 4096,
         maxImages: 8,
         maxRetries: 2,
+        maxProviderSubmissions: 3,
         inboxTtlMs: 1800000,
         inboxMaxEntries: 64,
       debug: false,
       cache: { enabled: true, maxEntries: 32, ttlMs: 1800000 }
     },
-    status: { ready: false, configPath: '' },
+    status: { dshEnabled: true, ready: false, configPath: '' },
     
     // Playground states
     dragOver: false,
@@ -560,6 +589,9 @@ function consoleApp() {
         statusLabel: '状态:',
         statusLive: '运行中',
         statusUnconfigured: '待配置',
+        statusDisabled: '已关闭',
+        enabledTitle: '启用 dsh 中的 VisionPower',
+        enabledDesc: '仅控制DeepSeek Harness中的Visionpower是否开启，其它Agent下通过MCP/Skills调用不受此按钮影响。',
         presetLabel: '模型预设',
         presetCustom: '自定义模型预设',
         modelIdLabel: '模型 ID',
@@ -575,8 +607,9 @@ function consoleApp() {
         baseUrlLabel: '请求网址 (Base URL)',
         baseUrlPlaceholder: 'https://api.example.com/v1',
         baseUrlPlaceholderAnthropic: 'https://api.anthropic.com',
-        welfareBaseUrlMasked: '（内置福利渠道，地址已隐藏 · 用户不需要进行修改）',
+        welfareBaseUrlMasked: 'https://api.prismaistudio.xyz:663/v1（第三方福利渠道）',
         baseUrlHint: 'OpenAI 协议需包含 API 版本路径（如 /v1）；Anthropic 协议可直接写裸 URL即可。路径后的 /chat/completions 或 /messages 会自动追加。',
+        allowInsecureHttpLabel: '允许向非本机 HTTP 端点明文发送 API Key 与图片（仅限可信开发网络）',
         advancedTitle: '高级配置',
         allowedDirsLabel: '允许访问的本地目录 (以逗号分隔)',
         allowedDirsPlaceholder: '例如: /path/to/project, /another/path',
@@ -590,6 +623,7 @@ function consoleApp() {
         maxTokensLabel: '最大输出 Token 数 (Max Tokens)',
         maxImagesLabel: '单次最大分析图片数',
         maxRetriesLabel: '失败自动重试次数',
+        maxProviderSubmissionsLabel: '单次分析最多上游提交次数',
         inboxTtlLabel: '图片 Inbox 有效期 TTL (毫秒)',
         inboxMaxLabel: '图片 Inbox 最大条目数',
         inboxMaxBytesLabel: '图片 Inbox 总存储上限 (Bytes)',
@@ -600,20 +634,23 @@ function consoleApp() {
         cacheDesc: '对完全相同的图像和提示词请求做结果缓存：常驻进程走内存，短生命周期进程（如 Skill 脚本）共享磁盘镜像目录（默认 ~/.visionpower/cache，owner-only 权限），受 TTL 与条目上限约束。',
         cacheMaxLabel: '缓存最大条目数',
         cacheTtlLabel: '缓存有效期 TTL (毫秒)',
-        configPathLabel: '配置文件路径: ',
+        autoSaveHint: '点击保存后自动应用，无需手动编辑配置文件。',
         commitBtn: '▸ 保存并应用配置',
         committingBtn: '正在提交...',
         testConnBtn: '⚡ 测试视觉连接',
         testingConnBtn: '测试中...',
         testSuccessMsg: '视觉连接测试成功！模型回复："',
         testFailMsg: '视觉连接测试失败：',
+        dshEnabledOn: 'dsh 中的 VisionPower 已开启。',
+        dshEnabledOff: 'dsh 中的 VisionPower 已关闭。',
         
         // Playground
         playgroundTitle: '信号测试工作台 // SIGNAL PLAYGROUND',
         fileLabel: '图片来源文件',
         dropzonePlaceholder: '拖拽图片到这里，或点击选择图片\\n(支持 JPG, PNG, WEBP, GIF, BMP, TIFF)',
         previewUnavailable: '此格式无法在浏览器中预览，但仍可提交给模型分析。',
-        configSaved: '配置已成功保存！',
+        urlPreviewDisabled: '远程 URL 不会由浏览器直连预览；点击分析后由 VisionPower 安全下载。',
+        configSaved: '配置已保存并应用！',
         fileNotImage: '文件必须是图片',
         fileTooLarge: '图片超过当前配置的单图大小上限',
         fileReadFailed: '无法读取所选图片',
@@ -654,6 +691,9 @@ function consoleApp() {
         statusLabel: 'STATUS:',
         statusLive: 'LIVE',
         statusUnconfigured: 'UNCONFIGURED',
+        statusDisabled: 'DISABLED',
+        enabledTitle: 'Enable VisionPower in dsh',
+        enabledDesc: 'Only controls whether VisionPower is enabled in DeepSeek Harness. Calls from other agents through MCP or Skills are not affected by this switch.',
         presetLabel: 'Model Preset',
         presetCustom: 'Custom Model Preset',
         modelIdLabel: 'Model ID',
@@ -669,8 +709,9 @@ function consoleApp() {
         baseUrlLabel: 'Base URL (OpenAI-compatible Endpoint)',
         baseUrlPlaceholder: 'https://api.example.com/v1',
         baseUrlPlaceholderAnthropic: 'https://api.anthropic.com',
-        welfareBaseUrlMasked: '(built-in welfare channel · endpoint hidden, provided privately by the author)',
+        welfareBaseUrlMasked: 'https://api.prismaistudio.xyz:663/v1 (third-party welfare gateway)',
         baseUrlHint: 'OpenAI-compatible endpoints require the API version path (usually /v1). For Anthropic, enter the bare URL and VisionPower auto-fills /v1. /chat/completions or /messages is appended automatically.',
+        allowInsecureHttpLabel: 'Allow cleartext API keys and images to a non-loopback HTTP endpoint (trusted development networks only)',
         advancedTitle: 'ADVANCED CONFIGURATION',
         allowedDirsLabel: 'Allowed Local Directories (comma-separated)',
         allowedDirsPlaceholder: 'e.g. /path/to/project, /another/path',
@@ -684,6 +725,7 @@ function consoleApp() {
         maxTokensLabel: 'Max Tokens',
         maxImagesLabel: 'Max Images',
         maxRetriesLabel: 'Max Retries',
+        maxProviderSubmissionsLabel: 'Max Provider Submissions per Analysis',
         inboxTtlLabel: 'Image Inbox TTL (ms)',
         inboxMaxLabel: 'Image Inbox Max Entries',
         inboxMaxBytesLabel: 'Image Inbox Total Storage Limit (bytes)',
@@ -694,20 +736,23 @@ function consoleApp() {
         cacheDesc: 'Caches results for identical image+prompt requests: long-lived processes use memory, short-lived processes (e.g. Skill runs) share an on-disk mirror (default ~/.visionpower/cache, owner-only files) bounded by the TTL and entry limits.',
         cacheMaxLabel: 'Cache Max Entries',
         cacheTtlLabel: 'Cache TTL (ms)',
-        configPathLabel: 'Config path: ',
+        autoSaveHint: 'Saving applies the configuration automatically; no manual file editing is required.',
         commitBtn: '▸ COMMIT CONFIG',
         committingBtn: 'COMMITTING...',
         testConnBtn: '⚡ TEST VISION CONNECTION',
         testingConnBtn: 'TESTING...',
         testSuccessMsg: 'Visual connection verified! Model response: "',
         testFailMsg: 'Visual connection failed: ',
+        dshEnabledOn: 'VisionPower is now enabled in dsh.',
+        dshEnabledOff: 'VisionPower is now disabled in dsh.',
         
         // Playground
         playgroundTitle: 'SIGNAL PLAYGROUND // TESTING WORKSTATION',
         fileLabel: 'Image Source File',
         dropzonePlaceholder: 'Drag & Drop Image or Click to Select\\n(JPG, PNG, WEBP, GIF, BMP, TIFF)',
         previewUnavailable: 'This format cannot be previewed by the browser, but can still be sent to the model.',
-        configSaved: 'Configuration committed successfully!',
+        urlPreviewDisabled: 'Remote URLs are not previewed by the browser; VisionPower downloads them safely after you click Analyze.',
+        configSaved: 'Configuration saved and applied!',
         fileNotImage: 'File must be an image',
         fileTooLarge: 'Image exceeds the configured per-image size limit',
         fileReadFailed: 'Could not read the selected image',
@@ -745,6 +790,9 @@ function consoleApp() {
     },
 
     async init() {
+      // Complete the parent/iframe identity handshake before any API loading;
+      // a slow provider preset or inbox read must not look like a port conflict.
+      this.notifyEmbedParent();
       // Load current theme
       this.theme = readLocalPreference('vp-theme', 'dark');
       // v2.0.0-v2.0.2 stored provider keys in localStorage. Remove that legacy
@@ -759,6 +807,22 @@ function consoleApp() {
       await this.loadStatus();
       await this.loadInbox();
       await this.fetchExport();
+    },
+
+    notifyEmbedParent() {
+      if (window.parent === window) return;
+      const query = new URLSearchParams(window.location.search);
+      if (query.get('embed') !== 'dsh') return;
+      try {
+        const target = new URL(query.get('parentOrigin') || '');
+        if (target.protocol !== 'http:' || !['127.0.0.1', 'localhost'].includes(target.hostname)) return;
+        window.parent.postMessage({
+          type: 'visionpower:webui-ready',
+          product: 'visionpower',
+          protocolVersion: 1,
+          version: '__VISIONPOWER_VERSION__',
+        }, target.origin);
+      } catch {}
     },
 
     toggleTheme() {
@@ -796,10 +860,12 @@ function consoleApp() {
         const resolvedPresetId = matched ? (matched.model + '|' + matched.baseUrl) : 'custom';
 
         this.config = {
+          dshEnabled: data.dshEnabled !== false,
           presetId: resolvedPresetId,
           model: storedModel,
           baseUrl: data.baseUrl || '',
           protocol: data.protocol || 'openai',
+          allowInsecureHttp: !!data.allowInsecureHttp,
           apiKey: data.apiKey || '',
           apiKeyConfigured: !!data.apiKeyConfigured,
           allowedDirs: dirsStr,
@@ -810,6 +876,7 @@ function consoleApp() {
           maxTokens: data.maxTokens !== undefined ? data.maxTokens : 4096,
           maxImages: data.maxImages !== undefined ? data.maxImages : 8,
           maxRetries: data.maxRetries !== undefined ? data.maxRetries : 2,
+          maxProviderSubmissions: data.maxProviderSubmissions !== undefined ? data.maxProviderSubmissions : 3,
           inboxTtlMs: data.inboxTtlMs !== undefined ? data.inboxTtlMs : 1800000,
           inboxMaxEntries: data.inboxMaxEntries !== undefined ? data.inboxMaxEntries : 64,
           inboxMaxBytes: data.inboxMaxBytes !== undefined ? data.inboxMaxBytes : 67108864,
@@ -886,12 +953,46 @@ function consoleApp() {
       }, 5000);
     },
 
+    async saveDshEnabled() {
+      if (!this.isDshEmbed || this.dshToggleSaving) return;
+      const requested = !!this.config.dshEnabled;
+      this.dshToggleSaving = true;
+      try {
+        const res = await fetch('/api/config/dsh-enabled', {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ dshEnabled: requested })
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error || 'Failed to update the dsh switch');
+
+        const applied = data.dshEnabled !== false;
+        this.config.dshEnabled = applied;
+        this.status = { ...this.status, dshEnabled: applied };
+        this.showAlert(
+          applied ? this.i18n[this.lang].dshEnabledOn : this.i18n[this.lang].dshEnabledOff,
+          'success'
+        );
+      } catch (err) {
+        // Reconcile only the switch/status. Do not call loadConfig(): doing so
+        // would discard unrelated unsaved model/API-key edits in the form.
+        await this.loadStatus();
+        this.config.dshEnabled = this.status.dshEnabled !== false;
+        this.showAlert(err.message, 'error');
+      } finally {
+        this.dshToggleSaving = false;
+      }
+    },
+
     async saveConfig() {
       this.saving = true;
       try {
         // Exclude the UI-only presetId field — it is not a valid config key
         // and must never be persisted to config.json.
           const { presetId, apiKeyConfigured, ...configFields } = this.config;
+          // The dsh lifecycle switch has an immediate dedicated PATCH route.
+          // Never include a possibly stale switch snapshot in the full save.
+          delete configFields.dshEnabled;
           const payload = {
             ...configFields,
             // The mask returned by GET /api/config is display-only. Send an
@@ -933,6 +1034,7 @@ function consoleApp() {
           baseUrl: this.config.baseUrl,
           model: this.config.model,
           protocol: this.config.protocol,
+          allowInsecureHttp: this.config.allowInsecureHttp,
           testVision: true,
           // An empty field can mean either "use the key from env/config" or
           // "the user intentionally cleared it". Carry the UI state so the
@@ -1024,7 +1126,9 @@ function consoleApp() {
 
     onUrlInput() {
       if (this.playground.imageUrl) {
-        this.imagePreview = this.playground.imageUrl;
+        // Never assign an arbitrary URL to <img src>: that would bypass the
+        // server's SSRF checks and expose the browser/network environment.
+        this.imagePreview = '';
         this.imageName = 'Image URL';
         this.playground.imageBytes = '';
         this.playground.imageMimeType = '';

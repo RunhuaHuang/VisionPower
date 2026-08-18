@@ -3,6 +3,7 @@
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { createRequire } from 'node:module'
+import { pathToFileURL } from 'node:url'
 import { loadVisionConfig, getConfigFilePath } from './config.js'
 import { describeImage } from './vision-core.js'
 import { toolInputSchemaShape } from './schema.js'
@@ -120,17 +121,17 @@ function parseArgs(argv) {
   return parsed
 }
 
-async function main() {
+export async function main(argv = process.argv.slice(2)) {
   // setup-dsh 子命令：完整的一键安装流程，参数由其自身解析
-  if (process.argv[2] === 'setup-dsh') {
+  if (argv[0] === 'setup-dsh') {
     const { main: runSetupDsh } = await import('../scripts/setup-dsh.mjs')
-    await runSetupDsh(process.argv.slice(3))
+    await runSetupDsh(argv.slice(1))
     return
   }
 
   let args
   try {
-    args = parseArgs(process.argv.slice(2))
+    args = parseArgs(argv)
   } catch (error) {
     process.stderr.write(`[visionpower] ${error.message}\n`)
     process.exitCode = 1
@@ -170,7 +171,9 @@ async function main() {
   await server.connect(transport)
 }
 
-main().catch((error) => {
-  console.error('VisionPower server error:', error)
-  process.exit(1)
-})
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+  main().catch((error) => {
+    console.error('VisionPower server error:', error)
+    process.exitCode = 1
+  })
+}

@@ -1,5 +1,5 @@
 import { realpathSync, constants as fsConstants } from 'node:fs'
-import { lstat, mkdir, open, readFile, readdir, realpath, rename, stat, unlink, utimes, writeFile } from 'node:fs/promises'
+import { lstat, mkdir, open, readdir, realpath, rename, stat, unlink, utimes, writeFile } from 'node:fs/promises'
 import { createHash } from 'node:crypto'
 import { lookup } from 'node:dns/promises'
 import { BlockList, isIP } from 'node:net'
@@ -8,11 +8,14 @@ import { request as httpsRequest } from 'node:https'
 import { extname, isAbsolute, join, resolve, sep } from 'node:path'
 import { resolveModelCapabilities, ensureAnthropicVersionPath } from './config.js'
 import { readStagedImage } from './image-inbox.js'
+import { safeReadFile } from './safe-fs.js'
 
 const VISION_RETRYABLE_STATUS = new Set([429, 500, 502, 503, 504])
 const MAX_PROMPT_CHARS = 20_000
 const MAX_RESPONSE_BODY_BYTES = 5 * 1024 * 1024
 const MAX_CACHE_VALUE_BYTES = 1024 * 1024
+const MAX_DISK_CACHE_FILE_BYTES = MAX_CACHE_VALUE_BYTES + 16 * 1024
+const CACHE_SCHEMA_VERSION = 2
 const MAX_RETRY_AFTER_MS = 30 * 1000
 const MAX_REMOTE_IMAGE_REDIRECTS = 3
 const BASE64_WRAP_LINE_CHARS = 64
@@ -173,8 +176,16 @@ function providerError(message) {
 // One streamed completion being aggregated. Both wire protocols (OpenAI
 // compatible chat completions and Anthropic Messages) use SSE `data:` framing;
 // only the delta shapes differ, so a single line processor serves both.
-function createSseAccumulator() {
-  return { parts: [], sawReasoning: false, totalChars: 0, done: false }
+function createSseAccumulator(protocol = 'openai') {
+  return {
+    protocol,
+    parts: [],
+    sawReasoning: false,
+    totalChars: 0,
+    done: false,
+    sawFinishReason: false,
+    eventIndex: 0,
+  }
 }
 
 function streamEventErrorMessage(event) {
@@ -207,8 +218,11 @@ function feedSseLine(state, line) {
   try {
     event = JSON.parse(payload)
   } catch {
-    return
+    const error = new Error(`Vision model returned malformed SSE data at event ${state.eventIndex + 1}`)
+    error.code = 'VISION_INCOMPLETE_STREAM'
+    throw error
   }
+  state.eventIndex += 1
   const upstreamMessage = streamEventErrorMessage(event)
   if (upstreamMessage) throw providerError(`Vision model API error: ${upstreamMessage}`)
 
@@ -226,6 +240,9 @@ function feedSseLine(state, line) {
         ? delta.content.map((part) => (typeof part?.text === 'string' ? part.text : '')).join('')
         : '')
   }
+  if (event.choices?.some?.((choice) => choice?.finish_reason !== undefined && choice.finish_reason !== null)) {
+    state.sawFinishReason = true
+  }
   // Anthropic Messages: content_block_delta with text_delta / thinking_delta
   if (event.type === 'content_block_delta') {
     if (event.delta?.type === 'text_delta' && typeof event.delta?.text === 'string') {
@@ -234,9 +251,20 @@ function feedSseLine(state, line) {
       state.sawReasoning = true
     }
   }
+  if (event.type === 'message_stop') state.done = true
 }
 
 function finishSse(state) {
+  // OpenAI-compatible providers do not all emit the optional `[DONE]`
+  // sentinel. A final choice carrying a non-null finish_reason is also an
+  // authoritative terminal event; MiniMax, for example, closes the stream
+  // after `finish_reason: "stop"`. Keep rejecting streams that end with
+  // neither signal so genuinely truncated output is never returned/cached.
+  if (!state.done && !state.sawFinishReason) {
+    const error = new Error('Vision model stream ended before its terminal event')
+    error.code = 'VISION_INCOMPLETE_STREAM'
+    throw error
+  }
   return {
     text: stripLeadingReasoningBlock(state.parts.join('')).trim(),
     sawReasoning: state.sawReasoning,
@@ -246,10 +274,10 @@ function finishSse(state) {
 // Streams are read incrementally so the first-byte watchdog can be disarmed as
 // soon as the provider starts answering and a stalled upstream is detected
 // long before the overall request timeout would fire.
-async function readSseCompletion(response, onFirstByte) {
+async function readSseCompletion(response, onFirstByte, protocol) {
   const reader = response.body.getReader()
   const decoder = new TextDecoder()
-  const state = createSseAccumulator()
+  const state = createSseAccumulator(protocol)
   let buffer = ''
   let firstByte = true
   let totalBytes = 0
@@ -295,8 +323,8 @@ async function readSseCompletion(response, onFirstByte) {
   return finishSse(state)
 }
 
-function completionFromSseText(bodyText) {
-  const state = createSseAccumulator()
+function completionFromSseText(bodyText, protocol) {
+  const state = createSseAccumulator(protocol)
   for (const line of bodyText.split('\n')) {
     feedSseLine(state, line.replace(/\r$/, ''))
     if (state.done) break
@@ -330,12 +358,12 @@ function completionFromResponseBody(data) {
 // stream SSE while labeling it with an unexpected content type. Parse the JSON
 // envelope first; fall back to SSE line parsing when the body only looks like
 // an event stream.
-function completionFromBodyText(bodyText) {
+function completionFromBodyText(bodyText, protocol = 'openai') {
   let data
   try {
     data = JSON.parse(bodyText)
   } catch {
-    if (looksLikeSse(bodyText)) return completionFromSseText(bodyText)
+    if (looksLikeSse(bodyText)) return completionFromSseText(bodyText, protocol)
     throw providerError('Vision model returned a non-JSON response')
   }
   if (data?.error?.message) throw providerError(`Vision model API error: ${data.error.message}`)
@@ -643,7 +671,26 @@ function assertPublicAddress(address) {
 // private answers, and the chosen address is pinned in the actual HTTP request
 // below so a DNS rebinding response cannot redirect the local process to a
 // different destination after this check.
-export async function resolvePublicImageUrl(imageUrl, lookupAddresses = lookup) {
+function waitWithSignal(promise, signal) {
+  if (!signal) return promise
+  if (signal.aborted) return Promise.reject(abortError())
+  return new Promise((resolveWait, rejectWait) => {
+    const onAbort = () => rejectWait(abortError())
+    signal.addEventListener('abort', onAbort, { once: true })
+    promise.then(
+      (value) => {
+        signal.removeEventListener('abort', onAbort)
+        resolveWait(value)
+      },
+      (error) => {
+        signal.removeEventListener('abort', onAbort)
+        rejectWait(error)
+      },
+    )
+  })
+}
+
+export async function resolvePublicImageUrl(imageUrl, lookupAddresses = lookup, signal) {
   const url = parsePublicImageUrl(imageUrl)
   if (isIP(url.hostname)) {
     assertPublicAddress({ address: url.hostname, family: isIP(url.hostname) })
@@ -652,7 +699,10 @@ export async function resolvePublicImageUrl(imageUrl, lookupAddresses = lookup) 
 
   let addresses
   try {
-    addresses = await lookupAddresses(url.hostname, { all: true, verbatim: true })
+    addresses = await waitWithSignal(
+      lookupAddresses(url.hostname, { all: true, verbatim: true }),
+      signal,
+    )
   } catch {
     throw new Error('image_url hostname could not be resolved to a public address')
   }
@@ -663,12 +713,13 @@ export async function resolvePublicImageUrl(imageUrl, lookupAddresses = lookup) 
   return { url, addresses }
 }
 
-function requestRemoteImage(url, address, timeoutMs) {
+function requestRemoteImage(url, address, timeoutMs, signal) {
   const request = url.protocol === 'https:' ? httpsRequest : httpRequest
   return new Promise((resolveRequest, rejectRequest) => {
     const req = request(url, {
       lookup: (_hostname, _options, callback) => callback(null, address.address, address.family),
-      headers: { Accept: 'image/*' },
+      headers: { Accept: 'image/*', 'Accept-Encoding': 'identity' },
+      signal,
     }, (response) => resolveRequest(response))
     req.setTimeout(timeoutMs, () => req.destroy(new Error('image_url download timed out')))
     req.once('error', rejectRequest)
@@ -676,61 +727,85 @@ function requestRemoteImage(url, address, timeoutMs) {
   })
 }
 
-async function downloadPublicImage(imageUrl, config) {
-  let nextUrl = imageUrl
-  for (let redirectCount = 0; redirectCount <= MAX_REMOTE_IMAGE_REDIRECTS; redirectCount += 1) {
-    const { url, addresses } = await resolvePublicImageUrl(nextUrl)
+async function downloadPublicImage(imageUrl, config, signal) {
+  const controller = new AbortController()
+  let timedOut = false
+  let externallyAborted = signal?.aborted ?? false
+  const timer = setTimeout(() => {
+    timedOut = true
+    controller.abort()
+  }, config.requestTimeoutMs)
+  const onExternalAbort = () => {
+    externallyAborted = true
+    controller.abort()
+  }
+  if (signal && !signal.aborted) signal.addEventListener('abort', onExternalAbort, { once: true })
+
+  try {
+    let nextUrl = imageUrl
+    for (let redirectCount = 0; redirectCount <= MAX_REMOTE_IMAGE_REDIRECTS; redirectCount += 1) {
+      const { url, addresses } = await resolvePublicImageUrl(nextUrl, lookup, controller.signal)
     // Pin a randomly selected verified address for each request. Choosing a
     // single address avoids Node re-resolving a hostname after validation;
     // every answer was checked above, so normal dual-stack hosts remain safe.
-    const address = addresses[Math.floor(Math.random() * addresses.length)]
-    const response = await requestRemoteImage(url, address, config.requestTimeoutMs)
-    const status = response.statusCode ?? 0
-    if ([301, 302, 303, 307, 308].includes(status)) {
-      const location = response.headers.location
-      response.resume()
-      if (!location) throw new Error('image_url redirect is missing a Location header')
-      if (redirectCount === MAX_REMOTE_IMAGE_REDIRECTS) {
-        throw new Error(`image_url exceeded the ${MAX_REMOTE_IMAGE_REDIRECTS}-redirect limit`)
-      }
-      try {
-        nextUrl = new URL(location, url).toString()
-      } catch {
-        throw new Error('image_url redirect location is invalid')
-      }
-      continue
-    }
-    if (status < 200 || status >= 300) {
-      response.resume()
-      throw new Error(`image_url download failed (${status})`)
-    }
-
-    const declaredLength = response.headers['content-length']
-    if (typeof declaredLength === 'string' && /^\d+$/.test(declaredLength) && Number(declaredLength) > config.maxImageBytes) {
-      response.resume()
-      throw imageTooLargeError(config, 'image_url')
-    }
-    const chunks = []
-    let totalBytes = 0
-    const data = await new Promise((resolveData, rejectData) => {
-      response.on('data', (chunk) => {
-        totalBytes += chunk.length
-        if (totalBytes > config.maxImageBytes) {
-          response.destroy()
-          rejectData(imageTooLargeError(config, 'image_url'))
-          return
+      const address = addresses[Math.floor(Math.random() * addresses.length)]
+      const response = await requestRemoteImage(url, address, config.requestTimeoutMs, controller.signal)
+      const status = response.statusCode ?? 0
+      if ([301, 302, 303, 307, 308].includes(status)) {
+        const location = response.headers.location
+        response.resume()
+        if (!location) throw new Error('image_url redirect is missing a Location header')
+        if (redirectCount === MAX_REMOTE_IMAGE_REDIRECTS) {
+          throw new Error(`image_url exceeded the ${MAX_REMOTE_IMAGE_REDIRECTS}-redirect limit`)
         }
-        chunks.push(chunk)
+        try {
+          nextUrl = new URL(location, url).toString()
+        } catch {
+          throw new Error('image_url redirect location is invalid')
+        }
+        continue
+      }
+      if (status < 200 || status >= 300) {
+        response.resume()
+        throw new Error(`image_url download failed (${status})`)
+      }
+
+      const declaredLength = response.headers['content-length']
+      if (typeof declaredLength === 'string' && /^\d+$/.test(declaredLength) && Number(declaredLength) > config.maxImageBytes) {
+        response.resume()
+        throw imageTooLargeError(config, 'image_url')
+      }
+      const chunks = []
+      let totalBytes = 0
+      const data = await new Promise((resolveData, rejectData) => {
+        response.on('data', (chunk) => {
+          totalBytes += chunk.length
+          if (totalBytes > config.maxImageBytes) {
+            response.destroy()
+            rejectData(imageTooLargeError(config, 'image_url'))
+            return
+          }
+          chunks.push(chunk)
+        })
+        response.once('end', () => resolveData(Buffer.concat(chunks, totalBytes)))
+        response.once('error', rejectData)
+        response.once('aborted', () => rejectData(new Error('image_url download was aborted')))
       })
-      response.once('end', () => resolveData(Buffer.concat(chunks, totalBytes)))
-      response.once('error', rejectData)
-      response.once('aborted', () => rejectData(new Error('image_url download was aborted')))
-    })
-    const mimeType = detectImageMimeType(data)
-    if (!mimeType) throw new Error('image_url content is not a supported raster image')
-    return { data, mimeType, byteLength: data.length }
+      const mimeType = detectImageMimeType(data)
+      if (!mimeType) throw new Error('image_url content is not a supported raster image')
+      return { data, mimeType, byteLength: data.length }
+    }
+    throw new Error('image_url redirect limit reached')
+  } catch (error) {
+    if (externallyAborted || signal?.aborted) throw abortError()
+    if (timedOut || (controller.signal.aborted && error?.name === 'AbortError')) {
+      throw new Error(`image_url download timed out after ${Math.round(config.requestTimeoutMs / 1000)}s`)
+    }
+    throw error
+  } finally {
+    clearTimeout(timer)
+    signal?.removeEventListener('abort', onExternalAbort)
   }
-  throw new Error('image_url redirect limit reached')
 }
 
 function maxEncodedBase64Chars(maxDecodedBytes) {
@@ -873,7 +948,7 @@ function assertExactlyOneImageSource(params) {
   }
 }
 
-async function imageBlockFromInput(params, config) {
+async function imageBlockFromInput(params, config, signal) {
   assertExactlyOneImageSource(params)
 
   if (params.image_path) {
@@ -903,7 +978,7 @@ async function imageBlockFromInput(params, config) {
   }
 
   if (params.image_url) {
-    const image = await downloadPublicImage(params.image_url, config)
+    const image = await downloadPublicImage(params.image_url, config, signal)
     return {
       block: {
         type: 'image_url',
@@ -1157,10 +1232,27 @@ function firstByteWatchdogMs(config) {
   return Math.min(configured, config.requestTimeoutMs)
 }
 
-async function fetchVisionCompletion(requestBody, config, signal, { stream = true } = {}) {
+function createSubmissionBudget(config) {
+  return {
+    max: Math.max(1, config.maxProviderSubmissions ?? 3),
+    used: 0,
+  }
+}
+
+function consumeSubmission(budget) {
+  if (budget.used >= budget.max) {
+    const error = new Error(`Vision model submission budget exhausted after ${budget.used} request(s)`)
+    error.code = 'VISION_SUBMISSION_BUDGET'
+    throw error
+  }
+  budget.used += 1
+}
+
+async function fetchVisionCompletion(requestBody, config, signal, { stream = true, budget } = {}) {
   const { url, headers, body } = getProviderRequestConfig(config, requestBody)
   const sendBody = stream ? { ...body, stream: true } : body
   if (signal?.aborted) throw abortError()
+  const submissionBudget = budget ?? createSubmissionBudget(config)
 
   const watchdogMs = stream ? firstByteWatchdogMs(config) : 0
   for (let attempt = 0; ; attempt += 1) {
@@ -1196,18 +1288,20 @@ async function fetchVisionCompletion(requestBody, config, signal, { stream = tru
 
     let result
     try {
+      consumeSubmission(submissionBudget)
       const response = await fetch(url, {
         method: 'POST',
         headers,
         body: JSON.stringify(sendBody),
         signal: controller.signal,
+        redirect: 'error',
       })
       const contentType = response.headers.get('content-type') ?? ''
       if (response.ok && stream && contentType.includes('text/event-stream')) {
-        return await readSseCompletion(response, disarmWatchdog)
+        return await readSseCompletion(response, disarmWatchdog, config.protocol)
       }
       const bodyText = await readResponseText(response, disarmWatchdog)
-      if (response.ok) return completionFromBodyText(bodyText)
+      if (response.ok) return completionFromBodyText(bodyText, config.protocol)
       result = {
         ok: response.ok,
         status: response.status,
@@ -1235,7 +1329,9 @@ async function fetchVisionCompletion(requestBody, config, signal, { stream = tru
       // Retrying an already oversized or otherwise deterministic provider
       // failure only repeats the same memory and bandwidth pressure. Surface
       // it directly.
-      if (error?.code === 'VISION_RESPONSE_TOO_LARGE' || error?.code === 'VISION_PROVIDER_ERROR') throw error
+      if (error?.code === 'VISION_RESPONSE_TOO_LARGE'
+        || error?.code === 'VISION_PROVIDER_ERROR'
+        || error?.code === 'VISION_SUBMISSION_BUDGET') throw error
       if (attempt < config.maxRetries) {
         const wait = retryDelayMs(attempt)
         debugLog(config, `request error: ${error?.message ?? error}; retry ${attempt + 1}/${config.maxRetries} in ${wait}ms`)
@@ -1272,6 +1368,7 @@ const resultCache = new Map()
 
 function computeCacheKey(requestBody, config) {
   const hash = createHash('sha256')
+  hash.update(`cache_schema=${CACHE_SCHEMA_VERSION}\n`)
   // Scope cached answers to the exact provider endpoint and credential. The
   // same model ID can exist behind different gateways/accounts with different
   // behavior or data boundaries, so sharing across either is incorrect.
@@ -1359,7 +1456,7 @@ function parseDiskCacheEntry(raw, key) {
   } catch {
     return null
   }
-  if (entry?.version !== 1 || entry.key !== key
+  if (entry?.version !== CACHE_SCHEMA_VERSION || entry.key !== key
     || typeof entry.value !== 'string' || !Number.isFinite(entry.expiresAt)) {
     return null
   }
@@ -1372,7 +1469,13 @@ async function readDiskResultCache(key, config) {
   const filePath = join(dir, `${key}.json`)
   let raw
   try {
-    raw = await readFile(filePath, 'utf8')
+    if (!(await isSecureCacheDir(dir))) return undefined
+    raw = (await safeReadFile(filePath, {
+      maxBytes: MAX_DISK_CACHE_FILE_BYTES,
+      requireOwnerOnly: true,
+      rejectMultipleLinks: true,
+      label: 'disk cache entry',
+    })).toString('utf8')
   } catch (error) {
     if (error?.code !== 'ENOENT') debugLog(config, `disk cache read failed: ${error?.message ?? error}`)
     return undefined
@@ -1452,7 +1555,7 @@ async function writeDiskResultCache(key, text, config) {
   if (!config.cache?.enabled || !key || !dir) return
   if (Buffer.byteLength(text, 'utf8') > MAX_CACHE_VALUE_BYTES) return
   const entry = JSON.stringify({
-    version: 1,
+    version: CACHE_SCHEMA_VERSION,
     key,
     expiresAt: Date.now() + config.cache.ttlMs,
     value: text,
@@ -1637,38 +1740,48 @@ function isUnsupportedStreamParameterError(error) {
   return parameterPattern.test(message) && unsupportedPattern.test(message)
 }
 
-async function fetchVisionCompletionCompatible(requestBody, config, signal) {
-  try {
-    return await fetchVisionCompletion(requestBody, config, signal)
-  } catch (error) {
+async function fetchVisionCompletionCompatible(requestBody, config, signal, budget = createSubmissionBudget(config)) {
+  let compatibleBody = requestBody
+  let stream = true
+  let tokenParameterSwapped = false
+  for (;;) {
+    try {
+      return await fetchVisionCompletion(compatibleBody, config, signal, { stream, budget })
+    } catch (error) {
     // Cooperative cancellation is never a compatibility problem — surface it
     // immediately instead of feeding it to a parameter fallback.
-    if (error?.name === 'AbortError') throw error
+      if (error?.name === 'AbortError') throw error
     // Dropping `stream` is not a parameter-shape conversion, so the fallback
     // below applies to both protocols. The token-parameter swap, however, is
     // specific to OpenAI-compatible providers: Anthropic Messages API only
     // accepts max_tokens, and a rejection there must not be silently converted
     // into a different parameter.
-    if (config.protocol !== 'anthropic') {
-      const compatible = requestBody.max_tokens !== undefined && isUnsupportedMaxTokensError(error)
-        ? requestWithMaxCompletionTokens(requestBody)
-        : requestBody.max_completion_tokens !== undefined && isUnsupportedMaxCompletionTokensError(error)
-          ? requestWithMaxTokens(requestBody)
-          : null
-      if (compatible) {
-        const target = compatible.max_completion_tokens === undefined ? 'max_tokens' : 'max_completion_tokens'
-        debugLog(config, `provider rejected token parameter; retrying once with ${target}`)
-        return fetchVisionCompletion(compatible, config, signal)
+      if (config.protocol !== 'anthropic' && !tokenParameterSwapped) {
+        const compatible = compatibleBody.max_tokens !== undefined && isUnsupportedMaxTokensError(error)
+          ? requestWithMaxCompletionTokens(compatibleBody)
+          : compatibleBody.max_completion_tokens !== undefined && isUnsupportedMaxCompletionTokensError(error)
+            ? requestWithMaxTokens(compatibleBody)
+            : null
+        if (compatible) {
+          const target = compatible.max_completion_tokens === undefined ? 'max_tokens' : 'max_completion_tokens'
+          debugLog(config, `provider rejected token parameter; retrying once with ${target}`)
+          compatibleBody = compatible
+          tokenParameterSwapped = true
+          continue
+        }
       }
-    }
     // A rare few OpenAI-compatible and Anthropic-compatible gateways reject
     // the standard `stream` parameter outright; retry the identical request
-    // non-streamed.
-    if (isUnsupportedStreamParameterError(error)) {
-      debugLog(config, 'provider rejected the stream parameter; retrying once without streaming')
-      return fetchVisionCompletion(requestBody, config, signal, { stream: false })
+    // non-streamed. Keep the loop so a gateway that rejects both token-field
+    // shape and streaming can apply both narrow transformations without ever
+    // resetting the shared provider-submission budget.
+      if (stream && isUnsupportedStreamParameterError(error)) {
+        debugLog(config, 'provider rejected the stream parameter; retrying once without streaming')
+        stream = false
+        continue
+      }
+      throw error
     }
-    throw error
   }
 }
 
@@ -1712,7 +1825,7 @@ export async function describeImage(params, config, signal) {
   const imageBlocks = []
   let totalImageBytes = 0
   for (const image of images) {
-    const resolved = await imageBlockFromInput(image.input, config)
+    const resolved = await imageBlockFromInput(image.input, config, signal)
     totalImageBytes += resolved.byteLength
     if (totalImageBytes > config.maxTotalImageBytes) {
       throw new Error(`Total local/Base64 image data is too large; max is ${Math.round(config.maxTotalImageBytes / 1024 / 1024)}MB`)
@@ -1747,8 +1860,9 @@ export async function describeImage(params, config, signal) {
   const startedAt = Date.now()
   debugLog(config, `requesting provider=${capabilities.provider} model=${config.model} images=${images.length} format=${structured ? 'structured' : 'text'}`)
   let completion
+  const submissionBudget = createSubmissionBudget(config)
   try {
-    completion = await fetchVisionCompletionCompatible(requestBody, config, signal)
+    completion = await fetchVisionCompletionCompatible(requestBody, config, signal, submissionBudget)
   } catch (error) {
     if (error?.name === 'AbortError') throw error
     const compatibilityRequest = isUnsupportedSystemRoleError(error)
@@ -1756,7 +1870,7 @@ export async function describeImage(params, config, signal) {
       : null
     if (!compatibilityRequest) throw error
     debugLog(config, 'provider rejected system role; retrying once with safety instruction in user content')
-    completion = await fetchVisionCompletionCompatible(compatibilityRequest, config, signal)
+    completion = await fetchVisionCompletionCompatible(compatibilityRequest, config, signal, submissionBudget)
   }
 
   if (!completion.text) {
@@ -1774,7 +1888,7 @@ export async function describeImage(params, config, signal) {
 
 const VISUAL_PROBE_IMAGE_BASE64 = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII='
 
-export async function testModelConnection(config, { testVision = true } = {}) {
+export async function testModelConnection(config, { testVision = true, signal } = {}) {
   if (!config.apiKey) {
     throw new Error('API key is not configured.')
   }
@@ -1790,14 +1904,15 @@ export async function testModelConnection(config, { testVision = true } = {}) {
       },
     ])
     let completion
+    const submissionBudget = createSubmissionBudget(config)
     try {
-      completion = await fetchVisionCompletionCompatible(requestBody, config)
+      completion = await fetchVisionCompletionCompatible(requestBody, config, signal, submissionBudget)
     } catch (error) {
       const compatibilityRequest = isUnsupportedSystemRoleError(error)
         ? requestWithoutSystemRole(requestBody)
         : null
       if (!compatibilityRequest) throw error
-      completion = await fetchVisionCompletionCompatible(compatibilityRequest, config)
+      completion = await fetchVisionCompletionCompatible(compatibilityRequest, config, signal, submissionBudget)
     }
     if (completion.text) return `Visual connection verified: ${completion.text}`
     // Hidden thinking blocks or a populated reasoning channel still prove the
@@ -1810,7 +1925,7 @@ export async function testModelConnection(config, { testVision = true } = {}) {
   const { requestBody } = buildProviderRequestBody(config, [
     { role: 'user', content: 'hi' }
   ])
-  const completion = await fetchVisionCompletionCompatible(requestBody, config)
+  const completion = await fetchVisionCompletionCompatible(requestBody, config, signal)
   if (completion.text) return completion.text
 
   // Fallback: even with a generous budget a reasoning model can still spend it

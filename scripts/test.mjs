@@ -8,12 +8,15 @@ import { fileURLToPath } from 'node:url'
 import { Script } from 'node:vm'
 import { buildSkillScript } from './build-skill.mjs'
 import { buildDshCoreBundle } from './build-dsh.mjs'
-import { DEFAULT_VISION_BASE_URL, getConfigFilePath, getInboxDir, getSkillStateFilePath, getDefaultBaseUrlForModel, loadVisionConfig, markSkillConfigNeedsSetup, markSkillConfigVerified, normalizeConfigObject, resolveModelCapabilities, saveVisionConfig, VISION_MODEL_PRESETS, resolveWelfareBaseUrl, maskWelfareBaseUrl } from '../src/config.js'
+import { DEFAULT_VISION_BASE_URL, getConfigFilePath, getInboxDir, getSkillStateFilePath, getDefaultBaseUrlForModel, loadVisionConfig, markSkillConfigNeedsSetup, markSkillConfigVerified, normalizeBaseUrl, normalizeConfigObject, resolveModelCapabilities, saveVisionConfig, VISION_MODEL_PRESETS, resolveWelfareBaseUrl, maskWelfareBaseUrl } from '../src/config.js'
 import { toolInputSchema } from '../src/schema.js'
 import { describeImage, normalizeBase64Image, parseRetryAfterMs, resolvePublicImageUrl, testModelConnection } from '../src/vision-core.js'
-import { startWebuiServer } from '../src/webui/server.js'
+import { probeWebuiServer, startOrReuseWebuiServer, startWebuiServer } from '../src/webui/server.js'
 import { WEBUI_HTML } from '../src/webui/index-html.js'
 import { deleteStagedImage, listStagedImages, readStagedImage, stageImageBuffer } from '../src/image-inbox.js'
+import { hasExplicitImageInput, latestUserImageRefs, withDshImageAttachments } from '../src/dsh/attachments.js'
+import { RULES_MARKER, RULES_TEXT, upsertVisionPowerRules } from '../src/dsh/rules.js'
+import { safeReadFile, safeReadFileSync } from '../src/safe-fs.js'
 
 const pngBytes = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])
 const jpegBytes = Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10])
@@ -33,6 +36,7 @@ const malformedBigTiffBytes = Buffer.from([
 
 function testConfig(overrides = {}) {
   return {
+    dshEnabled: true,
     apiKey: 'test-key',
     model: 'test-model',
     baseUrl: 'https://api.example.com/v1',
@@ -130,7 +134,7 @@ function assertThrowsMessage(fn, pattern) {
   })
 }
 
-function localHttpRequest(url, { method = 'GET', body, rawBody } = {}) {
+function localHttpRequest(url, { method = 'GET', body, rawBody, headers = {} } = {}) {
   const payload = rawBody ?? (body === undefined ? null : Buffer.from(JSON.stringify(body)))
   return new Promise((resolveRequest, rejectRequest) => {
     const req = httpRequest(url, {
@@ -138,6 +142,7 @@ function localHttpRequest(url, { method = 'GET', body, rawBody } = {}) {
       headers: payload ? {
         'Content-Type': 'application/json',
         'Content-Length': payload.length,
+        ...headers,
       } : undefined,
     }, (res) => {
       const chunks = []
@@ -157,12 +162,17 @@ function localHttpRequest(url, { method = 'GET', body, rawBody } = {}) {
 
 const tempDir = mkdtempSync(join(tmpdir(), 'visionpower-test-'))
 
-// Derived from the module (never spelled out here) so the tests themselves do
-// not leak the private welfare endpoint into the repository.
+// Derived from the public preset so the test follows the single source of truth.
 const welfareRealBaseUrl = VISION_MODEL_PRESETS.find((p) => p.welfare).baseUrl
 try {
+  const publicApi = await import('visionpower')
+  assert.equal(typeof publicApi.describeImage, 'function')
+  assert.equal(typeof publicApi.loadVisionConfig, 'function')
+
   const pngPath = join(tempDir, 'one.png')
   writeFileSync(pngPath, pngBytes)
+  assert.deepEqual(safeReadFileSync(pngPath, { maxBytes: 1024, label: 'test image' }), pngBytes)
+  assert.deepEqual(await safeReadFile(pngPath, { maxBytes: 1024, label: 'test image' }), pngBytes)
   const tiffPath = join(tempDir, 'one.tiff')
   writeFileSync(tiffPath, littleEndianTiffBytes)
   const tifPath = join(tempDir, 'two.tif')
@@ -176,6 +186,15 @@ try {
     image_ref: `vpimg_${'A'.repeat(32)}`,
   }))
   assert.throws(() => toolInputSchema.parse({ image_ref: '../not-an-inbox-ref' }))
+
+  await withMockFetch(async (calls) => {
+    const result = await describeImage(
+      { image_base64: gifBytes.toString('base64') },
+      testConfig({ dshEnabled: false }),
+    )
+    assert.equal(stripBanner(result), 'ok')
+    assert.equal(calls.length, 1, 'the dsh-only switch must not disable MCP/core image analysis')
+  })
 
   // --- Secure image Inbox: explicit browser upload -> opaque short-lived ref ---
   const inboxDir = join(tempDir, 'inbox')
@@ -891,6 +910,37 @@ try {
     },
   )
 
+  // Compatibility transforms compose within the same bounded loop. A gateway
+  // may reject both its token field and streaming, and should receive exactly
+  // one retry for each explicit incompatibility rather than failing midway.
+  await withSequencedFetch(
+    [
+      {
+        status: 400,
+        body: JSON.stringify({ error: { message: "Unsupported parameter: 'max_tokens'. Use 'max_completion_tokens' instead." } }),
+      },
+      {
+        status: 400,
+        body: JSON.stringify({ error: { message: "Unsupported parameter: 'stream'." } }),
+      },
+      { status: 200, body: JSON.stringify({ choices: [{ message: { content: 'combined-fallback-ok' } }] }) },
+    ],
+    async (calls) => {
+      const result = await describeImage(
+        { image_base64: gifBytes.toString('base64'), prompt: 'combined compatibility fallback' },
+        testConfig({ maxProviderSubmissions: 3 }),
+      )
+      assert.equal(stripBanner(result), 'combined-fallback-ok')
+      assert.equal(calls.length, 3)
+      assert.equal(calls[0].body.max_tokens, 128)
+      assert.equal(calls[0].body.stream, true)
+      assert.equal(calls[1].body.max_completion_tokens, 128)
+      assert.equal(calls[1].body.stream, true)
+      assert.equal(calls[2].body.max_completion_tokens, 128)
+      assert.equal(calls[2].body.stream, undefined)
+    },
+  )
+
   // Other OpenAI-compatible providers often use a file-type rather than an
   // image-format error label. These should receive the same actionable advice.
   await withSequencedFetch(
@@ -1103,6 +1153,7 @@ try {
       assert.equal(stripBanner(result), 'streamed answer')
       assert.equal(calls.length, 1)
       assert.equal(calls[0].body.stream, true, 'streamed requests must ask the provider to stream')
+      assert.equal(calls[0].options.redirect, 'error', 'provider redirects must never be followed implicitly')
     } finally {
       globalThis.fetch = originalFetch
     }
@@ -1218,18 +1269,76 @@ try {
     },
   )
 
-  // A stream whose final data event lacks its trailing newline must not lose
-  // that event's content.
+  // Some OpenAI-compatible providers (including MiniMax) close a successful
+  // stream after a final finish_reason event without sending `data: [DONE]`.
+  // The finish reason is a protocol terminal event and the completed text is
+  // safe to return; only a stream lacking both signals is truncated.
+  {
+    const finishReasonOnlySse = [
+      'data: {"choices":[{"delta":{"content":"MiniMax "},"finish_reason":null}]}',
+      'data: {"choices":[{"delta":{"content":"ok"},"finish_reason":"stop"}]}',
+    ].join('\n\n')
+    const originalFetch = globalThis.fetch
+    globalThis.fetch = async () => new Response(finishReasonOnlySse, {
+      status: 200,
+      headers: { 'content-type': 'text/event-stream' },
+    })
+    try {
+      const result = await describeImage(
+        { image_base64: gifBytes.toString('base64'), prompt: 'finish reason without done sentinel' },
+        testConfig(),
+      )
+      assert.equal(stripBanner(result), 'MiniMax ok')
+    } finally {
+      globalThis.fetch = originalFetch
+    }
+  }
+
+  // A stream that ends without the protocol terminal event is incomplete. A
+  // transient truncation retries within both maxRetries and the shared provider
+  // submission budget, and never returns/caches the partial first attempt.
   {
     const truncatedSse = 'data: {"choices":[{"delta":{"content":"tail "}}]}\ndata: {"choices":[{"delta":{"content":"kept"}}]}'
+    const completeSse = 'data: {"choices":[{"delta":{"content":"complete"},"finish_reason":"stop"}]}\n\ndata: [DONE]\n\n'
     const originalFetch = globalThis.fetch
-    globalThis.fetch = async () => new Response(truncatedSse, { status: 200, headers: { 'content-type': 'text/event-stream' } })
+    let truncatedCalls = 0
+    globalThis.fetch = async () => {
+      truncatedCalls += 1
+      return new Response(truncatedCalls === 1 ? truncatedSse : completeSse, {
+        status: 200,
+        headers: { 'content-type': 'text/event-stream' },
+      })
+    }
     try {
       const result = await describeImage(
         { image_base64: gifBytes.toString('base64'), prompt: 'truncated tail' },
-        testConfig(),
+        testConfig({ maxRetries: 2, maxProviderSubmissions: 3 }),
       )
-      assert.equal(stripBanner(result), 'tail kept')
+      assert.equal(stripBanner(result), 'complete')
+      assert.equal(truncatedCalls, 2)
+    } finally {
+      globalThis.fetch = originalFetch
+    }
+  }
+
+  // Persistent truncation still fails after the configured retry count.
+  {
+    const truncatedSse = 'data: {"choices":[{"delta":{"content":"partial"}}]}\n\n'
+    const originalFetch = globalThis.fetch
+    let truncatedCalls = 0
+    globalThis.fetch = async () => {
+      truncatedCalls += 1
+      return new Response(truncatedSse, { status: 200, headers: { 'content-type': 'text/event-stream' } })
+    }
+    try {
+      await assertRejectsMessage(
+        () => describeImage(
+          { image_base64: gifBytes.toString('base64'), prompt: 'persistently truncated' },
+          testConfig({ maxRetries: 1, maxProviderSubmissions: 2 }),
+        ),
+        /stream ended before its terminal event/,
+      )
+      assert.equal(truncatedCalls, 2)
     } finally {
       globalThis.fetch = originalFetch
     }
@@ -1266,6 +1375,26 @@ try {
     }
   }
 
+  // All network retries and compatibility transitions share one submission
+  // budget; nested retry layers must not multiply the maximum billed calls.
+  await withSequencedFetch(
+    [
+      { status: 500, body: JSON.stringify({ error: { message: 'temporary one' } }) },
+      { status: 500, body: JSON.stringify({ error: { message: 'temporary two' } }) },
+      { status: 200, body: JSON.stringify({ choices: [{ message: { content: 'must not be reached' } }] }) },
+    ],
+    async (calls) => {
+      await assertRejectsMessage(
+        () => describeImage(
+          { image_base64: gifBytes.toString('base64'), prompt: 'submission budget' },
+          testConfig({ maxRetries: 8, maxProviderSubmissions: 2 }),
+        ),
+        /submission budget exhausted after 2 request/,
+      )
+      assert.equal(calls.length, 2)
+    },
+  )
+
   // --- Cross-process disk result cache ---------------------------------------
   // The in-memory Map dies with the process; the on-disk mirror under cache.dir
   // lets a fresh module instance (a new Skill run) reuse a recent answer.
@@ -1279,10 +1408,11 @@ try {
     assert.equal(stripBanner(first), 'ok')
     assert.equal(calls.length, 1)
   })
+
   const diskEntries = readdirSync(diskCacheDir).filter((name) => /^[a-f0-9]{64}\.json$/.test(name))
   assert.equal(diskEntries.length, 1, 'a completed call must persist exactly one cache entry')
   const diskEntry = JSON.parse(readFileSync(join(diskCacheDir, diskEntries[0]), 'utf8'))
-  assert.equal(diskEntry.version, 1)
+  assert.equal(diskEntry.version, 2)
   assert.equal(typeof diskEntry.expiresAt, 'number')
   assert.match(diskEntry.value, /^\[VisionPower\]/)
 
@@ -1297,6 +1427,23 @@ try {
     assert.equal(calls.length, 0, 'a disk hit must not bill the provider again')
     assert.equal(stripBanner(result), 'ok')
   })
+
+  if (process.platform !== 'win32') {
+    const cacheEntryPath = join(diskCacheDir, diskEntries[0])
+    const protectedCacheTarget = join(tempDir, 'cache-symlink-target.txt')
+    writeFileSync(protectedCacheTarget, 'do-not-read-or-overwrite')
+    unlinkSync(cacheEntryPath)
+    symlinkSync(protectedCacheTarget, cacheEntryPath)
+    const symlinkSafeCore = await import(`${freshCoreUrl.href}?fresh=disk-cache-symlink`)
+    await withMockFetch(async (calls) => {
+      await symlinkSafeCore.describeImage(
+        { image_base64: gifBytes.toString('base64'), prompt: 'persist me' },
+        diskCacheConfig,
+      )
+      assert.equal(calls.length, 1, 'a symlinked disk cache entry must degrade to a cache miss')
+    })
+    assert.equal(readFileSync(protectedCacheTarget, 'utf8'), 'do-not-read-or-overwrite')
+  }
 
   // Expired disk entries are removed and the provider is billed again.
   const expiringDir = join(tempDir, 'result-cache-b')
@@ -1765,6 +1912,10 @@ try {
   const absentConfig = join(tempDir, 'absent-config.json')
   const cfg = (overrides = {}) => loadVisionConfig({ VISIONPOWER_CONFIG: absentConfig, ...overrides })
 
+  assert.equal(cfg({}).dshEnabled, true)
+  assert.equal(cfg({ VISIONPOWER_DSH_ENABLED: 'false' }).dshEnabled, false)
+  assert.throws(() => cfg({ VISIONPOWER_DSH_ENABLED: 'maybe' }), /must be a boolean/)
+
   const normalized = cfg({
     VISIONPOWER_API_KEY: 'k',
     VISIONPOWER_BASE_URL: 'https://api.example.com/v1//',
@@ -1772,6 +1923,21 @@ try {
   assert.equal(normalized.baseUrl, 'https://api.example.com/v1')
   assert.equal(normalized.maxImageBytes, 20 * 1024 * 1024)
   assert.equal(normalized.maxTotalImageBytes, 64 * 1024 * 1024)
+  assert.throws(
+    () => normalizeBaseUrl('http://provider.example/v1', 'baseUrl'),
+    /must use HTTPS for non-loopback endpoints/,
+  )
+  assert.equal(normalizeBaseUrl('http://127.0.0.2:8080/v1', 'baseUrl'), 'http://127.0.0.2:8080/v1')
+  assert.equal(normalizeBaseUrl('http://[::1]:8080/v1', 'baseUrl'), 'http://[::1]:8080/v1')
+  assert.equal(
+    normalizeBaseUrl('http://provider.example/v1', 'baseUrl', { allowInsecureHttp: true }),
+    'http://provider.example/v1',
+  )
+  assert.equal(cfg({
+    VISIONPOWER_API_KEY: 'k',
+    VISIONPOWER_BASE_URL: 'http://provider.example/v1',
+    VISIONPOWER_ALLOW_INSECURE_HTTP: 'true',
+  }).allowInsecureHttp, true)
 
   // The bare official Anthropic host is stored/displayed as typed; /v1 is
   // filled in only when the request URL is built (see the anthropic request
@@ -1974,18 +2140,41 @@ try {
   // --- Persistent config file (env still wins over it) ---
   const fileConfigPath = join(tempDir, 'vp-config.json')
   writeFileSync(fileConfigPath, JSON.stringify({
+    dshEnabled: false,
     apiKey: 'file-key',
     model: 'file-model',
     baseUrl: 'https://file.example.com/v1',
     maxImages: 3,
   }))
   const fromFile = loadVisionConfig({ VISIONPOWER_CONFIG: fileConfigPath })
+  assert.equal(fromFile.dshEnabled, false)
   assert.equal(fromFile.apiKey, 'file-key')
   assert.equal(fromFile.model, 'file-model')
   assert.equal(fromFile.baseUrl, 'https://file.example.com/v1')
   assert.equal(fromFile.maxImages, 3)
   assert.deepEqual(fromFile.cache, { enabled: true, maxEntries: 32, ttlMs: 30 * 60 * 1000, dir: join(tempDir, 'cache') }) // cache defaults to on
   assert.equal(fromFile.inbox.dir, join(tempDir, 'inbox'))
+
+  // Migrate the unreleased global `enabled` field as a dsh-only preference.
+  // New saves drop the legacy key, and the shared describeImage core ignores
+  // the resulting dshEnabled value.
+  const legacyEnabledConfigPath = join(tempDir, 'vp-legacy-enabled-config.json')
+  writeFileSync(legacyEnabledConfigPath, JSON.stringify({
+    enabled: false,
+    apiKey: 'legacy-key',
+    model: 'gpt-4o',
+  }))
+  assert.equal(loadVisionConfig({ VISIONPOWER_CONFIG: legacyEnabledConfigPath }).dshEnabled, false)
+  assert.deepEqual(normalizeConfigObject({ enabled: false, dshEnabled: true }), { dshEnabled: true })
+
+  if (process.platform !== 'win32') {
+    const linkedConfigPath = join(tempDir, 'linked-config.json')
+    symlinkSync(fileConfigPath, linkedConfigPath)
+    assert.throws(
+      () => loadVisionConfig({ VISIONPOWER_CONFIG: linkedConfigPath }),
+      /symbolic link/,
+    )
+  }
 
   const inboxSettings = cfg({
     VISIONPOWER_API_KEY: 'k',
@@ -2019,7 +2208,12 @@ try {
   // maxEntries of zero disables the cache (store nothing).
   assert.equal(cfg({ VISIONPOWER_API_KEY: 'k', VISIONPOWER_CACHE_MAX_ENTRIES: '0' }).cache.enabled, false)
 
-  const envBeatsFile = loadVisionConfig({ VISIONPOWER_CONFIG: fileConfigPath, VISIONPOWER_API_KEY: 'env-key' })
+  const envBeatsFile = loadVisionConfig({
+    VISIONPOWER_CONFIG: fileConfigPath,
+    VISIONPOWER_API_KEY: 'env-key',
+    VISIONPOWER_DSH_ENABLED: 'true',
+  })
+  assert.equal(envBeatsFile.dshEnabled, true)
   assert.equal(envBeatsFile.apiKey, 'env-key')   // env wins
   assert.equal(envBeatsFile.model, 'file-model') // file used where env is absent
 
@@ -2192,6 +2386,7 @@ try {
 
   // Unknown keys are dropped (prototype-pollution guard), known fields validated.
   const clean = normalizeConfigObject({
+    dshEnabled: false,
     apiKey: 'sk-test',
     model: 'qwen3-vl-flash',
     baseUrl: 'https://api.example.com/v1/',
@@ -2211,6 +2406,7 @@ try {
     constructor: 'evil',           // must be dropped
   })
   assert.equal(clean.apiKey, 'sk-test')
+  assert.equal(clean.dshEnabled, false)
   assert.equal(clean.baseUrl, 'https://api.example.com/v1') // trailing slash stripped
   assert.equal(clean.maxTotalImageBytes, 4096)
   assert.deepEqual(clean.allowedDirs, ['/a', '/b'])
@@ -2221,6 +2417,18 @@ try {
   assert.deepEqual(clean.cache, { enabled: true, maxEntries: 10, ttlMs: 5000 })
   assert.equal(clean.__proto__?.x, undefined)
   assert.equal(clean.constructor, Object.prototype.constructor) // not the string
+  assertThrowsMessage(
+    () => normalizeConfigObject({ dshEnabled: 'false' }),
+    /dshEnabled.*boolean/,
+  )
+  assert.equal(normalizeConfigObject({
+    baseUrl: 'http://provider.example/v1',
+    allowInsecureHttp: true,
+  }).allowInsecureHttp, true)
+  assert.throws(
+    () => normalizeConfigObject({ baseUrl: 'http://provider.example/v1' }),
+    /must use HTTPS for non-loopback endpoints/,
+  )
 
   // baseUrl with /chat/completions suffix is rejected (mirrors loadVisionConfig).
   assertThrowsMessage(
@@ -2471,7 +2679,8 @@ try {
   {
     const envNames = [
       'VISIONPOWER_CONFIG', 'VISIONPOWER_API_KEY', 'OPENAI_API_KEY',
-      'VISIONPOWER_MODEL', 'VISIONPOWER_BASE_URL', 'VISIONPOWER_NO_OPEN',
+      'VISIONPOWER_MODEL', 'VISIONPOWER_BASE_URL', 'VISIONPOWER_DSH_ENABLED',
+      'VISIONPOWER_NO_OPEN',
     ]
     const originalEnv = new Map(envNames.map((name) => [name, process.env[name]]))
     let webuiServer
@@ -2481,20 +2690,24 @@ try {
       process.env.OPENAI_API_KEY = 'openai-env-secret'
       process.env.VISIONPOWER_MODEL = 'gpt-4o'
       delete process.env.VISIONPOWER_BASE_URL
+      delete process.env.VISIONPOWER_DSH_ENABLED
       process.env.VISIONPOWER_NO_OPEN = '1'
 
-      webuiServer = await startWebuiServer(0)
+      webuiServer = await startWebuiServer(0, { openBrowser: false })
       const address = webuiServer.address()
       assert.ok(address && typeof address === 'object')
       const origin = `http://127.0.0.1:${address.port}`
 
       const rootResponse = await fetch(`${origin}/`)
       assert.equal(rootResponse.status, 200)
+      assert.doesNotMatch(rootResponse.headers.get('content-security-policy') ?? '', /img-src[^;]*https?:/)
+      assert.match(rootResponse.headers.get('content-security-policy') ?? '', /frame-ancestors 'none'/)
       assert.match(await rootResponse.text(), /\/assets\/alpine\.min\.js\?v=\d+\.\d+\.\d+/)
 
       const configResponse = await fetch(`${origin}/api/config`)
       assert.equal(configResponse.status, 200)
       const webuiConfig = await configResponse.json()
+      assert.equal(webuiConfig.dshEnabled, true)
       assert.equal(webuiConfig.model, 'gpt-4o')
       assert.equal(webuiConfig.baseUrl, 'https://api.openai.com/v1')
       assert.equal(webuiConfig.apiKey, '')
@@ -2518,7 +2731,49 @@ try {
 
       const statusResponse = await fetch(`${origin}/api/status`)
       assert.equal(statusResponse.status, 200)
-      assert.equal((await statusResponse.json()).ready, true)
+      const initialStatus = await statusResponse.json()
+      assert.equal(initialStatus.dshEnabled, true)
+      assert.equal(initialStatus.ready, true)
+
+      const identityResponse = await fetch(`${origin}/api/identity`)
+      assert.equal(identityResponse.status, 200)
+      const identity = await identityResponse.json()
+      assert.equal(identity.product, 'visionpower')
+      assert.equal(identity.protocolVersion, 1)
+      assert.equal(identity.configPath, process.env.VISIONPOWER_CONFIG)
+      assert.equal(typeof identity.version, 'string')
+      assert.equal(typeof identity.pid, 'number')
+
+      const webuiPort = webuiServer.address().port
+      const probedIdentity = await probeWebuiServer(webuiPort, {
+        expectedVersion: identity.version,
+        expectedConfigPath: process.env.VISIONPOWER_CONFIG,
+      })
+      assert.equal(probedIdentity.pid, process.pid)
+      await assert.rejects(
+        () => probeWebuiServer(webuiPort, { expectedVersion: '0.0.0' }),
+        (error) => error.code === 'VISIONPOWER_WEBUI_CONFLICT' && /expected 0\.0\.0/.test(error.message),
+      )
+      await assert.rejects(
+        () => probeWebuiServer(webuiPort, { expectedConfigPath: join(tempDir, 'other-config.json') }),
+        (error) => error.code === 'VISIONPOWER_WEBUI_CONFLICT' && /different VisionPower config/.test(error.message),
+      )
+      const reusedWebui = await startOrReuseWebuiServer(webuiPort, {
+        openBrowser: false,
+        expectedVersion: identity.version,
+        expectedConfigPath: process.env.VISIONPOWER_CONFIG,
+      })
+      assert.equal(reusedWebui.reused, true)
+      assert.equal(reusedWebui.server, null)
+
+      const standalonePage = await fetch(`${origin}/`)
+      assert.match(standalonePage.headers.get('content-security-policy'), /frame-ancestors 'none'/)
+      const parentOrigin = 'http://127.0.0.1:3080'
+      const embeddedPage = await fetch(`${origin}/?embed=dsh&parentOrigin=${encodeURIComponent(parentOrigin)}`)
+      const embeddedCsp = embeddedPage.headers.get('content-security-policy')
+      assert.match(embeddedCsp, /frame-ancestors http:\/\/127\.0\.0\.1:3080/)
+      assert.ok(!embeddedCsp.includes('localhost:*'))
+      assert.equal(initialStatus.ready, true)
 
       // A masked key originating in the config file must never become the
       // temporary connection-test credential when an env key overrides it.
@@ -2853,11 +3108,144 @@ try {
       assert.equal(oversizedResponse.status, 413)
       assert.match(oversizedResponse.json.error, /Request body too large/)
 
+      const invalidMediaType = await localHttpRequest(`${origin}/api/config`, {
+        method: 'PUT',
+        body: {},
+        headers: { 'Content-Type': 'text/application/jsonish' },
+      })
+      assert.equal(invalidMediaType.status, 403)
+      assert.match(invalidMediaType.json.error, /must be JSON/)
+
+      const beforeMalformedConfig = readFileSync(process.env.VISIONPOWER_CONFIG, 'utf8')
+      writeFileSync(process.env.VISIONPOWER_CONFIG, 'null')
+      try {
+        const overwriteMalformed = await localHttpRequest(`${origin}/api/config`, {
+          method: 'PUT',
+          body: { model: 'must-not-overwrite' },
+        })
+        assert.equal(overwriteMalformed.status, 400)
+        assert.match(overwriteMalformed.json.error, /existing config file must contain a JSON object/)
+        assert.equal(readFileSync(process.env.VISIONPOWER_CONFIG, 'utf8'), 'null')
+      } finally {
+        writeFileSync(process.env.VISIONPOWER_CONFIG, beforeMalformedConfig)
+      }
+
+      // The dsh switch has a dedicated PATCH endpoint so clicking it takes
+      // effect immediately without committing unrelated form drafts. Disabled
+      // state must survive a reload while the standalone WebUI/MCP core remains
+      // ready and continues processing image analysis.
+      const beforeToggle = readFileSync(process.env.VISIONPOWER_CONFIG, 'utf8')
+      const beforeToggleConfig = JSON.parse(beforeToggle)
+      try {
+        const invalidToggle = await localHttpRequest(`${origin}/api/config/dsh-enabled`, {
+          method: 'PATCH',
+          body: { dshEnabled: 'false' },
+        })
+        assert.equal(invalidToggle.status, 400)
+
+        const nullToggle = await localHttpRequest(`${origin}/api/config/dsh-enabled`, {
+          method: 'PATCH',
+          rawBody: Buffer.from('null'),
+        })
+        assert.equal(nullToggle.status, 400)
+        assert.match(nullToggle.json.error, /JSON object/)
+
+        const extraToggleField = await localHttpRequest(`${origin}/api/config/dsh-enabled`, {
+          method: 'PATCH',
+          body: { dshEnabled: false, model: 'must-not-save' },
+        })
+        assert.equal(extraToggleField.status, 400)
+
+        const disableResponse = await localHttpRequest(`${origin}/api/config/dsh-enabled`, {
+          method: 'PATCH',
+          body: { dshEnabled: false },
+        })
+        assert.equal(disableResponse.status, 200)
+        assert.equal(disableResponse.json.dshEnabled, false)
+
+        const afterToggleConfig = JSON.parse(readFileSync(process.env.VISIONPOWER_CONFIG, 'utf8'))
+        for (const [key, value] of Object.entries(beforeToggleConfig)) {
+          if (key === 'enabled' || key === 'dshEnabled') continue
+          assert.deepEqual(afterToggleConfig[key], value, `instant dsh toggle must preserve config field ${key}`)
+        }
+        assert.equal(afterToggleConfig.dshEnabled, false)
+        assert.equal(afterToggleConfig.enabled, undefined)
+
+        const staleFullSave = await localHttpRequest(`${origin}/api/config`, {
+          method: 'PUT',
+          body: {
+            ...afterToggleConfig,
+            dshEnabled: true,
+            preserveConfiguredKey: false,
+          },
+        })
+        assert.equal(staleFullSave.status, 200)
+        assert.equal(
+          JSON.parse(readFileSync(process.env.VISIONPOWER_CONFIG, 'utf8')).dshEnabled,
+          false,
+          'a stale full-form save must not overwrite the dedicated dsh switch',
+        )
+
+        const beforeEnvOverride = readFileSync(process.env.VISIONPOWER_CONFIG, 'utf8')
+        process.env.VISIONPOWER_DSH_ENABLED = 'true'
+        try {
+          const overriddenToggle = await localHttpRequest(`${origin}/api/config/dsh-enabled`, {
+            method: 'PATCH',
+            body: { dshEnabled: false },
+          })
+          assert.equal(overriddenToggle.status, 409)
+          assert.equal(overriddenToggle.json.dshEnabled, true)
+          assert.equal(
+            readFileSync(process.env.VISIONPOWER_CONFIG, 'utf8'),
+            beforeEnvOverride,
+            'an env-overridden dsh toggle must not leave a latent saved value',
+          )
+        } finally {
+          delete process.env.VISIONPOWER_DSH_ENABLED
+        }
+
+        const disabledConfig = await (await fetch(`${origin}/api/config`)).json()
+        assert.equal(disabledConfig.dshEnabled, false)
+        const disabledStatus = await (await fetch(`${origin}/api/status`)).json()
+        assert.equal(disabledStatus.dshEnabled, false)
+        assert.equal(disabledStatus.ready, true)
+
+        await withMockFetch(async (calls) => {
+          const disabledPlayground = await localHttpRequest(`${origin}/api/test`, {
+            method: 'POST',
+            body: { image_base64: gifBytes.toString('base64') },
+          })
+          assert.equal(disabledPlayground.status, 200)
+          assert.equal(calls.length, 1, 'dshEnabled=false must not disable the standalone Playground')
+        })
+      } finally {
+        writeFileSync(process.env.VISIONPOWER_CONFIG, beforeToggle)
+      }
+      const restoredStatus = await (await fetch(`${origin}/api/status`)).json()
+      assert.equal(restoredStatus.dshEnabled, true)
+      assert.equal(restoredStatus.ready, true)
+
       const webuiSource = readFileSync(new URL('../src/webui/index-html.js', import.meta.url), 'utf8')
       const inlineScript = WEBUI_HTML.match(/<script>([\s\S]*?)<\/script>/)?.[1]
       assert.ok(inlineScript)
       assert.doesNotThrow(() => new Script(inlineScript))
       assert.ok(webuiSource.includes("removeLocalPreference('vp-keys-by-url')"))
+      assert.ok(webuiSource.includes('x-model="config.dshEnabled"'))
+      assert.ok(webuiSource.includes('@change="saveDshEnabled()"'))
+      assert.ok(webuiSource.includes(':disabled="dshToggleSaving"'))
+      assert.ok(webuiSource.includes("fetch('/api/config/dsh-enabled'"))
+      assert.ok(webuiSource.includes("method: 'PATCH'"))
+      assert.ok(webuiSource.includes('delete configFields.dshEnabled'))
+      assert.ok(webuiSource.includes('Do not call loadConfig()'))
+      assert.ok(webuiSource.includes('x-show="isDshEmbed"'))
+      assert.ok(webuiSource.includes('isDshEmbed && !status.dshEnabled'))
+      assert.ok(webuiSource.includes('x-show="!status.ready"'))
+      assert.ok(!webuiSource.includes(':disabled="testing || !status.dshEnabled'))
+      assert.ok(!webuiSource.includes('x-model="config.enabled"'))
+      assert.ok(webuiSource.includes('仅控制DeepSeek Harness中的Visionpower是否开启，其它Agent下通过MCP/Skills调用不受此按钮影响。'))
+      assert.ok(webuiSource.includes('点击保存后自动应用，无需手动编辑配置文件。'))
+      assert.ok(!webuiSource.includes("i18n[lang].configPathLabel + status.configPath"))
+      assert.ok(!webuiSource.includes('this.imagePreview = this.playground.imageUrl'))
       assert.ok(!webuiSource.includes("localStorage.setItem('vp-keys-by-url'"))
       assert.ok(webuiSource.includes('image/tiff,.tif,.tiff'))
       assert.ok(webuiSource.includes('JPG, PNG, WEBP, GIF, BMP, TIFF'))
@@ -2877,17 +3265,32 @@ try {
       assert.equal((webuiSource.match(/:class="\{ active: /g) ?? []).length, 6)
       assert.ok(!webuiSource.includes("&& 'active'"))
       const webuiServerSource = readFileSync(new URL('../src/webui/server.js', import.meta.url), 'utf8')
-      assert.ok(webuiServerSource.includes("img-src 'self' data: http: https:"))
+      assert.ok(webuiServerSource.includes("img-src 'self' data: blob:"))
+      assert.ok(!webuiServerSource.includes("img-src 'self' data: http: https:"))
         assert.ok(webuiServerSource.includes('probeCapabilities.recommendedMaxTokens'))
-        assert.ok(webuiServerSource.includes('preserveConfiguredKey cannot be combined with a new API key'))
+      assert.ok(webuiServerSource.includes('preserveConfiguredKey cannot be combined with a new API key'))
+      assert.ok(webuiServerSource.includes('dshEnabled: config.dshEnabled !== false'))
+      assert.ok(webuiServerSource.includes('ready: Boolean(config.apiKey)'))
+      assert.ok(webuiServerSource.includes("pathname === '/api/config/dsh-enabled'"))
+      assert.ok(webuiServerSource.includes("key !== 'enabled' && key !== 'dshEnabled'"))
       assert.ok(webuiServerSource.includes('execFile(command, args'))
       assert.ok(!webuiServerSource.includes('exec(cmd'))
+      assert.ok(webuiServerSource.includes('options.openBrowser ??'))
+      assert.ok(webuiServerSource.includes("frame-ancestors ${frameAncestor}"))
+      assert.ok(!webuiServerSource.includes('frame-ancestors http://127.0.0.1:*'))
+      assert.ok(webuiSource.includes("dataset.embed = 'dsh'"))
+      assert.ok(webuiSource.includes('[data-embed="dsh"] header{display:none}'))
       const coreSource = readFileSync(new URL('../src/vision-core.js', import.meta.url), 'utf8')
       assert.ok(coreSource.includes("lstat(realImagePath, { bigint: true })"))
       assert.ok(coreSource.includes("const postReadStat = await handle.stat({ bigint: true })"))
       assert.ok(coreSource.includes('before.mtimeNs === after.mtimeNs'))
       assert.ok(coreSource.includes('before.ctimeNs === after.ctimeNs'))
       assert.ok(coreSource.includes('isSameFileVersion(openedStat, postReadStat)'))
+      const safeFsSource = readFileSync(new URL('../src/safe-fs.js', import.meta.url), 'utf8')
+      assert.ok(safeFsSource.includes("lstatSync(filePath, { bigint: true })"))
+      assert.ok(safeFsSource.includes("handle.stat({ bigint: true })"))
+      assert.ok(safeFsSource.includes('before.mtimeNs === after.mtimeNs'))
+      assert.ok(safeFsSource.includes('before.ctimeNs === after.ctimeNs'))
     } finally {
       if (webuiServer) {
         await new Promise((resolveClose, rejectClose) => {
@@ -2901,14 +3304,229 @@ try {
     }
   }
 
+  // ── dsh rc.7 durable attachment bridge ───────────────────────────────────
+  {
+    const first = { attachmentId: 'opaque:first', mediaType: 'image/png', bytes: 8, width: 1, height: 1 }
+    const second = { attachmentId: 'opaque:second', mediaType: 'image/jpeg', bytes: 6, width: 1, height: 1 }
+    const messages = [
+      { source: { kind: 'user' }, content: [{ type: 'image', attachment: first }] },
+      { source: { kind: 'assistant' }, content: [{ type: 'text', text: 'earlier response' }] },
+      { source: { kind: 'user' }, content: [{ type: 'text', text: 'look at these' }, { type: 'image', attachment: second }, { type: 'image', attachment: first }] },
+      { source: { kind: 'plugin' }, content: [{ type: 'text', text: 'rules' }] },
+    ]
+    assert.deepEqual(latestUserImageRefs(messages), [second, first])
+    assert.equal(hasExplicitImageInput({ prompt: 'read it' }), false)
+    assert.equal(hasExplicitImageInput({ image_url: 'https://example.com/a.png' }), true)
+    assert.equal(hasExplicitImageInput({ images: [{ image_base64: 'AA==' }] }), true)
+
+    const signal = new AbortController().signal
+    const reads = []
+    const resolved = await withDshImageAttachments(
+      { prompt: 'compare', output_format: 'structured' },
+      { signal, agent: { session: { deriveMessages: () => messages } } },
+      {
+        async readImage(ref, receivedSignal) {
+          reads.push({ ref, signal: receivedSignal })
+          return {
+            ref,
+            data: ref === second ? jpegBytes : pngBytes,
+          }
+        },
+      },
+      testConfig(),
+    )
+    assert.deepEqual(reads, [{ ref: second, signal }, { ref: first, signal }])
+    assert.equal(resolved.prompt, 'compare')
+    assert.equal(resolved.output_format, 'structured')
+    assert.deepEqual(resolved.images, [
+      { image_base64: jpegBytes.toString('base64'), image_mime_type: 'image/jpeg' },
+      { image_base64: pngBytes.toString('base64'), image_mime_type: 'image/png' },
+    ])
+
+    const explicit = { image_path: '/tmp/example.png', prompt: 'read' }
+    assert.equal(await withDshImageAttachments(explicit, {}, undefined), explicit)
+
+    let disabledReads = 0
+    await assertRejectsMessage(
+      () => withDshImageAttachments(
+        { prompt: 'disabled' },
+        { agent: { session: { deriveMessages: () => messages } } },
+        { async readImage() { disabledReads += 1 } },
+        testConfig({ dshEnabled: false, maxImages: 1 }),
+      ),
+      /VisionPower is disabled/,
+    )
+    assert.equal(disabledReads, 0, 'disabled VisionPower must not derive/read dsh attachments')
+
+    let overCountReads = 0
+    await assertRejectsMessage(
+      () => withDshImageAttachments(
+        { prompt: 'too many' },
+        { agent: { session: { deriveMessages: () => messages } } },
+        { async readImage() { overCountReads += 1 } },
+        testConfig({ maxImages: 1 }),
+      ),
+      /Too many images; max is 1/,
+    )
+    assert.equal(overCountReads, 0, 'attachment-count rejection must happen before the first read')
+
+    const threeRefs = [second, first, second].map((ref) => {
+      const withoutDeclaredBytes = { ...ref }
+      delete withoutDeclaredBytes.bytes
+      return withoutDeclaredBytes
+    })
+    let totalLimitReads = 0
+    await assertRejectsMessage(
+      () => withDshImageAttachments(
+        { prompt: 'bounded bytes' },
+        { agent: { session: { deriveMessages: () => [{ source: { kind: 'user' }, content: threeRefs.map((attachment) => ({ type: 'image', attachment })) }] } } },
+        {
+          async readImage(ref) {
+            totalLimitReads += 1
+            return { ref, data: ref === second ? jpegBytes : pngBytes }
+          },
+        },
+        testConfig({ maxImages: 3, maxTotalImageBytes: 10 }),
+      ),
+      /Total local\/Base64 image data is too large/,
+    )
+    assert.equal(totalLimitReads, 2, 'total-byte rejection must stop before reading later attachments')
+
+    let declaredLimitReads = 0
+    const declaredLarge = { ...first, bytes: 20 }
+    await assertRejectsMessage(
+      () => withDshImageAttachments(
+        { prompt: 'declared limit' },
+        { agent: { session: { deriveMessages: () => [{ source: { kind: 'user' }, content: [{ type: 'image', attachment: declaredLarge }] }] } } },
+        { async readImage() { declaredLimitReads += 1 } },
+        testConfig({ maxImageBytes: 10 }),
+      ),
+      /attachment is too large/,
+    )
+    assert.equal(declaredLimitReads, 0, 'known oversized attachment metadata must reject before storage reads')
+    await assertRejectsMessage(
+      () => withDshImageAttachments({ prompt: 'read' }, { agent: { session: { deriveMessages: () => messages } } }, undefined),
+      /durable attachment service is unavailable/i,
+    )
+    await assertRejectsMessage(
+      () => withDshImageAttachments({ prompt: 'read' }, { agent: { session: { deriveMessages: () => [] } } }, { readImage() {} }),
+      /explicit image source or an image attachment/i,
+    )
+
+    const clientSource = readFileSync(new URL('../src/dsh/client.js', import.meta.url), 'utf8')
+    assert.ok(clientSource.includes("id: 'visionpower/dsh'"))
+    assert.ok(clientSource.includes("settings.plugins.tab"))
+    assert.ok(clientSource.includes("const SETTINGS_ORIGIN = 'http://127.0.0.1:17900'"))
+    assert.ok(clientSource.includes('parentOrigin=${encodeURIComponent(window.location.origin)}'))
+    assert.ok(clientSource.includes("message?.type !== 'visionpower:webui-ready'"))
+    assert.ok(clientSource.includes('VisionPower 开关切换后立即生效'))
+    assert.ok(!clientSource.includes('保存到 ~/.visionpower/config.json'))
+    const dshSource = readFileSync(new URL('../src/dsh/index.js', import.meta.url), 'utf8')
+    assert.ok(dshSource.includes('resolveConfig(config).dshEnabled === false'))
+    const dshAttachmentsSource = readFileSync(new URL('../src/dsh/attachments.js', import.meta.url), 'utf8')
+    assert.ok(dshAttachmentsSource.includes('Turn it on in Settings → Plugins → VisionPower.'))
+    assert.ok(!dshAttachmentsSource.includes('then save the configuration'))
+    let clientModule
+    new Script(clientSource).runInNewContext({
+      window: {
+        location: { origin: 'http://127.0.0.1:3080' },
+        __ModuleLoader__: {
+          load(definition) {
+            assert.equal(definition.id, 'visionpower/dsh')
+            clientModule = definition.factory((id) => {
+              assert.equal(id, 'react')
+              return {
+                createElement: (...parts) => parts,
+                useRef: (value) => ({ current: value }),
+                useState: (value) => [value, () => {}],
+                useEffect: () => {},
+              }
+            })
+          },
+        },
+      },
+    })
+    assert.deepEqual([...clientModule.inject], ['slots'])
+    let tabRegistration
+    clientModule.apply({
+      slots: {
+        inject(name, callback) {
+          assert.equal(name, 'settings.plugins.tab')
+          callback()
+        },
+        register(definition, component) {
+          tabRegistration = { definition, component }
+        },
+      },
+    })
+    assert.equal(tabRegistration.definition.id, 'visionpower')
+    assert.equal(tabRegistration.definition.label(), 'VisionPower')
+    assert.equal(typeof tabRegistration.component, 'function')
+    assert.doesNotThrow(() => tabRegistration.component())
+    const packageJson = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8'))
+    assert.equal(packageJson.exports['./client'], './src/dsh/client.js')
+    assert.equal(packageJson.exports['./dsh/package.json'], './src/dsh/package.json')
+    assert.equal(packageJson.dsh.client.platform, 'web')
+    assert.ok(packageJson.dsh.client.inject.includes('@deepseek-ai/dsh-client-ui-settings-plugins'))
+    const dshPackageJson = JSON.parse(readFileSync(new URL('../src/dsh/package.json', import.meta.url), 'utf8'))
+    assert.equal(dshPackageJson.dsh.client.platform, 'web')
+    assert.equal(dshPackageJson.exports['./client'], './client.js')
+    assert.ok(dshPackageJson.dsh.client.inject.includes('@deepseek-ai/dsh-client-ui-settings-plugins'))
+    assert.equal(packageJson.peerDependencies['@deepseek-ai/dsh-tools'], '^0.1.0-rc.7')
+    assert.ok(!dshSource.includes('base.enabled = overrides.enabled'))
+  }
+
+  // ── Versioned dsh rule migration ─────────────────────────────────────────
+  {
+    const legacyBlock = `# 图片的定位与识图规则（VisionPower）
+
+## 非多模态模型的定位与识图
+
+1. 用 unzstd 读取会话日志，再解析 attachmentId 和私有存储路径。
+2. 调用 describe_image。`
+    const legacyRules = `# Existing user instructions\n\n${legacyBlock}\n\n# Keep this section\n\nDo not remove me.\n`
+    const migrated = upsertVisionPowerRules(legacyRules)
+    assert.equal(migrated.status, 'updated')
+    assert.equal((migrated.content.match(new RegExp(RULES_MARKER.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'g')) ?? []).length, 1)
+    assert.ok(!migrated.content.includes('unzstd'))
+    assert.ok(migrated.content.includes('# Existing user instructions'))
+    assert.ok(migrated.content.includes('# Keep this section'))
+    assert.ok(migrated.content.includes('Do not remove me.'))
+
+    const oldVersioned = '<!-- visionpower:dsh-rules:v1 -->\n# stale\nlegacy body\n<!-- /visionpower:dsh-rules -->\n\n# User tail\nkeep\n'
+    const upgradedVersioned = upsertVisionPowerRules(oldVersioned)
+    assert.equal(upgradedVersioned.status, 'updated')
+    assert.ok(upgradedVersioned.content.includes(RULES_TEXT))
+    assert.ok(upgradedVersioned.content.includes('# User tail\nkeep'))
+
+    const current = upsertVisionPowerRules(RULES_TEXT + '\n')
+    assert.equal(current.status, 'current')
+  }
+
   // ── setup-dsh 纯函数与补丁自测 ────────────────────────────────────────────
   {
-    const { compareVersions, composeCordisContent } = await import('./setup-dsh.mjs')
+    const { compareVersions, composeCordisContent, parsePatchedInstallations, validatePluginSource } = await import('./setup-dsh.mjs')
     assert.equal(compareVersions('2.8.0', '3.0.0'), -1)
     assert.equal(compareVersions('3.0.0', '3.0.0'), 0)
     assert.equal(compareVersions('3.0.1', '3.0.0'), 1)
     assert.equal(compareVersions('0.1.0-rc.10', '0.1.0-rc.6'), 1)
     assert.equal(compareVersions('1.0.0', '1.0.0-rc.1'), 1) // 无预发布 > 有预发布
+    assert.deepEqual(parsePatchedInstallations(`
+== 安装位置: /tmp/rc6/node_modules
+   dsh 版本: 0.1.0-rc.6（补丁覆盖）
+  ✓ old
+
+== 安装位置: /tmp/rc7/node_modules
+   dsh 版本: 0.1.0-rc.7（补丁覆盖）
+  ● new
+`), [
+      { root: '/tmp/rc6/node_modules', version: '0.1.0-rc.6' },
+      { root: '/tmp/rc7/node_modules', version: '0.1.0-rc.7' },
+    ])
+    assert.equal(validatePluginSource('visionpower@3.0.1'), 'visionpower@3.0.1')
+    assert.equal(validatePluginSource('github:RunhuaHuang/VisionPower#v3.0.1'), 'github:RunhuaHuang/VisionPower#v3.0.1')
+    assert.throws(() => validatePluginSource('github:RunhuaHuang/VisionPower'), /固定 Git tag\/commit/)
+    assert.throws(() => validatePluginSource('visionpower@3.0.1 & touch owned'), /shell 元字符/)
     // dsh 默认文件（注释 + 独立 [] 行）追加后必须剥掉 []，否则 YAML 非法、profile 起不来
     const dshDefault = '# comment\n# more\n[]\n'
     const mounted = composeCordisContent(dshDefault)

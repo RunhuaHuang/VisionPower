@@ -1,9 +1,9 @@
 // AUTO-GENERATED — do not edit by hand.
-// Source of truth: src/config.js + src/image-inbox.js + src/vision-core.js.
+// Source of truth: src/safe-fs.js + src/config.js + src/image-inbox.js + src/vision-core.js.
 // Regenerate with: npm run build:dsh
 
-import { readFileSync, writeFileSync, mkdirSync, renameSync, unlinkSync, readdirSync, lstatSync, statSync, constants as fsConstants, realpathSync } from 'node:fs'
-import { readdir, chmod, lstat, mkdir, rename, unlink, writeFile, open, readFile, realpath, stat, utimes } from 'node:fs/promises'
+import { constants as fsConstants, closeSync, fstatSync, lstatSync, openSync, readSync, writeFileSync, mkdirSync, renameSync, unlinkSync, readdirSync, realpathSync } from 'node:fs'
+import { lstat, open, readdir, chmod, mkdir, rename, unlink, writeFile, realpath, stat, utimes } from 'node:fs/promises'
 import { basename, dirname, join, resolve, extname, isAbsolute, sep } from 'node:path'
 import { homedir } from 'node:os'
 import { createHash, randomBytes } from 'node:crypto'
@@ -11,6 +11,113 @@ import { lookup } from 'node:dns/promises'
 import { BlockList, isIP } from 'node:net'
 import { request as httpRequest } from 'node:http'
 import { request as httpsRequest } from 'node:https'
+
+function sameSafeFileVersion(before, after) {
+  return before.isFile()
+    && after.isFile()
+    && before.dev === after.dev
+    && before.ino === after.ino
+    && before.size === after.size
+    && before.mtimeNs === after.mtimeNs
+    && before.ctimeNs === after.ctimeNs
+}
+
+function safeStatNumber(value, label) {
+  if (typeof value === 'bigint') {
+    if (value < 0n || value > BigInt(Number.MAX_SAFE_INTEGER)) {
+      throw new Error(`${label} is outside JavaScript's safe integer range`)
+    }
+    return Number(value)
+  }
+  if (!Number.isSafeInteger(value) || value < 0) {
+    throw new Error(`${label} is outside JavaScript's safe integer range`)
+  }
+  return value
+}
+
+function assertSafeMetadata(fileStat, {
+  maxBytes,
+  requireOwnerOnly = false,
+  rejectMultipleLinks = false,
+  label = 'file',
+} = {}) {
+  if (!fileStat.isFile()) throw new Error(`${label} is not a regular file`)
+  const size = safeStatNumber(fileStat.size, `${label} size`)
+  if (size > maxBytes) {
+    throw new Error(`${label} exceeds the ${maxBytes}-byte safety limit`)
+  }
+  const linkCount = safeStatNumber(fileStat.nlink, `${label} link count`)
+  if (rejectMultipleLinks && linkCount !== 1) {
+    throw new Error(`${label} must not have multiple hard links`)
+  }
+  if (requireOwnerOnly && process.platform !== 'win32') {
+    const ownerId = safeStatNumber(fileStat.uid, `${label} owner id`)
+    const mode = safeStatNumber(fileStat.mode, `${label} mode`)
+    if (typeof process.getuid === 'function' && ownerId !== process.getuid()) {
+      throw new Error(`${label} is not owned by the current user`)
+    }
+    if ((mode & 0o077) !== 0) {
+      throw new Error(`${label} permissions must be owner-only`)
+    }
+  }
+  return size
+}
+
+function openFlags() {
+  return fsConstants.O_RDONLY | (process.platform === 'win32' ? 0 : fsConstants.O_NOFOLLOW)
+}
+
+function safeReadFileSync(filePath, options) {
+  const before = lstatSync(filePath, { bigint: true })
+  if (before.isSymbolicLink()) throw new Error(`${options?.label ?? 'file'} must not be a symbolic link`)
+  assertSafeMetadata(before, options)
+
+  const fd = openSync(filePath, openFlags())
+  try {
+    const opened = fstatSync(fd, { bigint: true })
+    const openedSize = assertSafeMetadata(opened, options)
+    if (!sameSafeFileVersion(before, opened)) throw new Error(`${options?.label ?? 'file'} changed during read`)
+
+    const data = Buffer.allocUnsafeSlow(openedSize)
+    let offset = 0
+    while (offset < data.length) {
+      const bytesRead = readSync(fd, data, offset, data.length - offset, offset)
+      if (bytesRead === 0) throw new Error(`${options?.label ?? 'file'} changed during read`)
+      offset += bytesRead
+    }
+    const after = fstatSync(fd, { bigint: true })
+    if (!sameSafeFileVersion(opened, after)) throw new Error(`${options?.label ?? 'file'} changed during read`)
+    return data
+  } finally {
+    closeSync(fd)
+  }
+}
+
+async function safeReadFile(filePath, options) {
+  const before = await lstat(filePath, { bigint: true })
+  if (before.isSymbolicLink()) throw new Error(`${options?.label ?? 'file'} must not be a symbolic link`)
+  assertSafeMetadata(before, options)
+
+  const handle = await open(filePath, openFlags())
+  try {
+    const opened = await handle.stat({ bigint: true })
+    const openedSize = assertSafeMetadata(opened, options)
+    if (!sameSafeFileVersion(before, opened)) throw new Error(`${options?.label ?? 'file'} changed during read`)
+
+    const data = Buffer.allocUnsafeSlow(openedSize)
+    let offset = 0
+    while (offset < data.length) {
+      const { bytesRead } = await handle.read(data, offset, data.length - offset, offset)
+      if (bytesRead === 0) throw new Error(`${options?.label ?? 'file'} changed during read`)
+      offset += bytesRead
+    }
+    const after = await handle.stat({ bigint: true })
+    if (!sameSafeFileVersion(opened, after)) throw new Error(`${options?.label ?? 'file'} changed during read`)
+    return data
+  } finally {
+    await handle.close()
+  }
+}
 
 const DEFAULT_PROTOCOL = 'openai'
 const DEFAULT_VISION_BASE_URL = 'https://dashscope.aliyuncs.com/compatible-mode/v1'
@@ -35,6 +142,7 @@ const DEFAULT_FIRST_BYTE_TIMEOUT_MS = 15_000
 const MAX_CONFIG_FIRST_BYTE_TIMEOUT_MS = 600_000
 const DEFAULT_MAX_IMAGES = 8
 const DEFAULT_MAX_RETRIES = 2
+const DEFAULT_MAX_PROVIDER_SUBMISSIONS = 3
 const DEFAULT_CACHE_MAX_ENTRIES = 32
 const DEFAULT_CACHE_TTL_MS = 30 * 60 * 1000
 const DEFAULT_INBOX_TTL_MS = 30 * 60 * 1000
@@ -52,6 +160,7 @@ const MAX_CONFIG_TOTAL_IMAGE_BYTES = 512 * 1024 * 1024
 const MAX_CONFIG_TOKENS = 131_072
 const MAX_CONFIG_IMAGES = 64
 const MAX_CONFIG_RETRIES = 8
+const MAX_CONFIG_PROVIDER_SUBMISSIONS = 10
 const MAX_CONFIG_CACHE_ENTRIES = 10_000
 const MAX_CONFIG_CACHE_TTL_MS = 30 * 24 * 60 * 60 * 1000
 const MAX_CONFIG_INBOX_TTL_MS = 30 * 24 * 60 * 60 * 1000
@@ -61,31 +170,14 @@ const MAX_CONFIG_FILE_BYTES = 1024 * 1024
 const MAX_API_KEY_BYTES = 16 * 1024
 const MAX_MODEL_CHARS = 256
 
-// The welfare gateway endpoint is distributed privately (the API key is handed
-// out by the author). The WebUI and its HTTP API never expose the real URL:
-// clients only ever see WELFARE_BASE_URL_ALIAS, and the server resolves the
-// alias back to the real endpoint before the value reaches config validation
-// or the model call.
-//
-// The URL itself is stored as an XOR+Base64 cipher rather than plaintext so a
-// casual read/grep of the published source (npm tarball, GitHub, the bundled
-// Skill/dsh artifacts) does not reveal it. This only raises the bar — anyone
-// determined can still decode it from a running process — it is not secrecy.
-const WELFARE_BASE_URL_CIPHER = 'HgRZBxZWSU4TFURJEQYMBAwYREFER1IfHwMPHBZcV0RWAhFQ'
-const WELFARE_BASE_URL_KEY = 'vp-welfare-gateway-2026'
-
-function decodeWelfareBaseUrl() {
-  const cipher = Buffer.from(WELFARE_BASE_URL_CIPHER, 'base64')
-  let out = ''
-  for (let i = 0; i < cipher.length; i++) {
-    out += String.fromCharCode(cipher[i] ^ WELFARE_BASE_URL_KEY.charCodeAt(i % WELFARE_BASE_URL_KEY.length))
-  }
-  return out
-}
+// This is a third-party gateway. Keep the real destination auditable in source
+// and UI: reversible obfuscation does not protect a secret, but it does prevent
+// users from understanding where their images, prompts, and API key are sent.
+const WELFARE_BASE_URL = 'https://api.prismaistudio.xyz:663/v1'
 
 function welfareHostname() {
   try {
-    return new URL(decodeWelfareBaseUrl()).hostname.toLowerCase()
+    return new URL(WELFARE_BASE_URL).hostname.toLowerCase()
   } catch {
     return ''
   }
@@ -97,7 +189,7 @@ const WELFARE_MODEL_IDS = new Set(['minimax-m3'])
 function isWelfareBaseUrl(value) {
   if (typeof value !== 'string') return false
   const normalized = value.trim().replace(/\/+$/, '')
-  return normalized === decodeWelfareBaseUrl() || normalized === WELFARE_BASE_URL_ALIAS
+  return normalized === WELFARE_BASE_URL || normalized === WELFARE_BASE_URL_ALIAS
 }
 
 // Maps the public alias to the real endpoint, but ONLY for the model the
@@ -111,7 +203,7 @@ function resolveWelfareBaseUrl(value, model) {
   if (model !== undefined && !WELFARE_MODEL_IDS.has(String(model).toLowerCase())) {
     throw new Error('The built-in welfare channel only serves MiniMax-M3; select a custom Base URL for other models')
   }
-  return decodeWelfareBaseUrl()
+  return WELFARE_BASE_URL
 }
 
 function maskWelfareBaseUrl(value) {
@@ -256,7 +348,7 @@ const VISION_MODEL_PRESETS = [
   // 不对外公布获取入口。welfare:true 让 WebUI 隐藏官方「获取 API Key」链接。
   // 注意保持官方大小写 MiniMax-M3：该中转站的「福利」分组同样大小写敏感，
   // 写成全小写会 503「无可用渠道」。
-  { model: 'MiniMax-M3', label: { zh: 'MiniMax-M3 (福利)', en: 'MiniMax-M3 (Welfare)' }, baseUrl: decodeWelfareBaseUrl(), welfare: true },
+  { model: 'MiniMax-M3', label: { zh: 'MiniMax-M3 (福利)', en: 'MiniMax-M3 (Welfare)' }, baseUrl: WELFARE_BASE_URL, welfare: true },
   { model: 'glm-4.6v', label: { zh: 'GLM-4.6V (智谱 BigModel 国内)', en: 'GLM-4.6V (Zhipu China)' }, baseUrl: 'https://open.bigmodel.cn/api/paas/v4' },
   { model: 'glm-4.6v', label: { zh: 'GLM-4.6V (智谱 Z.AI 海外)', en: 'GLM-4.6V (Zhipu Global)' }, baseUrl: 'https://api.z.ai/api/paas/v4' },
   { model: 'glm-5v-turbo', label: { zh: 'GLM-5V-Turbo (智谱 BigModel 国内)', en: 'GLM-5V-Turbo (Zhipu China)' }, baseUrl: 'https://open.bigmodel.cn/api/paas/v4' },
@@ -507,17 +599,13 @@ function loadConfigFile(env) {
   const configPath = getConfigFilePath(env)
   let raw
   try {
-    const fileStat = statSync(configPath)
-    if (!fileStat.isFile()) {
-      throw new Error('path is not a regular file')
-    }
-    if (fileStat.size > MAX_CONFIG_FILE_BYTES) {
-      throw new Error(`file exceeds the ${MAX_CONFIG_FILE_BYTES}-byte safety limit`)
-    }
-    raw = readFileSync(configPath, 'utf8')
+    raw = safeReadFileSync(configPath, {
+      maxBytes: MAX_CONFIG_FILE_BYTES,
+      label: 'config file',
+    }).toString('utf8')
   } catch (error) {
     if (error?.code === 'ENOENT') return {}
-    throw new Error(`Could not read config file ${configPath}: ${error.message}`)
+    throw new Error(`Could not read config file ${basename(configPath)}: ${error.message}`)
   }
 
   let parsed
@@ -528,10 +616,10 @@ function loadConfigFile(env) {
     // content (e.g. `Unexpected token '-', "-----BEGIN OPENSSH P..."`), which
     // can leak sensitive bytes when VISIONPOWER_CONFIG is pointed at a non-JSON
     // private file. Surface a static description instead.
-    throw new Error(`Invalid JSON in config file ${configPath}; ensure it contains a single JSON object`)
+    throw new Error(`Invalid JSON in config file ${basename(configPath)}; ensure it contains a single JSON object`)
   }
   if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
-    throw new Error(`Config file ${configPath} must contain a JSON object`)
+    throw new Error(`Config file ${basename(configPath)} must contain a JSON object`)
   }
   return parsed
 }
@@ -600,6 +688,22 @@ function allowedDirsFromFile(value) {
 function loadVisionConfig(env = process.env) {
   const file = loadConfigFile(env)
 
+  const dshEnabledEnv = readEnvValue(env, ['VISIONPOWER_DSH_ENABLED'])
+  // `enabled` briefly existed as a global switch in the unreleased 3.1.0
+  // implementation. Treat it only as a migration fallback for dsh; the
+  // canonical core deliberately ignores dshEnabled so MCP/Skill callers are
+  // never disabled by a host-specific lifecycle preference.
+  const dshEnabled = dshEnabledEnv.value
+    ? parseBoolean(dshEnabledEnv)
+    : (booleanFromFile(file.dshEnabled, 'dshEnabled')
+      ?? booleanFromFile(file.enabled, 'enabled')
+      ?? true)
+
+  const allowInsecureHttpEnv = readEnvValue(env, ['VISIONPOWER_ALLOW_INSECURE_HTTP'])
+  const allowInsecureHttp = allowInsecureHttpEnv.value
+    ? parseBoolean(allowInsecureHttpEnv)
+    : (booleanFromFile(file.allowInsecureHttp, 'allowInsecureHttp') ?? false)
+
   const modelFile = readFileStringValue(file, ['model', 'VISIONPOWER_MODEL'])
   const configuredModel = readEnvValue(env, ['VISIONPOWER_MODEL']).value
     || modelFile.value
@@ -618,7 +722,7 @@ function loadVisionConfig(env = process.env) {
   const baseUrlSource = baseUrlEnv.value
     ? baseUrlEnv.name
     : fileBaseUrl.value ? fileBaseUrl.name : 'VISIONPOWER_BASE_URL'
-  const baseUrl = normalizeBaseUrl(rawBaseUrl, baseUrlSource)
+  const baseUrl = normalizeBaseUrl(rawBaseUrl, baseUrlSource, { allowInsecureHttp })
   const model = normalizeModelForKnownEndpoint(configuredModel, baseUrl)
   const modelCapabilities = resolveModelCapabilities(model, baseUrl)
 
@@ -653,9 +757,11 @@ function loadVisionConfig(env = process.env) {
   )
 
   const config = {
+    dshEnabled,
     apiKey,
     model,
     baseUrl,
+    allowInsecureHttp,
     protocol,
     allowedDirs: allowedDirsEnv.value
       ? parseAllowedDirs(allowedDirsEnv)
@@ -684,6 +790,12 @@ function loadVisionConfig(env = process.env) {
       readEnvValue(env, ['VISIONPOWER_MAX_RETRIES']),
       integerFromFile(file.maxRetries, 'maxRetries', { allowZero: true, max: MAX_CONFIG_RETRIES }) ?? DEFAULT_MAX_RETRIES,
       MAX_CONFIG_RETRIES,
+    ),
+    maxProviderSubmissions: parsePositiveInteger(
+      readEnvValue(env, ['VISIONPOWER_MAX_PROVIDER_SUBMISSIONS']),
+      integerFromFile(file.maxProviderSubmissions, 'maxProviderSubmissions', { max: MAX_CONFIG_PROVIDER_SUBMISSIONS })
+        ?? DEFAULT_MAX_PROVIDER_SUBMISSIONS,
+      MAX_CONFIG_PROVIDER_SUBMISSIONS,
     ),
     debug: debugEnv.value ? parseBoolean(debugEnv) : (booleanFromFile(file.debug, 'debug') ?? false),
     cache: resolveCacheConfig(env, file),
@@ -771,7 +883,15 @@ function resolveCacheConfig(env, file) {
   return { enabled, maxEntries, ttlMs, dir: getCacheDir(env) }
 }
 
-function normalizeBaseUrl(value, name) {
+function isLoopbackHttpHostname(hostname) {
+  const normalized = hostname.toLowerCase().replace(/^\[|\]$/g, '').replace(/\.+$/, '')
+  return normalized === 'localhost'
+    || normalized.endsWith('.localhost')
+    || normalized === '::1'
+    || /^127(?:\.\d{1,3}){3}$/.test(normalized)
+}
+
+function normalizeBaseUrl(value, name, { allowInsecureHttp = false } = {}) {
   let url
   try {
     url = new URL(value)
@@ -781,6 +901,9 @@ function normalizeBaseUrl(value, name) {
 
   if (url.protocol !== 'http:' && url.protocol !== 'https:') {
     throw new Error(`${name} must use http or https`)
+  }
+  if (url.protocol === 'http:' && !isLoopbackHttpHostname(url.hostname) && !allowInsecureHttp) {
+    throw new Error(`${name} must use HTTPS for non-loopback endpoints (set allowInsecureHttp=true only for a trusted development network)`)
   }
   if (url.username || url.password) {
     throw new Error(`${name} must not include credentials`)
@@ -851,9 +974,9 @@ function saveVisionConfig(config, env = process.env) {
 // polluting keys sent by the client are silently dropped. Kept here (next to
 // the validators below) so the server and the validation pass always agree.
 const ALLOWED_CONFIG_KEYS = new Set([
-  'apiKey', 'model', 'baseUrl', 'protocol', 'allowedDirs',
+  'dshEnabled', 'apiKey', 'model', 'baseUrl', 'protocol', 'allowInsecureHttp', 'allowedDirs',
   'maxImageBytes', 'maxTotalImageBytes', 'timeoutMs', 'firstByteTimeoutMs',
-  'maxTokens', 'maxImages', 'maxRetries',
+  'maxTokens', 'maxImages', 'maxRetries', 'maxProviderSubmissions',
   'inboxTtlMs', 'inboxMaxEntries', 'inboxMaxBytes', 'debug', 'cache',
 ])
 
@@ -873,9 +996,21 @@ function normalizeConfigObject(input) {
     if (ALLOWED_CONFIG_KEYS.has(key)) cleaned[key] = value
   }
 
+  if (cleaned.allowInsecureHttp !== undefined && cleaned.allowInsecureHttp !== null) {
+    cleaned.allowInsecureHttp = booleanFromFile(
+      cleaned.allowInsecureHttp,
+      'allowInsecureHttp',
+      { prefix: 'config field' },
+    )
+  } else if (cleaned.allowInsecureHttp === null) {
+    delete cleaned.allowInsecureHttp
+  }
+
   // baseUrl: normalize exactly like loadVisionConfig does.
   if (typeof cleaned.baseUrl === 'string' && cleaned.baseUrl.trim()) {
-    cleaned.baseUrl = normalizeBaseUrl(cleaned.baseUrl.trim(), 'baseUrl')
+    cleaned.baseUrl = normalizeBaseUrl(cleaned.baseUrl.trim(), 'baseUrl', {
+      allowInsecureHttp: cleaned.allowInsecureHttp ?? false,
+    })
   } else if (cleaned.baseUrl !== undefined) {
     throw new Error('baseUrl must be a non-empty string')
   }
@@ -935,6 +1070,7 @@ function normalizeConfigObject(input) {
     { key: 'maxTokens', label: 'maxTokens', allowZero: false, max: MAX_CONFIG_TOKENS },
     { key: 'maxImages', label: 'maxImages', allowZero: false, max: MAX_CONFIG_IMAGES },
     { key: 'maxRetries', label: 'maxRetries', allowZero: true, max: MAX_CONFIG_RETRIES },
+    { key: 'maxProviderSubmissions', label: 'maxProviderSubmissions', allowZero: false, max: MAX_CONFIG_PROVIDER_SUBMISSIONS },
     { key: 'inboxTtlMs', label: 'inboxTtlMs', allowZero: false, max: MAX_CONFIG_INBOX_TTL_MS },
     { key: 'inboxMaxEntries', label: 'inboxMaxEntries', allowZero: false, max: MAX_CONFIG_INBOX_ENTRIES },
     { key: 'inboxMaxBytes', label: 'inboxMaxBytes', allowZero: false, max: MAX_CONFIG_INBOX_BYTES },
@@ -980,7 +1116,7 @@ function normalizeConfigObject(input) {
   }
 
   // Booleans.
-  for (const key of ['debug']) {
+  for (const key of ['dshEnabled', 'debug']) {
     if (cleaned[key] !== undefined && cleaned[key] !== null) {
       cleaned[key] = booleanFromFile(cleaned[key], key, { prefix: 'config field' })
     }
@@ -1518,6 +1654,8 @@ const VISION_RETRYABLE_STATUS = new Set([429, 500, 502, 503, 504])
 const MAX_PROMPT_CHARS = 20_000
 const MAX_RESPONSE_BODY_BYTES = 5 * 1024 * 1024
 const MAX_CACHE_VALUE_BYTES = 1024 * 1024
+const MAX_DISK_CACHE_FILE_BYTES = MAX_CACHE_VALUE_BYTES + 16 * 1024
+const CACHE_SCHEMA_VERSION = 2
 const MAX_RETRY_AFTER_MS = 30 * 1000
 const MAX_REMOTE_IMAGE_REDIRECTS = 3
 const BASE64_WRAP_LINE_CHARS = 64
@@ -1678,8 +1816,16 @@ function providerError(message) {
 // One streamed completion being aggregated. Both wire protocols (OpenAI
 // compatible chat completions and Anthropic Messages) use SSE `data:` framing;
 // only the delta shapes differ, so a single line processor serves both.
-function createSseAccumulator() {
-  return { parts: [], sawReasoning: false, totalChars: 0, done: false }
+function createSseAccumulator(protocol = 'openai') {
+  return {
+    protocol,
+    parts: [],
+    sawReasoning: false,
+    totalChars: 0,
+    done: false,
+    sawFinishReason: false,
+    eventIndex: 0,
+  }
 }
 
 function streamEventErrorMessage(event) {
@@ -1712,8 +1858,11 @@ function feedSseLine(state, line) {
   try {
     event = JSON.parse(payload)
   } catch {
-    return
+    const error = new Error(`Vision model returned malformed SSE data at event ${state.eventIndex + 1}`)
+    error.code = 'VISION_INCOMPLETE_STREAM'
+    throw error
   }
+  state.eventIndex += 1
   const upstreamMessage = streamEventErrorMessage(event)
   if (upstreamMessage) throw providerError(`Vision model API error: ${upstreamMessage}`)
 
@@ -1731,6 +1880,9 @@ function feedSseLine(state, line) {
         ? delta.content.map((part) => (typeof part?.text === 'string' ? part.text : '')).join('')
         : '')
   }
+  if (event.choices?.some?.((choice) => choice?.finish_reason !== undefined && choice.finish_reason !== null)) {
+    state.sawFinishReason = true
+  }
   // Anthropic Messages: content_block_delta with text_delta / thinking_delta
   if (event.type === 'content_block_delta') {
     if (event.delta?.type === 'text_delta' && typeof event.delta?.text === 'string') {
@@ -1739,9 +1891,20 @@ function feedSseLine(state, line) {
       state.sawReasoning = true
     }
   }
+  if (event.type === 'message_stop') state.done = true
 }
 
 function finishSse(state) {
+  // OpenAI-compatible providers do not all emit the optional `[DONE]`
+  // sentinel. A final choice carrying a non-null finish_reason is also an
+  // authoritative terminal event; MiniMax, for example, closes the stream
+  // after `finish_reason: "stop"`. Keep rejecting streams that end with
+  // neither signal so genuinely truncated output is never returned/cached.
+  if (!state.done && !state.sawFinishReason) {
+    const error = new Error('Vision model stream ended before its terminal event')
+    error.code = 'VISION_INCOMPLETE_STREAM'
+    throw error
+  }
   return {
     text: stripLeadingReasoningBlock(state.parts.join('')).trim(),
     sawReasoning: state.sawReasoning,
@@ -1751,10 +1914,10 @@ function finishSse(state) {
 // Streams are read incrementally so the first-byte watchdog can be disarmed as
 // soon as the provider starts answering and a stalled upstream is detected
 // long before the overall request timeout would fire.
-async function readSseCompletion(response, onFirstByte) {
+async function readSseCompletion(response, onFirstByte, protocol) {
   const reader = response.body.getReader()
   const decoder = new TextDecoder()
-  const state = createSseAccumulator()
+  const state = createSseAccumulator(protocol)
   let buffer = ''
   let firstByte = true
   let totalBytes = 0
@@ -1800,8 +1963,8 @@ async function readSseCompletion(response, onFirstByte) {
   return finishSse(state)
 }
 
-function completionFromSseText(bodyText) {
-  const state = createSseAccumulator()
+function completionFromSseText(bodyText, protocol) {
+  const state = createSseAccumulator(protocol)
   for (const line of bodyText.split('\n')) {
     feedSseLine(state, line.replace(/\r$/, ''))
     if (state.done) break
@@ -1835,12 +1998,12 @@ function completionFromResponseBody(data) {
 // stream SSE while labeling it with an unexpected content type. Parse the JSON
 // envelope first; fall back to SSE line parsing when the body only looks like
 // an event stream.
-function completionFromBodyText(bodyText) {
+function completionFromBodyText(bodyText, protocol = 'openai') {
   let data
   try {
     data = JSON.parse(bodyText)
   } catch {
-    if (looksLikeSse(bodyText)) return completionFromSseText(bodyText)
+    if (looksLikeSse(bodyText)) return completionFromSseText(bodyText, protocol)
     throw providerError('Vision model returned a non-JSON response')
   }
   if (data?.error?.message) throw providerError(`Vision model API error: ${data.error.message}`)
@@ -2148,7 +2311,26 @@ function assertPublicAddress(address) {
 // private answers, and the chosen address is pinned in the actual HTTP request
 // below so a DNS rebinding response cannot redirect the local process to a
 // different destination after this check.
-async function resolvePublicImageUrl(imageUrl, lookupAddresses = lookup) {
+function waitWithSignal(promise, signal) {
+  if (!signal) return promise
+  if (signal.aborted) return Promise.reject(abortError())
+  return new Promise((resolveWait, rejectWait) => {
+    const onAbort = () => rejectWait(abortError())
+    signal.addEventListener('abort', onAbort, { once: true })
+    promise.then(
+      (value) => {
+        signal.removeEventListener('abort', onAbort)
+        resolveWait(value)
+      },
+      (error) => {
+        signal.removeEventListener('abort', onAbort)
+        rejectWait(error)
+      },
+    )
+  })
+}
+
+async function resolvePublicImageUrl(imageUrl, lookupAddresses = lookup, signal) {
   const url = parsePublicImageUrl(imageUrl)
   if (isIP(url.hostname)) {
     assertPublicAddress({ address: url.hostname, family: isIP(url.hostname) })
@@ -2157,7 +2339,10 @@ async function resolvePublicImageUrl(imageUrl, lookupAddresses = lookup) {
 
   let addresses
   try {
-    addresses = await lookupAddresses(url.hostname, { all: true, verbatim: true })
+    addresses = await waitWithSignal(
+      lookupAddresses(url.hostname, { all: true, verbatim: true }),
+      signal,
+    )
   } catch {
     throw new Error('image_url hostname could not be resolved to a public address')
   }
@@ -2168,12 +2353,13 @@ async function resolvePublicImageUrl(imageUrl, lookupAddresses = lookup) {
   return { url, addresses }
 }
 
-function requestRemoteImage(url, address, timeoutMs) {
+function requestRemoteImage(url, address, timeoutMs, signal) {
   const request = url.protocol === 'https:' ? httpsRequest : httpRequest
   return new Promise((resolveRequest, rejectRequest) => {
     const req = request(url, {
       lookup: (_hostname, _options, callback) => callback(null, address.address, address.family),
-      headers: { Accept: 'image/*' },
+      headers: { Accept: 'image/*', 'Accept-Encoding': 'identity' },
+      signal,
     }, (response) => resolveRequest(response))
     req.setTimeout(timeoutMs, () => req.destroy(new Error('image_url download timed out')))
     req.once('error', rejectRequest)
@@ -2181,61 +2367,85 @@ function requestRemoteImage(url, address, timeoutMs) {
   })
 }
 
-async function downloadPublicImage(imageUrl, config) {
-  let nextUrl = imageUrl
-  for (let redirectCount = 0; redirectCount <= MAX_REMOTE_IMAGE_REDIRECTS; redirectCount += 1) {
-    const { url, addresses } = await resolvePublicImageUrl(nextUrl)
+async function downloadPublicImage(imageUrl, config, signal) {
+  const controller = new AbortController()
+  let timedOut = false
+  let externallyAborted = signal?.aborted ?? false
+  const timer = setTimeout(() => {
+    timedOut = true
+    controller.abort()
+  }, config.requestTimeoutMs)
+  const onExternalAbort = () => {
+    externallyAborted = true
+    controller.abort()
+  }
+  if (signal && !signal.aborted) signal.addEventListener('abort', onExternalAbort, { once: true })
+
+  try {
+    let nextUrl = imageUrl
+    for (let redirectCount = 0; redirectCount <= MAX_REMOTE_IMAGE_REDIRECTS; redirectCount += 1) {
+      const { url, addresses } = await resolvePublicImageUrl(nextUrl, lookup, controller.signal)
     // Pin a randomly selected verified address for each request. Choosing a
     // single address avoids Node re-resolving a hostname after validation;
     // every answer was checked above, so normal dual-stack hosts remain safe.
-    const address = addresses[Math.floor(Math.random() * addresses.length)]
-    const response = await requestRemoteImage(url, address, config.requestTimeoutMs)
-    const status = response.statusCode ?? 0
-    if ([301, 302, 303, 307, 308].includes(status)) {
-      const location = response.headers.location
-      response.resume()
-      if (!location) throw new Error('image_url redirect is missing a Location header')
-      if (redirectCount === MAX_REMOTE_IMAGE_REDIRECTS) {
-        throw new Error(`image_url exceeded the ${MAX_REMOTE_IMAGE_REDIRECTS}-redirect limit`)
-      }
-      try {
-        nextUrl = new URL(location, url).toString()
-      } catch {
-        throw new Error('image_url redirect location is invalid')
-      }
-      continue
-    }
-    if (status < 200 || status >= 300) {
-      response.resume()
-      throw new Error(`image_url download failed (${status})`)
-    }
-
-    const declaredLength = response.headers['content-length']
-    if (typeof declaredLength === 'string' && /^\d+$/.test(declaredLength) && Number(declaredLength) > config.maxImageBytes) {
-      response.resume()
-      throw imageTooLargeError(config, 'image_url')
-    }
-    const chunks = []
-    let totalBytes = 0
-    const data = await new Promise((resolveData, rejectData) => {
-      response.on('data', (chunk) => {
-        totalBytes += chunk.length
-        if (totalBytes > config.maxImageBytes) {
-          response.destroy()
-          rejectData(imageTooLargeError(config, 'image_url'))
-          return
+      const address = addresses[Math.floor(Math.random() * addresses.length)]
+      const response = await requestRemoteImage(url, address, config.requestTimeoutMs, controller.signal)
+      const status = response.statusCode ?? 0
+      if ([301, 302, 303, 307, 308].includes(status)) {
+        const location = response.headers.location
+        response.resume()
+        if (!location) throw new Error('image_url redirect is missing a Location header')
+        if (redirectCount === MAX_REMOTE_IMAGE_REDIRECTS) {
+          throw new Error(`image_url exceeded the ${MAX_REMOTE_IMAGE_REDIRECTS}-redirect limit`)
         }
-        chunks.push(chunk)
+        try {
+          nextUrl = new URL(location, url).toString()
+        } catch {
+          throw new Error('image_url redirect location is invalid')
+        }
+        continue
+      }
+      if (status < 200 || status >= 300) {
+        response.resume()
+        throw new Error(`image_url download failed (${status})`)
+      }
+
+      const declaredLength = response.headers['content-length']
+      if (typeof declaredLength === 'string' && /^\d+$/.test(declaredLength) && Number(declaredLength) > config.maxImageBytes) {
+        response.resume()
+        throw imageTooLargeError(config, 'image_url')
+      }
+      const chunks = []
+      let totalBytes = 0
+      const data = await new Promise((resolveData, rejectData) => {
+        response.on('data', (chunk) => {
+          totalBytes += chunk.length
+          if (totalBytes > config.maxImageBytes) {
+            response.destroy()
+            rejectData(imageTooLargeError(config, 'image_url'))
+            return
+          }
+          chunks.push(chunk)
+        })
+        response.once('end', () => resolveData(Buffer.concat(chunks, totalBytes)))
+        response.once('error', rejectData)
+        response.once('aborted', () => rejectData(new Error('image_url download was aborted')))
       })
-      response.once('end', () => resolveData(Buffer.concat(chunks, totalBytes)))
-      response.once('error', rejectData)
-      response.once('aborted', () => rejectData(new Error('image_url download was aborted')))
-    })
-    const mimeType = detectImageMimeType(data)
-    if (!mimeType) throw new Error('image_url content is not a supported raster image')
-    return { data, mimeType, byteLength: data.length }
+      const mimeType = detectImageMimeType(data)
+      if (!mimeType) throw new Error('image_url content is not a supported raster image')
+      return { data, mimeType, byteLength: data.length }
+    }
+    throw new Error('image_url redirect limit reached')
+  } catch (error) {
+    if (externallyAborted || signal?.aborted) throw abortError()
+    if (timedOut || (controller.signal.aborted && error?.name === 'AbortError')) {
+      throw new Error(`image_url download timed out after ${Math.round(config.requestTimeoutMs / 1000)}s`)
+    }
+    throw error
+  } finally {
+    clearTimeout(timer)
+    signal?.removeEventListener('abort', onExternalAbort)
   }
-  throw new Error('image_url redirect limit reached')
 }
 
 function maxEncodedBase64Chars(maxDecodedBytes) {
@@ -2378,7 +2588,7 @@ function assertExactlyOneImageSource(params) {
   }
 }
 
-async function imageBlockFromInput(params, config) {
+async function imageBlockFromInput(params, config, signal) {
   assertExactlyOneImageSource(params)
 
   if (params.image_path) {
@@ -2408,7 +2618,7 @@ async function imageBlockFromInput(params, config) {
   }
 
   if (params.image_url) {
-    const image = await downloadPublicImage(params.image_url, config)
+    const image = await downloadPublicImage(params.image_url, config, signal)
     return {
       block: {
         type: 'image_url',
@@ -2662,10 +2872,27 @@ function firstByteWatchdogMs(config) {
   return Math.min(configured, config.requestTimeoutMs)
 }
 
-async function fetchVisionCompletion(requestBody, config, signal, { stream = true } = {}) {
+function createSubmissionBudget(config) {
+  return {
+    max: Math.max(1, config.maxProviderSubmissions ?? 3),
+    used: 0,
+  }
+}
+
+function consumeSubmission(budget) {
+  if (budget.used >= budget.max) {
+    const error = new Error(`Vision model submission budget exhausted after ${budget.used} request(s)`)
+    error.code = 'VISION_SUBMISSION_BUDGET'
+    throw error
+  }
+  budget.used += 1
+}
+
+async function fetchVisionCompletion(requestBody, config, signal, { stream = true, budget } = {}) {
   const { url, headers, body } = getProviderRequestConfig(config, requestBody)
   const sendBody = stream ? { ...body, stream: true } : body
   if (signal?.aborted) throw abortError()
+  const submissionBudget = budget ?? createSubmissionBudget(config)
 
   const watchdogMs = stream ? firstByteWatchdogMs(config) : 0
   for (let attempt = 0; ; attempt += 1) {
@@ -2701,18 +2928,20 @@ async function fetchVisionCompletion(requestBody, config, signal, { stream = tru
 
     let result
     try {
+      consumeSubmission(submissionBudget)
       const response = await fetch(url, {
         method: 'POST',
         headers,
         body: JSON.stringify(sendBody),
         signal: controller.signal,
+        redirect: 'error',
       })
       const contentType = response.headers.get('content-type') ?? ''
       if (response.ok && stream && contentType.includes('text/event-stream')) {
-        return await readSseCompletion(response, disarmWatchdog)
+        return await readSseCompletion(response, disarmWatchdog, config.protocol)
       }
       const bodyText = await readResponseText(response, disarmWatchdog)
-      if (response.ok) return completionFromBodyText(bodyText)
+      if (response.ok) return completionFromBodyText(bodyText, config.protocol)
       result = {
         ok: response.ok,
         status: response.status,
@@ -2740,7 +2969,9 @@ async function fetchVisionCompletion(requestBody, config, signal, { stream = tru
       // Retrying an already oversized or otherwise deterministic provider
       // failure only repeats the same memory and bandwidth pressure. Surface
       // it directly.
-      if (error?.code === 'VISION_RESPONSE_TOO_LARGE' || error?.code === 'VISION_PROVIDER_ERROR') throw error
+      if (error?.code === 'VISION_RESPONSE_TOO_LARGE'
+        || error?.code === 'VISION_PROVIDER_ERROR'
+        || error?.code === 'VISION_SUBMISSION_BUDGET') throw error
       if (attempt < config.maxRetries) {
         const wait = retryDelayMs(attempt)
         debugLog(config, `request error: ${error?.message ?? error}; retry ${attempt + 1}/${config.maxRetries} in ${wait}ms`)
@@ -2777,6 +3008,7 @@ const resultCache = new Map()
 
 function computeCacheKey(requestBody, config) {
   const hash = createHash('sha256')
+  hash.update(`cache_schema=${CACHE_SCHEMA_VERSION}\n`)
   // Scope cached answers to the exact provider endpoint and credential. The
   // same model ID can exist behind different gateways/accounts with different
   // behavior or data boundaries, so sharing across either is incorrect.
@@ -2864,7 +3096,7 @@ function parseDiskCacheEntry(raw, key) {
   } catch {
     return null
   }
-  if (entry?.version !== 1 || entry.key !== key
+  if (entry?.version !== CACHE_SCHEMA_VERSION || entry.key !== key
     || typeof entry.value !== 'string' || !Number.isFinite(entry.expiresAt)) {
     return null
   }
@@ -2877,7 +3109,13 @@ async function readDiskResultCache(key, config) {
   const filePath = join(dir, `${key}.json`)
   let raw
   try {
-    raw = await readFile(filePath, 'utf8')
+    if (!(await isSecureCacheDir(dir))) return undefined
+    raw = (await safeReadFile(filePath, {
+      maxBytes: MAX_DISK_CACHE_FILE_BYTES,
+      requireOwnerOnly: true,
+      rejectMultipleLinks: true,
+      label: 'disk cache entry',
+    })).toString('utf8')
   } catch (error) {
     if (error?.code !== 'ENOENT') debugLog(config, `disk cache read failed: ${error?.message ?? error}`)
     return undefined
@@ -2957,7 +3195,7 @@ async function writeDiskResultCache(key, text, config) {
   if (!config.cache?.enabled || !key || !dir) return
   if (Buffer.byteLength(text, 'utf8') > MAX_CACHE_VALUE_BYTES) return
   const entry = JSON.stringify({
-    version: 1,
+    version: CACHE_SCHEMA_VERSION,
     key,
     expiresAt: Date.now() + config.cache.ttlMs,
     value: text,
@@ -3142,38 +3380,48 @@ function isUnsupportedStreamParameterError(error) {
   return parameterPattern.test(message) && unsupportedPattern.test(message)
 }
 
-async function fetchVisionCompletionCompatible(requestBody, config, signal) {
-  try {
-    return await fetchVisionCompletion(requestBody, config, signal)
-  } catch (error) {
+async function fetchVisionCompletionCompatible(requestBody, config, signal, budget = createSubmissionBudget(config)) {
+  let compatibleBody = requestBody
+  let stream = true
+  let tokenParameterSwapped = false
+  for (;;) {
+    try {
+      return await fetchVisionCompletion(compatibleBody, config, signal, { stream, budget })
+    } catch (error) {
     // Cooperative cancellation is never a compatibility problem — surface it
     // immediately instead of feeding it to a parameter fallback.
-    if (error?.name === 'AbortError') throw error
+      if (error?.name === 'AbortError') throw error
     // Dropping `stream` is not a parameter-shape conversion, so the fallback
     // below applies to both protocols. The token-parameter swap, however, is
     // specific to OpenAI-compatible providers: Anthropic Messages API only
     // accepts max_tokens, and a rejection there must not be silently converted
     // into a different parameter.
-    if (config.protocol !== 'anthropic') {
-      const compatible = requestBody.max_tokens !== undefined && isUnsupportedMaxTokensError(error)
-        ? requestWithMaxCompletionTokens(requestBody)
-        : requestBody.max_completion_tokens !== undefined && isUnsupportedMaxCompletionTokensError(error)
-          ? requestWithMaxTokens(requestBody)
-          : null
-      if (compatible) {
-        const target = compatible.max_completion_tokens === undefined ? 'max_tokens' : 'max_completion_tokens'
-        debugLog(config, `provider rejected token parameter; retrying once with ${target}`)
-        return fetchVisionCompletion(compatible, config, signal)
+      if (config.protocol !== 'anthropic' && !tokenParameterSwapped) {
+        const compatible = compatibleBody.max_tokens !== undefined && isUnsupportedMaxTokensError(error)
+          ? requestWithMaxCompletionTokens(compatibleBody)
+          : compatibleBody.max_completion_tokens !== undefined && isUnsupportedMaxCompletionTokensError(error)
+            ? requestWithMaxTokens(compatibleBody)
+            : null
+        if (compatible) {
+          const target = compatible.max_completion_tokens === undefined ? 'max_tokens' : 'max_completion_tokens'
+          debugLog(config, `provider rejected token parameter; retrying once with ${target}`)
+          compatibleBody = compatible
+          tokenParameterSwapped = true
+          continue
+        }
       }
-    }
     // A rare few OpenAI-compatible and Anthropic-compatible gateways reject
     // the standard `stream` parameter outright; retry the identical request
-    // non-streamed.
-    if (isUnsupportedStreamParameterError(error)) {
-      debugLog(config, 'provider rejected the stream parameter; retrying once without streaming')
-      return fetchVisionCompletion(requestBody, config, signal, { stream: false })
+    // non-streamed. Keep the loop so a gateway that rejects both token-field
+    // shape and streaming can apply both narrow transformations without ever
+    // resetting the shared provider-submission budget.
+      if (stream && isUnsupportedStreamParameterError(error)) {
+        debugLog(config, 'provider rejected the stream parameter; retrying once without streaming')
+        stream = false
+        continue
+      }
+      throw error
     }
-    throw error
   }
 }
 
@@ -3217,7 +3465,7 @@ async function describeImage(params, config, signal) {
   const imageBlocks = []
   let totalImageBytes = 0
   for (const image of images) {
-    const resolved = await imageBlockFromInput(image.input, config)
+    const resolved = await imageBlockFromInput(image.input, config, signal)
     totalImageBytes += resolved.byteLength
     if (totalImageBytes > config.maxTotalImageBytes) {
       throw new Error(`Total local/Base64 image data is too large; max is ${Math.round(config.maxTotalImageBytes / 1024 / 1024)}MB`)
@@ -3252,8 +3500,9 @@ async function describeImage(params, config, signal) {
   const startedAt = Date.now()
   debugLog(config, `requesting provider=${capabilities.provider} model=${config.model} images=${images.length} format=${structured ? 'structured' : 'text'}`)
   let completion
+  const submissionBudget = createSubmissionBudget(config)
   try {
-    completion = await fetchVisionCompletionCompatible(requestBody, config, signal)
+    completion = await fetchVisionCompletionCompatible(requestBody, config, signal, submissionBudget)
   } catch (error) {
     if (error?.name === 'AbortError') throw error
     const compatibilityRequest = isUnsupportedSystemRoleError(error)
@@ -3261,7 +3510,7 @@ async function describeImage(params, config, signal) {
       : null
     if (!compatibilityRequest) throw error
     debugLog(config, 'provider rejected system role; retrying once with safety instruction in user content')
-    completion = await fetchVisionCompletionCompatible(compatibilityRequest, config, signal)
+    completion = await fetchVisionCompletionCompatible(compatibilityRequest, config, signal, submissionBudget)
   }
 
   if (!completion.text) {
@@ -3279,7 +3528,7 @@ async function describeImage(params, config, signal) {
 
 const VISUAL_PROBE_IMAGE_BASE64 = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII='
 
-async function testModelConnection(config, { testVision = true } = {}) {
+async function testModelConnection(config, { testVision = true, signal } = {}) {
   if (!config.apiKey) {
     throw new Error('API key is not configured.')
   }
@@ -3295,14 +3544,15 @@ async function testModelConnection(config, { testVision = true } = {}) {
       },
     ])
     let completion
+    const submissionBudget = createSubmissionBudget(config)
     try {
-      completion = await fetchVisionCompletionCompatible(requestBody, config)
+      completion = await fetchVisionCompletionCompatible(requestBody, config, signal, submissionBudget)
     } catch (error) {
       const compatibilityRequest = isUnsupportedSystemRoleError(error)
         ? requestWithoutSystemRole(requestBody)
         : null
       if (!compatibilityRequest) throw error
-      completion = await fetchVisionCompletionCompatible(compatibilityRequest, config)
+      completion = await fetchVisionCompletionCompatible(compatibilityRequest, config, signal, submissionBudget)
     }
     if (completion.text) return `Visual connection verified: ${completion.text}`
     // Hidden thinking blocks or a populated reasoning channel still prove the
@@ -3315,7 +3565,7 @@ async function testModelConnection(config, { testVision = true } = {}) {
   const { requestBody } = buildProviderRequestBody(config, [
     { role: 'user', content: 'hi' }
   ])
-  const completion = await fetchVisionCompletionCompatible(requestBody, config)
+  const completion = await fetchVisionCompletionCompatible(requestBody, config, signal)
   if (completion.text) return completion.text
 
   // Fallback: even with a generous budget a reasoning model can still spend it
@@ -3332,6 +3582,7 @@ async function testModelConnection(config, { testVision = true } = {}) {
 export {
   describeImage,
   loadVisionConfig,
+  normalizeBaseUrl,
   resolveModelCapabilities,
   testModelConnection,
 }

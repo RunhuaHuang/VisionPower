@@ -5,7 +5,9 @@
 // backed by the self-contained core bundle — the same canonical core the MCP
 // server and the standalone Skill use. Credential/model resolution is shared:
 // ~/.visionpower/config.json plus the VISIONPOWER_* / OPENAI_API_KEY
-// environment variables, with this plugin's cordis.yml `config` applied last.
+// environment variables, with this plugin's non-lifecycle cordis.yml `config`
+// applied last. The persistent Settings switch controls only the dsh-facing
+// tool and rule injection; MCP/Skill callers of the shared core are unaffected.
 //
 // describe_image stays a plain tool: the agent calls it during its normal
 // tool-calling phase, with visible progress in the dsh UI and one vision call
@@ -19,8 +21,8 @@
 // first step of every turn the canonical image-locating rules (src/dsh/rules.js)
 // are injected into the agent context via `agent/pre-step`, unless the same
 // rules are already present (e.g. loaded from ~/.dsh/AGENTS.md). The rules tell
-// the agent how to locate the content-addressed attachment files behind
-// dragged/pasted images and to call describe_image on them.
+// the agent to call describe_image; on dsh rc.7+ the tool resolves dragged or
+// pasted image blocks through the host's durable attachment service directly.
 //
 // cordis.patch.yml row:
 //
@@ -39,12 +41,14 @@ import z from '@deepseek-ai/schemastery'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import { spawn } from 'node:child_process'
-import { readFileSync } from 'node:fs'
+import { lstatSync, readFileSync } from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { describeImage, loadVisionConfig, resolveModelCapabilities } from './core.bundle.js'
+import { describeImage, loadVisionConfig, normalizeBaseUrl, resolveModelCapabilities } from './core.bundle.js'
+import { withDshImageAttachments } from './attachments.js'
 import { RULES_MARKER, RULES_TEXT } from './rules.js'
+import { startOrReuseWebuiServer } from '../webui/server.js'
 
 export const name = 'visionpower'
 
@@ -54,6 +58,9 @@ export const inject = ['tools']
 // environment on its own; these overrides apply on top for operators who
 // prefer composition-level settings.
 export const Config = z.object({
+  // Accepted for backwards-compatible profile parsing, but intentionally not
+  // applied. Settings/config.json owns the live dsh-only switch.
+  enabled: z.boolean(),
   model: z.string(),
   baseUrl: z.string(),
   protocol: z.string(),
@@ -62,6 +69,7 @@ export const Config = z.object({
   timeoutMs: z.number(),
   firstByteTimeoutMs: z.number(),
   injectRules: z.boolean(),
+  enableAdminTool: z.boolean(),
   debug: z.boolean(),
 }).default({})
 
@@ -74,7 +82,7 @@ const imageSourceParameters = {
   },
   image_url: {
     type: 'string',
-    description: 'Public http(s) URL of an image; support depends on the configured provider/model. Use image_base64 or image_ref when URL input is unavailable.',
+    description: 'Public http(s) URL of an image. VisionPower downloads and validates it locally, then sends verified bytes to the provider as an embedded image.',
   },
   image_base64: {
     type: 'string',
@@ -91,9 +99,10 @@ const imageSourceParameters = {
   },
 }
 
-// Merge composition-level plugin config over the core's own resolution
-// (config file + environment). Plugin config wins for the keys it sets,
-// because the operator wrote it explicitly in the profile composition.
+// Merge composition-level operational overrides over the core's own
+// resolution. The legacy cordis `enabled` field is deliberately excluded:
+// Settings/config.json owns dshEnabled and must take effect without editing the
+// profile. The shared core ignores that field, so MCP and Skill stay available.
 function resolveConfig(overrides) {
   const env = overrides.configPath
     ? { ...process.env, VISIONPOWER_CONFIG: overrides.configPath }
@@ -101,8 +110,18 @@ function resolveConfig(overrides) {
   const base = loadVisionConfig(env)
   if (overrides.model !== undefined) base.model = overrides.model
   if (overrides.baseUrl !== undefined) base.baseUrl = overrides.baseUrl
-  if (overrides.timeoutMs !== undefined) base.requestTimeoutMs = overrides.timeoutMs
-  if (overrides.firstByteTimeoutMs !== undefined) base.firstByteTimeoutMs = overrides.firstByteTimeoutMs
+  if (overrides.timeoutMs !== undefined) {
+    if (!Number.isSafeInteger(overrides.timeoutMs) || overrides.timeoutMs <= 0) {
+      throw new Error('visionpower plugin config "timeoutMs" must be a positive integer')
+    }
+    base.requestTimeoutMs = overrides.timeoutMs
+  }
+  if (overrides.firstByteTimeoutMs !== undefined) {
+    if (!Number.isSafeInteger(overrides.firstByteTimeoutMs) || overrides.firstByteTimeoutMs <= 0) {
+      throw new Error('visionpower plugin config "firstByteTimeoutMs" must be a positive integer')
+    }
+    base.firstByteTimeoutMs = overrides.firstByteTimeoutMs
+  }
   if (overrides.debug !== undefined) base.debug = overrides.debug
   if (overrides.apiKeyEnv) {
     const key = process.env[overrides.apiKeyEnv]
@@ -124,6 +143,9 @@ function resolveConfig(overrides) {
     // for a custom gateway survives a plugin model switch.
     base.protocol = resolveModelCapabilities(base.model, base.baseUrl).protocol
   }
+  base.baseUrl = normalizeBaseUrl(base.baseUrl, 'visionpower plugin config "baseUrl"', {
+    allowInsecureHttp: base.allowInsecureHttp ?? false,
+  })
   return base
 }
 
@@ -138,21 +160,19 @@ function textOf(message) {
 // 或用户文本为空（纯图片消息在文本线路上就长这样）。纯文本回合不注入，避免每轮
 // 一份 ~1.5KB 的规则在会话历史里线性累积。
 function turnMentionsImages(messages) {
-  for (const message of messages) {
-    if (message?.source?.kind !== 'user') continue
-    const content = message?.content
-    if (Array.isArray(content) && content.some((b) => b?.type === 'image')) return true
-    const text = textOf(message)
-    if (!text.trim()) return true
-    if (/图|图片|截图|照片|screenshot|image/i.test(text)) return true
-  }
-  return false
+  const message = [...messages].reverse().find((candidate) => candidate?.source?.kind === 'user')
+  if (!message) return false
+  const content = message?.content
+  if (Array.isArray(content) && content.some((b) => b?.type === 'image')) return true
+  const text = textOf(message)
+  if (!text.trim()) return true
+  return /图|图片|截图|照片|screenshot|image/i.test(text)
 }
 
 function rulesAlreadyPresent(messages) {
   for (const message of messages) {
     const text = textOf(message)
-    if (text.includes(RULES_MARKER) || text.includes('定位与识图规则')) return true
+    if (text.includes(RULES_MARKER)) return true
   }
   return false
 }
@@ -164,8 +184,11 @@ function rulesAlreadyPresent(messages) {
 function userGlobalAgentsHasRules() {
   try {
     const dshHome = process.env.DSH_HOME || path.join(os.homedir(), '.dsh')
-    const text = readFileSync(path.join(dshHome, 'AGENTS.md'), 'utf8')
-    return text.includes(RULES_MARKER) || text.includes('定位与识图规则')
+    const agentsPath = path.join(dshHome, 'AGENTS.md')
+    const fileStat = lstatSync(agentsPath)
+    if (fileStat.isSymbolicLink() || !fileStat.isFile() || fileStat.size > 256 * 1024) return false
+    const text = readFileSync(agentsPath, 'utf8')
+    return text.includes(RULES_MARKER)
   } catch {
     return false
   }
@@ -204,9 +227,27 @@ function runInstaller(argv, signal) {
 }
 
 export function apply(ctx, config) {
+  // Expose the existing VisionPower configuration console inside dsh Settings.
+  // Reuse an existing listener only after verifying that it is this exact
+  // VisionPower version and points at the same persistent configuration.
+  ctx.effect(() => {
+    let server
+    let disposed = false
+    startOrReuseWebuiServer(17900, { openBrowser: false }).then((result) => {
+      if (disposed) result.server?.close()
+      else server = result.server
+    }).catch((error) => {
+      process.stderr.write(`[visionpower] settings console unavailable: ${error?.stack ?? error}\n`)
+    })
+    return () => {
+      disposed = true
+      server?.close()
+    }
+  })
+
   ctx.tools.register(defineTool({
     name: 'describe_image',
-    description: 'See and understand images — screenshots, photos, diagrams, charts. Extract text (OCR), describe scenes, compare images, and answer questions about what is shown. Use whenever an image is provided via image_path, image_url, image_base64, image_ref, or images[]. For faster, more useful answers, ask the specific question you need answered (e.g. "read the error text", "what does this chart show") instead of an open-ended "describe everything".',
+    description: 'See and understand images — screenshots, photos, diagrams, charts. Extract text (OCR), describe scenes, compare images, and answer questions about what is shown. In dsh, omit image fields to analyze the most recent user image attachment automatically; explicit image_path, image_url, image_base64, image_ref, and images[] inputs remain supported. For faster, more useful answers, ask the specific question you need answered.',
     parameters: {
       ...imageSourceParameters,
       images: {
@@ -233,7 +274,9 @@ export function apply(ctx, config) {
       render: (_args, value) => [{ type: 'text', text: value }],
     },
     async execute(args, exec) {
-      return describeImage(args, resolveConfig(config), exec.signal)
+      const resolvedConfig = resolveConfig(config)
+      const attachmentArgs = await withDshImageAttachments(args, exec, ctx.get('attachments'), resolvedConfig)
+      return describeImage(attachmentArgs, resolvedConfig, exec.signal)
     },
   }))
 
@@ -246,8 +289,9 @@ export function apply(ctx, config) {
   // a short API-key wait: an unconfigured user is guided to the console and the
   // agent simply re-runs this tool after they finish.
   // ─────────────────────────────────────────────────────────────────────────
-  ctx.tools.register(defineTool({
-    name: 'setup_visionpower',
+  if (config.enableAdminTool === true) {
+    ctx.tools.register(defineTool({
+      name: 'setup_visionpower',
     description: 'Install, configure, or verify the VisionPower image-understanding plugin for dsh (drag-and-drop / paste image recognition). Run this whenever the user asks to install, set up, configure, repair, or check VisionPower (e.g. "配置一下 VisionPower", "拖图识图不好使了", "check the visionpower plugin"). Idempotent and safe to re-run: it chains plugin install, cordis mount, the image-accept patch (auto re-applied after dsh upgrades), the config console (http://127.0.0.1:17900), and verification, then returns a full report.',
     parameters: {
       profile: {
@@ -277,7 +321,8 @@ export function apply(ctx, config) {
       }
       return `${out}\n\n[setup_visionpower] 未完全成功（退出码 ${result.status}）。请把上方关键输出转告用户；若是等待 API key 超时，引导用户在 http://127.0.0.1:17900 完成配置后重试本工具；其余报错按上方 ✗/⚠ 提示处理。`
     },
-  }))
+    }))
+  }
 
   // ─────────────────────────────────────────────────────────────────────────
   // pre-step: inject the locating rules on step 1 unless already present
@@ -295,6 +340,9 @@ export function apply(ctx, config) {
         && turnMentionsImages(decision.messages)
         && !rulesAlreadyPresent(decision.messages)
         && !userGlobalAgentsHasRules()) {
+        // The Settings switch is persisted outside the Cordis composition and
+        // must take effect for the next turn without restarting dsh.
+        if (resolveConfig(config).dshEnabled === false) return decision
         const rules = createUserMessage({
           content: [{ type: 'text', text: RULES_TEXT }],
           source: { kind: 'plugin', plugin: 'visionpower' },
@@ -303,7 +351,7 @@ export function apply(ctx, config) {
       }
       return decision
     } catch (error) {
-      ctx.logger?.warn?.('[visionpower] pre-step composition failed: %o', error)
+      process.stderr.write(`[visionpower] pre-step composition failed: ${error?.stack ?? error}\n`)
       return decision
     }
   })

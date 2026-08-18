@@ -1,5 +1,38 @@
 # Changelog
 
+## Unreleased
+
+## 3.1.0 - 2026-08-18
+
+- Updated the dsh/Cordis integration baseline to DeepSeek Harness
+  `0.1.0-rc.7`. Dragged and pasted images are now read through the host's
+  durable `AttachmentStore` in message order; VisionPower no longer parses
+  attachment IDs, decompresses session logs, or derives private storage paths.
+- Added a native **Settings → Plugins → VisionPower** browser tab. It embeds
+  the loopback-only VisionPower configuration console, sharing the same
+  `~/.visionpower/config.json`, model presets, API-key storage, connection test,
+  and save flow used by MCP and the standalone WebUI.
+- Added a default-on, dsh-only VisionPower switch to that tab. Saving a disabled
+  state stops dsh image-rule injection and makes dsh `describe_image` reject new
+  requests; MCP, Skill, and the standalone WebUI remain available. Re-enabling
+  takes effect without restarting dsh. The UI now makes clear that **Save and
+  apply configuration** persists changes automatically.
+- The dsh switch now saves and applies immediately when toggled, through a
+  dedicated one-field endpoint that cannot commit unrelated unsaved model or
+  API-key edits. Failed updates reconcile the checkbox back to server state.
+- Extended the dsh compatibility patch for rc.7's `onReplayDegrade` pi-ai
+  context conversion while retaining rc.6 matching and self-tests.
+- Hardened the rc.7 integration after review: disabled and over-count
+  attachment requests now fail before attachment reads/Base64 allocation;
+  Settings owns the live enable switch instead of Cordis composition
+  overrides; legacy rc.6 AGENTS rules are migrated through a versioned block;
+  truncated SSE responses retry within the provider-submission budget; and the
+  embedded console verifies its loopback instance, version, configuration path,
+  parent origin, and iframe handshake before reuse.
+- Embedded Settings status reflects the server-applied dsh enable state while
+  the standalone Playground remains available. Changing the checkbox remains a
+  draft until **Save and apply configuration** succeeds.
+
 ## 3.0.1 - 2026-08-16
 
 Acceptance-review fixes (three parallel reviewers over the full dsh

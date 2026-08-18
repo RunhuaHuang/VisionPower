@@ -1,5 +1,5 @@
-import { createServer } from 'node:http'
-import { readFileSync, existsSync, statSync } from 'node:fs'
+import { createServer, request as httpRequest } from 'node:http'
+import { readFileSync } from 'node:fs'
 import { createRequire } from 'node:module'
 import { WEBUI_HTML } from './index-html.js'
 import {
@@ -23,6 +23,7 @@ import {
 } from '../config.js'
 import { describeImage, normalizeBase64Image, testModelConnection } from '../vision-core.js'
 import { deleteStagedImage, listStagedImages, stageImageBuffer } from '../image-inbox.js'
+import { safeReadFileSync } from '../safe-fs.js'
 
 const require = createRequire(import.meta.url)
 let alpineScriptCache = null
@@ -35,18 +36,45 @@ const JSON_BODY_OVERHEAD = 1024 * 1024
 // without a second edit.
 const { version: webuiVersion } = require('../../package.json')
 const indexHtml = WEBUI_HTML.replaceAll('__VISIONPOWER_VERSION__', webuiVersion)
+const WEBUI_PRODUCT = 'visionpower'
+const WEBUI_PROTOCOL_VERSION = 1
 
-const HTML_CSP = [
+const HTML_CSP_BASE = [
   "default-src 'none'",
   "script-src 'self' 'unsafe-inline' 'unsafe-eval'",
   "style-src 'self' 'unsafe-inline'",
-  "img-src 'self' data: http: https:",
+  "img-src 'self' data: blob:",
   "connect-src 'self'",
   "font-src 'self' data:",
   "base-uri 'none'",
   "form-action 'none'",
-  "frame-ancestors 'none'",
-].join('; ')
+]
+
+let activeAnalysisRequests = 0
+const MAX_ACTIVE_ANALYSIS_REQUESTS = 2
+
+function isJsonMediaType(value) {
+  const mediaType = String(value || '').split(';', 1)[0].trim().toLowerCase()
+  return mediaType === 'application/json'
+    || /^application\/[a-z0-9!#$&^_.+-]+\+json$/.test(mediaType)
+}
+
+function requestAbortContext(req, res) {
+  const controller = new AbortController()
+  const abort = () => controller.abort()
+  const abortOnEarlyClose = () => {
+    if (!res.writableEnded) abort()
+  }
+  req.once('aborted', abort)
+  res.once('close', abortOnEarlyClose)
+  return {
+    signal: controller.signal,
+    cleanup() {
+      req.removeListener('aborted', abort)
+      res.removeListener('close', abortOnEarlyClose)
+    },
+  }
+}
 
 function readJsonBody(req, maxBytes = SMALL_JSON_BODY_LIMIT) {
   return new Promise((resolveReq, reject) => {
@@ -74,7 +102,14 @@ function readJsonBody(req, maxBytes = SMALL_JSON_BODY_LIMIT) {
       if (tooLarge) return
       try {
         const raw = Buffer.concat(chunks).toString('utf-8')
-        resolveReq(raw ? JSON.parse(raw) : {})
+        const parsed = raw ? JSON.parse(raw) : {}
+        if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
+          const error = new Error('Request body must be a JSON object')
+          error.statusCode = 400
+          reject(error)
+          return
+        }
+        resolveReq(parsed)
       } catch (err) {
         reject(err)
       }
@@ -96,7 +131,7 @@ function sendJson(res, status, data) {
 
 function sendText(res, status, body, contentType) {
   setCommonSecurityHeaders(res)
-  res.setHeader('Cache-Control', 'public, max-age=31536000, immutable')
+  res.setHeader('Cache-Control', 'public, max-age=3600, must-revalidate')
   res.writeHead(status, {
     'Content-Type': contentType,
     'Content-Length': Buffer.byteLength(body),
@@ -111,9 +146,22 @@ function setCommonSecurityHeaders(res) {
   res.setHeader('Permissions-Policy', 'camera=(), microphone=(), geolocation=(), payment=()')
 }
 
-function setHtmlSecurityHeaders(res) {
+function embeddingOrigin(requestUrl) {
+  try {
+    const url = new URL(requestUrl || '/', 'http://127.0.0.1')
+    if (url.searchParams.get('embed') !== 'dsh') return null
+    const candidate = new URL(url.searchParams.get('parentOrigin') || '')
+    if (candidate.protocol !== 'http:' || !isLoopbackAuthority(candidate.host)) return null
+    return candidate.origin
+  } catch {
+    return null
+  }
+}
+
+function setHtmlSecurityHeaders(res, requestUrl) {
   setCommonSecurityHeaders(res)
-  res.setHeader('Content-Security-Policy', HTML_CSP)
+  const frameAncestor = embeddingOrigin(requestUrl) ?? "'none'"
+  res.setHeader('Content-Security-Policy', [...HTML_CSP_BASE, `frame-ancestors ${frameAncestor}`].join('; '))
   res.setHeader('Cache-Control', 'no-store')
 }
 
@@ -161,8 +209,7 @@ function validateLocalApiRequest(meta) {
 
   const method = meta.method.toUpperCase()
   if (['POST', 'PUT', 'PATCH', 'DELETE'].includes(method)) {
-    const contentType = meta.contentType?.toLowerCase() ?? ''
-    if (!contentType.includes('application/json')) return 'Write request must be JSON'
+    if (!isJsonMediaType(meta.contentType)) return 'Write request must be JSON'
   }
 
   return null
@@ -217,16 +264,27 @@ function resolveApiKeyChoice({
 }
 
 function loadRawConfig() {
-  const path = getConfigFilePath()
-  if (!existsSync(path)) return {}
+  const configPath = getConfigFilePath()
+  let raw
   try {
-    const fileStat = statSync(path)
-    if (!fileStat.isFile() || fileStat.size > SMALL_JSON_BODY_LIMIT) return {}
-    const raw = readFileSync(path, 'utf-8')
-    return JSON.parse(raw)
-  } catch {
-    return {}
+    raw = safeReadFileSync(configPath, {
+      maxBytes: SMALL_JSON_BODY_LIMIT,
+      label: 'config file',
+    }).toString('utf8')
+  } catch (error) {
+    if (error?.code === 'ENOENT') return {}
+    throw new Error(`Could not safely read the existing config file: ${error.message}`)
   }
+  let parsed
+  try {
+    parsed = JSON.parse(raw)
+  } catch {
+    throw new Error('The existing config file contains invalid JSON')
+  }
+  if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    throw new Error('The existing config file must contain a JSON object')
+  }
+  return parsed
 }
 
 function rawApiKey(config) {
@@ -242,8 +300,8 @@ function sameNormalizedBaseUrl(left, right) {
     // The bare official Anthropic host and its /v1 form are the same endpoint;
     // normalize both sides so a switch between them never counts as a
     // credential-scope change. Other hosts are unaffected (no-op).
-    return ensureAnthropicVersionPath(normalizeBaseUrl(left, 'baseUrl'), 'anthropic')
-      === ensureAnthropicVersionPath(normalizeBaseUrl(right, 'baseUrl'), 'anthropic')
+    return ensureAnthropicVersionPath(normalizeBaseUrl(left, 'baseUrl', { allowInsecureHttp: true }), 'anthropic')
+      === ensureAnthropicVersionPath(normalizeBaseUrl(right, 'baseUrl', { allowInsecureHttp: true }), 'anthropic')
   } catch {
     return false
   }
@@ -255,7 +313,9 @@ function sameNormalizedBaseUrl(left, right) {
 // remain attached to it.
 function getReplacementConfigBaseUrl(config) {
   const model = config.model ?? DEFAULT_VISION_MODEL
-  return normalizeBaseUrl(config.baseUrl ?? getDefaultBaseUrlForModel(model), 'baseUrl')
+  return normalizeBaseUrl(config.baseUrl ?? getDefaultBaseUrlForModel(model), 'baseUrl', {
+    allowInsecureHttp: config.allowInsecureHttp ?? false,
+  })
 }
 
 function loadFileOnlyVisionConfig() {
@@ -306,6 +366,20 @@ async function handleApi(method, url, req, res) {
   // request handler below); /api/export reads req.url for its parameters.
   const pathname = url
 
+  // A loopback port being open is not sufficient proof that it belongs to
+  // this VisionPower instance. dsh and setup-dsh use this identity document
+  // before reusing an existing listener.
+  if (method === 'GET' && pathname === '/api/identity') {
+    sendJson(res, 200, {
+      product: WEBUI_PRODUCT,
+      protocolVersion: WEBUI_PROTOCOL_VERSION,
+      version: webuiVersion,
+      configPath: getConfigFilePath(),
+      pid: process.pid,
+    })
+    return true
+  }
+
   // GET /api/config
   if (method === 'GET' && pathname === '/api/config') {
     sendJson(res, 200, getWebuiConfig())
@@ -334,6 +408,15 @@ async function handleApi(method, url, req, res) {
       // poison values (e.g. cache.ttlMs=0) before they can be persisted — a
       // bad value here would make every subsequent config read throw.
       const cleaned = normalizeConfigObject(configInput)
+
+      // dshEnabled has its own immediate PATCH endpoint. A full-form save may
+      // carry a stale browser snapshot, so it must never change this lifecycle
+      // preference. Preserve/migrate the raw saved value independently.
+      const savedDshEnabled = typeof current.dshEnabled === 'boolean'
+        ? current.dshEnabled
+        : (typeof current.enabled === 'boolean' ? current.enabled : undefined)
+      delete cleaned.dshEnabled
+      if (savedDshEnabled !== undefined) cleaned.dshEnabled = savedDshEnabled
 
       // The rendered mask is presentation data, not a protocol sentinel: a
       // legitimate printable API key can equal e.g. `abcd****wxyz`. Preserve
@@ -373,6 +456,44 @@ async function handleApi(method, url, req, res) {
     return true
   }
 
+  // PATCH /api/config/dsh-enabled
+  // The dsh lifecycle switch is intentionally independent from the full config
+  // form. Toggling it must not commit unsaved model/API-key drafts from the
+  // browser, so update exactly one persisted field while preserving the raw
+  // owner-controlled config (including legacy env-style aliases).
+  if (method === 'PATCH' && pathname === '/api/config/dsh-enabled') {
+    try {
+      const body = await readJsonBody(req)
+      if (body === null || typeof body !== 'object' || Array.isArray(body)
+        || Object.keys(body).length !== 1 || typeof body.dshEnabled !== 'boolean') {
+        sendJson(res, 400, { error: 'dshEnabled must be the only field and must be a boolean' })
+        return true
+      }
+
+      // Refuse to rewrite a malformed/unloadable file as an empty config.
+      const effectiveBefore = loadVisionConfig()
+      if (String(process.env.VISIONPOWER_DSH_ENABLED ?? '').trim()) {
+        sendJson(res, 409, {
+          error: 'VISIONPOWER_DSH_ENABLED overrides the saved dsh switch',
+          dshEnabled: effectiveBefore.dshEnabled !== false,
+        })
+        return true
+      }
+      const current = loadRawConfig()
+      const next = Object.fromEntries(
+        Object.entries(current).filter(([key]) => key !== 'enabled' && key !== 'dshEnabled'),
+      )
+      next.dshEnabled = body.dshEnabled
+      saveVisionConfig(next)
+
+      const effective = loadVisionConfig()
+      sendJson(res, 200, { ok: true, dshEnabled: effective.dshEnabled !== false })
+    } catch (err) {
+      sendJson(res, err.statusCode || 400, { error: err.message })
+    }
+    return true
+  }
+
   // GET /api/presets
   if (method === 'GET' && pathname === '/api/presets') {
     // The welfare preset's real endpoint never leaves the process; clients
@@ -387,6 +508,7 @@ async function handleApi(method, url, req, res) {
   if (method === 'GET' && pathname === '/api/status') {
     const config = loadVisionConfig()
     sendJson(res, 200, {
+      dshEnabled: config.dshEnabled !== false,
       ready: Boolean(config.apiKey),
       configPath: getConfigFilePath(),
     })
@@ -449,6 +571,13 @@ async function handleApi(method, url, req, res) {
 
   // POST /api/test
   if (method === 'POST' && pathname === '/api/test') {
+    if (activeAnalysisRequests >= MAX_ACTIVE_ANALYSIS_REQUESTS) {
+      res.setHeader('Retry-After', '1')
+      sendJson(res, 429, { error: 'Too many active analysis requests' })
+      return true
+    }
+    activeAnalysisRequests += 1
+    const abortContext = requestAbortContext(req, res)
     try {
       const config = loadVisionConfig()
       const body = await readJsonBody(req, maxPlaygroundBodyBytes(config))
@@ -500,19 +629,29 @@ async function handleApi(method, url, req, res) {
         }
       }
 
-      const result = await describeImage(params, config)
+      const result = await describeImage(params, config, abortContext.signal)
       sendJson(res, 200, { result })
     } catch (err) {
-      sendJson(res, err.statusCode || 400, { error: err.message })
+      if (!res.writableEnded) sendJson(res, err.statusCode || 400, { error: err.message })
+    } finally {
+      abortContext.cleanup()
+      activeAnalysisRequests -= 1
     }
     return true
   }
 
   // POST /api/test-connection
   if (method === 'POST' && pathname === '/api/test-connection') {
+    if (activeAnalysisRequests >= MAX_ACTIVE_ANALYSIS_REQUESTS) {
+      res.setHeader('Retry-After', '1')
+      sendJson(res, 429, { error: 'Too many active analysis requests' })
+      return true
+    }
+    activeAnalysisRequests += 1
+    const abortContext = requestAbortContext(req, res)
     try {
       const body = await readJsonBody(req)
-      const unknownKey = Object.keys(body).find((key) => !['apiKey', 'baseUrl', 'model', 'protocol', 'testVision', 'preserveConfiguredKey'].includes(key))
+      const unknownKey = Object.keys(body).find((key) => !['apiKey', 'baseUrl', 'model', 'protocol', 'allowInsecureHttp', 'testVision', 'preserveConfiguredKey'].includes(key))
       if (unknownKey) {
         sendJson(res, 400, { error: `Connection test contains an unknown field: ${unknownKey}` })
         return true
@@ -529,6 +668,10 @@ async function handleApi(method, url, req, res) {
       }
       if (body.testVision !== undefined && typeof body.testVision !== 'boolean') {
         sendJson(res, 400, { error: 'testVision must be a boolean' })
+        return true
+      }
+      if (body.allowInsecureHttp !== undefined && typeof body.allowInsecureHttp !== 'boolean') {
+        sendJson(res, 400, { error: 'allowInsecureHttp must be a boolean' })
         return true
       }
       if (body.preserveConfiguredKey !== undefined && typeof body.preserveConfiguredKey !== 'boolean') {
@@ -571,12 +714,17 @@ async function handleApi(method, url, req, res) {
       if (body.protocol) {
         tempConfig.protocol = body.protocol
       }
+      if (body.allowInsecureHttp !== undefined) {
+        tempConfig.allowInsecureHttp = body.allowInsecureHttp
+      }
 
       // Normalize before deciding whether a masked/omitted key may be reused.
       // A trailing slash is harmless, but a changed endpoint is a different
       // credential scope and must never receive the key saved for the old one.
       try {
-        tempConfig.baseUrl = normalizeBaseUrl(tempConfig.baseUrl, 'baseUrl')
+        tempConfig.baseUrl = normalizeBaseUrl(tempConfig.baseUrl, 'baseUrl', {
+          allowInsecureHttp: tempConfig.allowInsecureHttp ?? false,
+        })
       } catch (err) {
         sendJson(res, 400, { error: err.message })
         return true
@@ -619,10 +767,16 @@ async function handleApi(method, url, req, res) {
         tempConfig.maxTokens = probeCapabilities.recommendedMaxTokens
       }
 
-      const connectionResult = await testModelConnection(tempConfig, { testVision: body.testVision !== false })
+      const connectionResult = await testModelConnection(tempConfig, {
+        testVision: body.testVision !== false,
+        signal: abortContext.signal,
+      })
       sendJson(res, 200, { ok: true, message: connectionResult })
     } catch (err) {
-      sendJson(res, err.statusCode || 400, { error: err.message })
+      if (!res.writableEnded) sendJson(res, err.statusCode || 400, { error: err.message })
+    } finally {
+      abortContext.cleanup()
+      activeAnalysisRequests -= 1
     }
     return true
   }
@@ -636,7 +790,7 @@ async function handleApi(method, url, req, res) {
     // The local dev path (src/index.js) is never useful to copy into a host config.
     const serverEntry = {
       command: 'npx',
-      args: ['-y', '--package', 'visionpower@latest', 'visionpower'],
+      args: ['-y', '--package', `visionpower@${webuiVersion}`, 'visionpower'],
     }
 
     let result
@@ -675,7 +829,7 @@ async function handleApi(method, url, req, res) {
   return false
 }
 
-export function startWebuiServer(port) {
+export function startWebuiServer(port, options = {}) {
   return new Promise((resolveStart, reject) => {
     const server = createServer(async (req, res) => {
       try {
@@ -709,7 +863,7 @@ export function startWebuiServer(port) {
         }
 
         if (pathname === '/' || pathname === '/index.html') {
-          setHtmlSecurityHeaders(res)
+          setHtmlSecurityHeaders(res, req.url)
           res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' })
           res.end(indexHtml)
           return
@@ -729,6 +883,10 @@ export function startWebuiServer(port) {
     })
 
     server.on('error', reject)
+    server.requestTimeout = 65_000
+    server.headersTimeout = 10_000
+    server.keepAliveTimeout = 5_000
+    server.maxRequestsPerSocket = 100
 
     server.listen(port, '127.0.0.1', () => {
       const address = server.address()
@@ -738,12 +896,85 @@ export function startWebuiServer(port) {
       process.stderr.write(`[visionpower] Config file: ${getConfigFilePath()}\n`)
       process.stderr.write(`[visionpower] Press Ctrl+C to stop\n\n`)
       
-      if (process.env.VISIONPOWER_NO_OPEN !== '1') {
+      const shouldOpenBrowser = options.openBrowser ?? process.env.VISIONPOWER_NO_OPEN !== '1'
+      if (shouldOpenBrowser) {
         openBrowser(url).catch(() => {})
       }
       resolveStart(server)
     })
   })
+}
+
+export function probeWebuiServer(port, {
+  timeoutMs = 1500,
+  expectedVersion = webuiVersion,
+  expectedConfigPath = getConfigFilePath(),
+} = {}) {
+  return new Promise((resolveProbe, rejectProbe) => {
+    const fail = (message, cause) => {
+      const error = new Error(message, cause ? { cause } : undefined)
+      error.code = 'VISIONPOWER_WEBUI_CONFLICT'
+      rejectProbe(error)
+    }
+    const req = httpRequest({
+      host: '127.0.0.1',
+      port,
+      path: '/api/identity',
+      method: 'GET',
+      headers: { Accept: 'application/json', Host: `127.0.0.1:${port}` },
+    }, (res) => {
+      const chunks = []
+      let bytes = 0
+      res.on('data', (chunk) => {
+        bytes += chunk.length
+        if (bytes > 64 * 1024) {
+          req.destroy(new Error('identity response is too large'))
+          return
+        }
+        chunks.push(chunk)
+      })
+      res.on('end', () => {
+        if (res.statusCode !== 200) {
+          fail(`Port ${port} returned HTTP ${res.statusCode ?? 'unknown'} instead of a VisionPower identity document`)
+          return
+        }
+        let identity
+        try {
+          identity = JSON.parse(Buffer.concat(chunks).toString('utf8'))
+        } catch (error) {
+          fail(`Port ${port} did not return valid VisionPower identity JSON`, error)
+          return
+        }
+        if (identity?.product !== WEBUI_PRODUCT || identity?.protocolVersion !== WEBUI_PROTOCOL_VERSION) {
+          fail(`Port ${port} is occupied by an incompatible service`)
+          return
+        }
+        if (expectedVersion && identity.version !== expectedVersion) {
+          fail(`Port ${port} is running VisionPower ${identity.version ?? 'unknown'}, expected ${expectedVersion}`)
+          return
+        }
+        if (expectedConfigPath && identity.configPath !== expectedConfigPath) {
+          fail(`Port ${port} is using a different VisionPower config: ${identity.configPath ?? 'unknown'}`)
+          return
+        }
+        resolveProbe(identity)
+      })
+    })
+    req.setTimeout(timeoutMs, () => req.destroy(new Error('identity probe timed out')))
+    req.once('error', (error) => fail(`Could not verify the service listening on port ${port}: ${error.message}`, error))
+    req.end()
+  })
+}
+
+export async function startOrReuseWebuiServer(port, options = {}) {
+  try {
+    const server = await startWebuiServer(port, options)
+    return { server, reused: false, identity: null }
+  } catch (error) {
+    if (error?.code !== 'EADDRINUSE') throw error
+    const identity = await probeWebuiServer(port, options)
+    return { server: null, reused: true, identity }
+  }
 }
 
 async function openBrowser(url) {

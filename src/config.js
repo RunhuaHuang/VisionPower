@@ -1,7 +1,8 @@
-import { readFileSync, writeFileSync, mkdirSync, renameSync, unlinkSync, readdirSync, lstatSync, statSync } from 'node:fs'
+import { writeFileSync, mkdirSync, renameSync, unlinkSync, readdirSync, lstatSync } from 'node:fs'
 import { readdir, chmod, lstat, mkdir, rename, unlink, writeFile } from 'node:fs/promises'
 import { basename, dirname, join, resolve } from 'node:path'
 import { homedir } from 'node:os'
+import { safeReadFileSync } from './safe-fs.js'
 
 export const DEFAULT_PROTOCOL = 'openai'
 export const DEFAULT_VISION_BASE_URL = 'https://dashscope.aliyuncs.com/compatible-mode/v1'
@@ -26,6 +27,7 @@ export const DEFAULT_FIRST_BYTE_TIMEOUT_MS = 15_000
 export const MAX_CONFIG_FIRST_BYTE_TIMEOUT_MS = 600_000
 export const DEFAULT_MAX_IMAGES = 8
 export const DEFAULT_MAX_RETRIES = 2
+export const DEFAULT_MAX_PROVIDER_SUBMISSIONS = 3
 export const DEFAULT_CACHE_MAX_ENTRIES = 32
 export const DEFAULT_CACHE_TTL_MS = 30 * 60 * 1000
 export const DEFAULT_INBOX_TTL_MS = 30 * 60 * 1000
@@ -43,6 +45,7 @@ export const MAX_CONFIG_TOTAL_IMAGE_BYTES = 512 * 1024 * 1024
 export const MAX_CONFIG_TOKENS = 131_072
 export const MAX_CONFIG_IMAGES = 64
 export const MAX_CONFIG_RETRIES = 8
+export const MAX_CONFIG_PROVIDER_SUBMISSIONS = 10
 export const MAX_CONFIG_CACHE_ENTRIES = 10_000
 export const MAX_CONFIG_CACHE_TTL_MS = 30 * 24 * 60 * 60 * 1000
 export const MAX_CONFIG_INBOX_TTL_MS = 30 * 24 * 60 * 60 * 1000
@@ -52,31 +55,14 @@ const MAX_CONFIG_FILE_BYTES = 1024 * 1024
 const MAX_API_KEY_BYTES = 16 * 1024
 const MAX_MODEL_CHARS = 256
 
-// The welfare gateway endpoint is distributed privately (the API key is handed
-// out by the author). The WebUI and its HTTP API never expose the real URL:
-// clients only ever see WELFARE_BASE_URL_ALIAS, and the server resolves the
-// alias back to the real endpoint before the value reaches config validation
-// or the model call.
-//
-// The URL itself is stored as an XOR+Base64 cipher rather than plaintext so a
-// casual read/grep of the published source (npm tarball, GitHub, the bundled
-// Skill/dsh artifacts) does not reveal it. This only raises the bar — anyone
-// determined can still decode it from a running process — it is not secrecy.
-const WELFARE_BASE_URL_CIPHER = 'HgRZBxZWSU4TFURJEQYMBAwYREFER1IfHwMPHBZcV0RWAhFQ'
-const WELFARE_BASE_URL_KEY = 'vp-welfare-gateway-2026'
-
-function decodeWelfareBaseUrl() {
-  const cipher = Buffer.from(WELFARE_BASE_URL_CIPHER, 'base64')
-  let out = ''
-  for (let i = 0; i < cipher.length; i++) {
-    out += String.fromCharCode(cipher[i] ^ WELFARE_BASE_URL_KEY.charCodeAt(i % WELFARE_BASE_URL_KEY.length))
-  }
-  return out
-}
+// This is a third-party gateway. Keep the real destination auditable in source
+// and UI: reversible obfuscation does not protect a secret, but it does prevent
+// users from understanding where their images, prompts, and API key are sent.
+const WELFARE_BASE_URL = 'https://api.prismaistudio.xyz:663/v1'
 
 function welfareHostname() {
   try {
-    return new URL(decodeWelfareBaseUrl()).hostname.toLowerCase()
+    return new URL(WELFARE_BASE_URL).hostname.toLowerCase()
   } catch {
     return ''
   }
@@ -88,7 +74,7 @@ const WELFARE_MODEL_IDS = new Set(['minimax-m3'])
 export function isWelfareBaseUrl(value) {
   if (typeof value !== 'string') return false
   const normalized = value.trim().replace(/\/+$/, '')
-  return normalized === decodeWelfareBaseUrl() || normalized === WELFARE_BASE_URL_ALIAS
+  return normalized === WELFARE_BASE_URL || normalized === WELFARE_BASE_URL_ALIAS
 }
 
 // Maps the public alias to the real endpoint, but ONLY for the model the
@@ -102,7 +88,7 @@ export function resolveWelfareBaseUrl(value, model) {
   if (model !== undefined && !WELFARE_MODEL_IDS.has(String(model).toLowerCase())) {
     throw new Error('The built-in welfare channel only serves MiniMax-M3; select a custom Base URL for other models')
   }
-  return decodeWelfareBaseUrl()
+  return WELFARE_BASE_URL
 }
 
 export function maskWelfareBaseUrl(value) {
@@ -247,7 +233,7 @@ export const VISION_MODEL_PRESETS = [
   // 不对外公布获取入口。welfare:true 让 WebUI 隐藏官方「获取 API Key」链接。
   // 注意保持官方大小写 MiniMax-M3：该中转站的「福利」分组同样大小写敏感，
   // 写成全小写会 503「无可用渠道」。
-  { model: 'MiniMax-M3', label: { zh: 'MiniMax-M3 (福利)', en: 'MiniMax-M3 (Welfare)' }, baseUrl: decodeWelfareBaseUrl(), welfare: true },
+  { model: 'MiniMax-M3', label: { zh: 'MiniMax-M3 (福利)', en: 'MiniMax-M3 (Welfare)' }, baseUrl: WELFARE_BASE_URL, welfare: true },
   { model: 'glm-4.6v', label: { zh: 'GLM-4.6V (智谱 BigModel 国内)', en: 'GLM-4.6V (Zhipu China)' }, baseUrl: 'https://open.bigmodel.cn/api/paas/v4' },
   { model: 'glm-4.6v', label: { zh: 'GLM-4.6V (智谱 Z.AI 海外)', en: 'GLM-4.6V (Zhipu Global)' }, baseUrl: 'https://api.z.ai/api/paas/v4' },
   { model: 'glm-5v-turbo', label: { zh: 'GLM-5V-Turbo (智谱 BigModel 国内)', en: 'GLM-5V-Turbo (Zhipu China)' }, baseUrl: 'https://open.bigmodel.cn/api/paas/v4' },
@@ -498,17 +484,13 @@ function loadConfigFile(env) {
   const configPath = getConfigFilePath(env)
   let raw
   try {
-    const fileStat = statSync(configPath)
-    if (!fileStat.isFile()) {
-      throw new Error('path is not a regular file')
-    }
-    if (fileStat.size > MAX_CONFIG_FILE_BYTES) {
-      throw new Error(`file exceeds the ${MAX_CONFIG_FILE_BYTES}-byte safety limit`)
-    }
-    raw = readFileSync(configPath, 'utf8')
+    raw = safeReadFileSync(configPath, {
+      maxBytes: MAX_CONFIG_FILE_BYTES,
+      label: 'config file',
+    }).toString('utf8')
   } catch (error) {
     if (error?.code === 'ENOENT') return {}
-    throw new Error(`Could not read config file ${configPath}: ${error.message}`)
+    throw new Error(`Could not read config file ${basename(configPath)}: ${error.message}`)
   }
 
   let parsed
@@ -519,10 +501,10 @@ function loadConfigFile(env) {
     // content (e.g. `Unexpected token '-', "-----BEGIN OPENSSH P..."`), which
     // can leak sensitive bytes when VISIONPOWER_CONFIG is pointed at a non-JSON
     // private file. Surface a static description instead.
-    throw new Error(`Invalid JSON in config file ${configPath}; ensure it contains a single JSON object`)
+    throw new Error(`Invalid JSON in config file ${basename(configPath)}; ensure it contains a single JSON object`)
   }
   if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
-    throw new Error(`Config file ${configPath} must contain a JSON object`)
+    throw new Error(`Config file ${basename(configPath)} must contain a JSON object`)
   }
   return parsed
 }
@@ -591,6 +573,22 @@ function allowedDirsFromFile(value) {
 export function loadVisionConfig(env = process.env) {
   const file = loadConfigFile(env)
 
+  const dshEnabledEnv = readEnvValue(env, ['VISIONPOWER_DSH_ENABLED'])
+  // `enabled` briefly existed as a global switch in the unreleased 3.1.0
+  // implementation. Treat it only as a migration fallback for dsh; the
+  // canonical core deliberately ignores dshEnabled so MCP/Skill callers are
+  // never disabled by a host-specific lifecycle preference.
+  const dshEnabled = dshEnabledEnv.value
+    ? parseBoolean(dshEnabledEnv)
+    : (booleanFromFile(file.dshEnabled, 'dshEnabled')
+      ?? booleanFromFile(file.enabled, 'enabled')
+      ?? true)
+
+  const allowInsecureHttpEnv = readEnvValue(env, ['VISIONPOWER_ALLOW_INSECURE_HTTP'])
+  const allowInsecureHttp = allowInsecureHttpEnv.value
+    ? parseBoolean(allowInsecureHttpEnv)
+    : (booleanFromFile(file.allowInsecureHttp, 'allowInsecureHttp') ?? false)
+
   const modelFile = readFileStringValue(file, ['model', 'VISIONPOWER_MODEL'])
   const configuredModel = readEnvValue(env, ['VISIONPOWER_MODEL']).value
     || modelFile.value
@@ -609,7 +607,7 @@ export function loadVisionConfig(env = process.env) {
   const baseUrlSource = baseUrlEnv.value
     ? baseUrlEnv.name
     : fileBaseUrl.value ? fileBaseUrl.name : 'VISIONPOWER_BASE_URL'
-  const baseUrl = normalizeBaseUrl(rawBaseUrl, baseUrlSource)
+  const baseUrl = normalizeBaseUrl(rawBaseUrl, baseUrlSource, { allowInsecureHttp })
   const model = normalizeModelForKnownEndpoint(configuredModel, baseUrl)
   const modelCapabilities = resolveModelCapabilities(model, baseUrl)
 
@@ -644,9 +642,11 @@ export function loadVisionConfig(env = process.env) {
   )
 
   const config = {
+    dshEnabled,
     apiKey,
     model,
     baseUrl,
+    allowInsecureHttp,
     protocol,
     allowedDirs: allowedDirsEnv.value
       ? parseAllowedDirs(allowedDirsEnv)
@@ -675,6 +675,12 @@ export function loadVisionConfig(env = process.env) {
       readEnvValue(env, ['VISIONPOWER_MAX_RETRIES']),
       integerFromFile(file.maxRetries, 'maxRetries', { allowZero: true, max: MAX_CONFIG_RETRIES }) ?? DEFAULT_MAX_RETRIES,
       MAX_CONFIG_RETRIES,
+    ),
+    maxProviderSubmissions: parsePositiveInteger(
+      readEnvValue(env, ['VISIONPOWER_MAX_PROVIDER_SUBMISSIONS']),
+      integerFromFile(file.maxProviderSubmissions, 'maxProviderSubmissions', { max: MAX_CONFIG_PROVIDER_SUBMISSIONS })
+        ?? DEFAULT_MAX_PROVIDER_SUBMISSIONS,
+      MAX_CONFIG_PROVIDER_SUBMISSIONS,
     ),
     debug: debugEnv.value ? parseBoolean(debugEnv) : (booleanFromFile(file.debug, 'debug') ?? false),
     cache: resolveCacheConfig(env, file),
@@ -762,7 +768,15 @@ function resolveCacheConfig(env, file) {
   return { enabled, maxEntries, ttlMs, dir: getCacheDir(env) }
 }
 
-export function normalizeBaseUrl(value, name) {
+function isLoopbackHttpHostname(hostname) {
+  const normalized = hostname.toLowerCase().replace(/^\[|\]$/g, '').replace(/\.+$/, '')
+  return normalized === 'localhost'
+    || normalized.endsWith('.localhost')
+    || normalized === '::1'
+    || /^127(?:\.\d{1,3}){3}$/.test(normalized)
+}
+
+export function normalizeBaseUrl(value, name, { allowInsecureHttp = false } = {}) {
   let url
   try {
     url = new URL(value)
@@ -772,6 +786,9 @@ export function normalizeBaseUrl(value, name) {
 
   if (url.protocol !== 'http:' && url.protocol !== 'https:') {
     throw new Error(`${name} must use http or https`)
+  }
+  if (url.protocol === 'http:' && !isLoopbackHttpHostname(url.hostname) && !allowInsecureHttp) {
+    throw new Error(`${name} must use HTTPS for non-loopback endpoints (set allowInsecureHttp=true only for a trusted development network)`)
   }
   if (url.username || url.password) {
     throw new Error(`${name} must not include credentials`)
@@ -842,9 +859,9 @@ export function saveVisionConfig(config, env = process.env) {
 // polluting keys sent by the client are silently dropped. Kept here (next to
 // the validators below) so the server and the validation pass always agree.
 export const ALLOWED_CONFIG_KEYS = new Set([
-  'apiKey', 'model', 'baseUrl', 'protocol', 'allowedDirs',
+  'dshEnabled', 'apiKey', 'model', 'baseUrl', 'protocol', 'allowInsecureHttp', 'allowedDirs',
   'maxImageBytes', 'maxTotalImageBytes', 'timeoutMs', 'firstByteTimeoutMs',
-  'maxTokens', 'maxImages', 'maxRetries',
+  'maxTokens', 'maxImages', 'maxRetries', 'maxProviderSubmissions',
   'inboxTtlMs', 'inboxMaxEntries', 'inboxMaxBytes', 'debug', 'cache',
 ])
 
@@ -864,9 +881,21 @@ export function normalizeConfigObject(input) {
     if (ALLOWED_CONFIG_KEYS.has(key)) cleaned[key] = value
   }
 
+  if (cleaned.allowInsecureHttp !== undefined && cleaned.allowInsecureHttp !== null) {
+    cleaned.allowInsecureHttp = booleanFromFile(
+      cleaned.allowInsecureHttp,
+      'allowInsecureHttp',
+      { prefix: 'config field' },
+    )
+  } else if (cleaned.allowInsecureHttp === null) {
+    delete cleaned.allowInsecureHttp
+  }
+
   // baseUrl: normalize exactly like loadVisionConfig does.
   if (typeof cleaned.baseUrl === 'string' && cleaned.baseUrl.trim()) {
-    cleaned.baseUrl = normalizeBaseUrl(cleaned.baseUrl.trim(), 'baseUrl')
+    cleaned.baseUrl = normalizeBaseUrl(cleaned.baseUrl.trim(), 'baseUrl', {
+      allowInsecureHttp: cleaned.allowInsecureHttp ?? false,
+    })
   } else if (cleaned.baseUrl !== undefined) {
     throw new Error('baseUrl must be a non-empty string')
   }
@@ -926,6 +955,7 @@ export function normalizeConfigObject(input) {
     { key: 'maxTokens', label: 'maxTokens', allowZero: false, max: MAX_CONFIG_TOKENS },
     { key: 'maxImages', label: 'maxImages', allowZero: false, max: MAX_CONFIG_IMAGES },
     { key: 'maxRetries', label: 'maxRetries', allowZero: true, max: MAX_CONFIG_RETRIES },
+    { key: 'maxProviderSubmissions', label: 'maxProviderSubmissions', allowZero: false, max: MAX_CONFIG_PROVIDER_SUBMISSIONS },
     { key: 'inboxTtlMs', label: 'inboxTtlMs', allowZero: false, max: MAX_CONFIG_INBOX_TTL_MS },
     { key: 'inboxMaxEntries', label: 'inboxMaxEntries', allowZero: false, max: MAX_CONFIG_INBOX_ENTRIES },
     { key: 'inboxMaxBytes', label: 'inboxMaxBytes', allowZero: false, max: MAX_CONFIG_INBOX_BYTES },
@@ -971,7 +1001,7 @@ export function normalizeConfigObject(input) {
   }
 
   // Booleans.
-  for (const key of ['debug']) {
+  for (const key of ['dshEnabled', 'debug']) {
     if (cleaned[key] !== undefined && cleaned[key] !== null) {
       cleaned[key] = booleanFromFile(cleaned[key], key, { prefix: 'config field' })
     }

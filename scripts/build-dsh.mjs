@@ -2,7 +2,7 @@
 
 // Generates the self-contained core bundle for the dsh Cordis plugin
 // (src/dsh/core.bundle.js) from the canonical core
-// (src/config.js + src/image-inbox.js + src/vision-core.js). Run after
+// (src/safe-fs.js + src/config.js + src/image-inbox.js + src/vision-core.js). Run after
 // changing the core:
 //
 //   npm run build:dsh
@@ -18,16 +18,19 @@ const REPO_ROOT = new URL('../', import.meta.url)
 const PLUGIN_SRC = new URL('src/dsh/', REPO_ROOT)
 
 export async function buildDshCoreBundle() {
+  const safeFs = stripModuleSyntax(await readFile(new URL('src/safe-fs.js', REPO_ROOT), 'utf8'))
   const config = stripModuleSyntax(await readFile(new URL('src/config.js', REPO_ROOT), 'utf8'))
   const inbox = stripModuleSyntax(await readFile(new URL('src/image-inbox.js', REPO_ROOT), 'utf8'))
   const core = stripModuleSyntax(await readFile(new URL('src/vision-core.js', REPO_ROOT), 'utf8'))
-  const imports = mergeImports([config, inbox, core]).join('\n')
+  const imports = mergeImports([safeFs, config, inbox, core]).join('\n')
 
   return `// AUTO-GENERATED — do not edit by hand.
-// Source of truth: src/config.js + src/image-inbox.js + src/vision-core.js.
+// Source of truth: src/safe-fs.js + src/config.js + src/image-inbox.js + src/vision-core.js.
 // Regenerate with: npm run build:dsh
 
 ${imports}
+
+${safeFs.body}
 
 ${config.body}
 
@@ -38,6 +41,7 @@ ${core.body}
 export {
   describeImage,
   loadVisionConfig,
+  normalizeBaseUrl,
   resolveModelCapabilities,
   testModelConnection,
 }

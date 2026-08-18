@@ -2,7 +2,7 @@
 
 // Generates the self-contained, zero-dependency skill script
 // VisionPower-Skill/describe_image.mjs from the canonical core
-// (src/config.js + src/image-inbox.js + src/vision-core.js). Run after changing the core:
+// (src/safe-fs.js + src/config.js + src/image-inbox.js + src/vision-core.js). Run after changing the core:
 //
 //   npm run build:skill
 //
@@ -218,6 +218,7 @@ mainSkill()
 `
 
 export async function buildSkillScript() {
+  const safeFs = stripModuleSyntax(await readFile(new URL('src/safe-fs.js', ROOT), 'utf8'))
   const config = stripModuleSyntax(await readFile(new URL('src/config.js', ROOT), 'utf8'))
   const inbox = stripModuleSyntax(await readFile(new URL('src/image-inbox.js', ROOT), 'utf8'))
   const core = stripModuleSyntax(await readFile(new URL('src/vision-core.js', ROOT), 'utf8'))
@@ -230,15 +231,17 @@ export async function buildSkillScript() {
     "import { open } from 'node:fs/promises'\n" +
     "import { constants as fsConstants } from 'node:fs'\n",
   )
-  const imports = mergeImports([config, inbox, core, entryImports]).join('\n')
+  const imports = mergeImports([safeFs, config, inbox, core, entryImports]).join('\n')
 
   return `#!/usr/bin/env node
 
 // AUTO-GENERATED — do not edit by hand.
-// Source of truth: src/config.js + src/image-inbox.js + src/vision-core.js.
+// Source of truth: src/safe-fs.js + src/config.js + src/image-inbox.js + src/vision-core.js.
 // Regenerate with: npm run build:skill
 
 ${imports}
+
+${safeFs.body}
 
 ${config.body}
 
