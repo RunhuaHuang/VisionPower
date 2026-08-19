@@ -241,7 +241,10 @@ function ensurePnpm() {
 export function validatePluginSource(source) {
   if (typeof source !== 'string' || !source.trim()) throw new Error('--plugin-source 不能为空')
   const value = source.trim()
-  if (/[\r\n\0&|;<>`$()^%!]/.test(value)) {
+  // POSIX 上所有安装命令都按 argv 传递、不经 shell，本地 file: 路径中的
+  // ()$! 等属于合法文件名，不拦截；其余来源（npm/github spec）与 Windows
+  //（.cmd shim 经 shell 启动）保持元字符黑名单。
+  if ((!value.startsWith('file:') || IS_WIN) && /[\r\n\0&|;<>`$()^%!]/.test(value)) {
     throw new Error('--plugin-source 含不允许的 shell 元字符')
   }
   const exactNpm = /^visionpower@\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/
@@ -280,20 +283,32 @@ function installPluginViaPnpm(dir, source) {
   if (r.status !== 0) throw new Error('pnpm add 失败，请查看上方输出。')
 }
 
-function syncLocalDshClientMetadata(dir, source) {
+// pnpm 的 directory dependency 采用硬链接导入：既有文件会随工作区更新，
+// 但同版本下新增的文件不会补进已导入目录。rc.7 的客户端扫描依赖新增的
+// package.json 元数据与 client.js 入口（插件服务端还 import 了 attachments.js），
+// 因此递归补齐所有缺失文件；已存在的文件保持硬链接共享，绝不覆盖。
+export function syncLocalDshClientFiles(dir, source) {
   if (!source.startsWith('file:')) return
-  const sourceRoot = fileURLToPath(source)
-  const from = path.join(sourceRoot, 'src', 'dsh', 'package.json')
-  if (!fs.existsSync(from)) return
+  let sourceRoot
+  try { sourceRoot = fileURLToPath(source) } catch { return }
+  const fromDir = path.join(sourceRoot, 'src', 'dsh')
+  if (!fs.existsSync(path.join(fromDir, 'package.json'))) return
 
-  // pnpm 的 directory dependency 采用硬链接导入：既有文件会随工作区更新，
-  // 但同版本下新增的文件不会补进已导入目录。rc.7 的客户端扫描恰好需要
-  // 这个新增子路径元数据，因此在本地开发覆盖后原子补齐它。
-  const to = path.join(dir, 'node_modules', 'visionpower', 'src', 'dsh', 'package.json')
-  fs.mkdirSync(path.dirname(to), { recursive: true })
-  const temp = `${to}.${process.pid}.${Date.now()}.tmp`
-  fs.copyFileSync(from, temp, fs.constants.COPYFILE_EXCL)
-  fs.renameSync(temp, to)
+  const toDir = path.join(dir, 'node_modules', 'visionpower', 'src', 'dsh')
+  const copyMissing = (from, to) => {
+    fs.mkdirSync(to, { recursive: true })
+    for (const entry of fs.readdirSync(from, { withFileTypes: true })) {
+      const fromPath = path.join(from, entry.name)
+      const toPath = path.join(to, entry.name)
+      if (entry.isDirectory()) copyMissing(fromPath, toPath)
+      else if (entry.isFile() && !fs.existsSync(toPath)) {
+        const temp = `${toPath}.${process.pid}.${Date.now()}.tmp`
+        fs.copyFileSync(fromPath, temp, fs.constants.COPYFILE_EXCL)
+        fs.renameSync(temp, toPath)
+      }
+    }
+  }
+  copyMissing(fromDir, toDir)
 }
 
 function installPlugin(profile, source) {
@@ -325,7 +340,7 @@ function installPlugin(profile, source) {
       log(`用 dsh plugin 命令安装 ${source}`)
       const r = runShim('dsh', ['plugin', '--profile', profile, 'add', source], { stdio: 'inherit' })
       if (r.status === 0) {
-        syncLocalDshClientMetadata(dir, source)
+        syncLocalDshClientFiles(dir, source)
         return { status: current ? 'upgraded' : 'installed', version: installedPluginVersion(dir) }
       }
       warn('dsh plugin 命令执行失败，改用 pnpm 兜底')
@@ -333,7 +348,7 @@ function installPlugin(profile, source) {
   } catch { /* dsh 命令不存在或不可用，走 pnpm */ }
 
   installPluginViaPnpm(dir, source)
-  syncLocalDshClientMetadata(dir, source)
+  syncLocalDshClientFiles(dir, source)
   return { status: current ? 'upgraded' : 'installed', version: installedPluginVersion(dir) }
 }
 
@@ -459,6 +474,13 @@ function patchCheck() {
   const summaryMatch = patch.stdout.match(/结构不匹配 (\d+) 处，语法失败 (\d+) 处/)
   const structureFail = summaryMatch ? Number(summaryMatch[1]) : null
   const syntaxFail = summaryMatch ? Number(summaryMatch[2]) : null
+  const appliedMatch = patch.stdout.match(/应用补丁 (\d+) 处/)
+  const applied = appliedMatch ? Number(appliedMatch[1]) : null
+  // dry-run 下「应用补丁 N 处」= N 处补丁缺失（典型场景：dsh 升级/重装把补丁
+  // 洗掉了）。dry-run 退出码仍为 0，只看结构/语法失败会把这种现状误报为通过。
+  if (applied !== null && applied > 0) {
+    return { ok: false, reason: `有 ${applied} 处补丁待打（重跑安装命令即可补打）` }
+  }
   return { ok: patch.status === 0 && structureFail === 0 && syntaxFail === 0 }
 }
 
@@ -524,12 +546,18 @@ async function ensureConsole(profile, noConsole, waitSecs, forceConsole) {
     return { status: 'configured' }
   } else {
     // 用 node 直接跑包内 src/index.js，避免平台相关的 .bin shim（visionpower(.cmd/.ps1)）；
-    // node 是真实可执行文件，不加 shell（避免路径含空格时被 shell 拆分）
+    // node 是真实可执行文件，不加 shell（避免路径含空格时被 shell 拆分）。
+    // 子进程禁用自开浏览器（VISIONPOWER_NO_OPEN=1）：由安装器在身份探测通过后
+    // 统一弹一次，避免新装时开出两个标签页。
     const bin = path.join(profileDir(profile), 'node_modules', 'visionpower', 'src', 'index.js')
     const logFile = path.join(DSH_HOME, '.visionpower-console.log')
+    const consoleEnv = { ...process.env, VISIONPOWER_NO_OPEN: '1' }
     const child = fs.existsSync(bin)
-      ? spawn(process.execPath, [bin, '--webui'], { detached: true, stdio: ['ignore', 'ignore', fs.openSync(logFile, 'a')] })
-      : spawn('npx', ['-y', '--package', `visionpower@${PKG_VERSION}`, 'visionpower', '--webui'], shimOpts({ detached: true, stdio: ['ignore', 'ignore', fs.openSync(logFile, 'a')] }))
+      ? spawn(process.execPath, [bin, '--webui'], { detached: true, env: consoleEnv, stdio: ['ignore', 'ignore', fs.openSync(logFile, 'a')] })
+      : spawn('npx', ['-y', '--package', `visionpower@${PKG_VERSION}`, 'visionpower', '--webui'], shimOpts({ detached: true, env: consoleEnv, stdio: ['ignore', 'ignore', fs.openSync(logFile, 'a')] }))
+    // spawn 失败（如 npx 缺失）以异步 'error' 事件送达；不挂监听会成为
+    // uncaught exception 直接崩掉安装器，绕过 main() 的兜底 catch。
+    child.on('error', (e) => warn(`配置控制台进程启动失败：${e.message}；请查看日志 ${logFile} 或手动启动`))
     child.unref()
     spawned = true
     log(`已启动 VisionPower 配置控制台 → http://127.0.0.1:${PORT}（日志 ${logFile}）`)
@@ -591,9 +619,18 @@ async function launchDshWeb() {
     // installation. Launch that exact patched binary instead of asking npm to
     // resolve/install the package again, which can be slow, hang offline, or
     // select a different unpatched cache entry.
+    // On Windows the .bin shim must go through cmd. Node's `shell: true`
+    // splices file+args into one unquoted line, so a recordedBin under a path
+    // with spaces (e.g. "C:\Users\John Doe\...") gets split and the launch
+    // fails — build the command line ourselves with the path quoted instead.
     const child = recordedBin && fs.existsSync(recordedBin)
-      ? spawn(recordedBin, ['web'], shimOpts({ detached: true, stdio }))
+      ? (IS_WIN
+        ? spawn(process.env.comspec || 'cmd.exe', ['/d', '/s', '/c', `"${recordedBin}" web`], { detached: true, stdio })
+        : spawn(recordedBin, ['web'], { detached: true, stdio }))
       : spawn('npx', ['-y', `@deepseek-ai/dsh@${state?.dshVersion || '0.1.0-rc.7'}`, 'web'], shimOpts({ detached: true, stdio }))
+    // spawn 失败以异步 'error' 事件送达；不挂监听会成为 uncaught exception
+    // 崩掉安装器，绕过 main() 的兜底 catch。
+    child.on('error', (e) => warn(`dsh web 进程启动失败：${e.message}；请查看日志 ${logFile} 或手动启动`))
     child.unref()
     log(`正在启动 dsh web${recordedBin && fs.existsSync(recordedBin) ? `（已验证二进制 ${recordedBin}）` : ''}（日志 ${logFile}）…`)
     const deadline = Date.now() + 60000
@@ -757,7 +794,11 @@ export async function main(argv = process.argv.slice(2)) {
 
   // 插件或补丁有更新时，运行中的 dsh web 不会热加载，必须重启才生效
   if ((pluginStatus !== 'skip' || applied > 0) && launchResult.status !== 'started') {
-    warn('本次安装更新了插件/补丁，但检测到 dsh web 已在运行。请停止现有进程后重新运行本安装命令，使更新生效。')
+    if (launchResult.status === 'already-running') {
+      warn('本次安装更新了插件/补丁，且检测到 dsh web 正在运行。请停止现有进程后重新运行本安装命令（或手动重启 dsh web），使更新生效。')
+    } else {
+      warn('本次安装更新了插件/补丁。若 dsh web 正在运行，需重启后才会生效（本次未带 --launch，未探测其运行状态）。')
+    }
   }
 
   log('完成。拖图/粘贴图片后，插件会在图片相关回合注入识图规则，describe_image 通过 dsh 附件服务直接读取当前图片；配置可在 Settings → Plugins → VisionPower 中修改。这条命令随时可重跑（幂等，已就位的步骤自动跳过）：dsh 升级/重装后重跑会自动重打补丁；在 dsh 里新增/更换纯文本模型不需要任何操作——补丁按模型无关方式放行图片消息，新模型自动被覆盖，重跑一遍可顺便验证链路完好。')

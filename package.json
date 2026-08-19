@@ -12,6 +12,7 @@
     "./config": "./src/config.js",
     "./schema": "./src/schema.js",
     "./dsh": "./src/dsh/index.js",
+    "./dsh/client": "./src/dsh/client.js",
     "./dsh/package.json": "./src/dsh/package.json",
     "./client": "./src/dsh/client.js",
     "./src/*": "./src/*",

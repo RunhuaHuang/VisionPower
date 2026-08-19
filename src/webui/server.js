@@ -15,6 +15,7 @@ import {
   normalizeBaseUrl,
   ensureAnthropicVersionPath,
   normalizeConfigObject,
+  preserveUnknownConfigKeys,
   resolveModelCapabilities,
   VISION_MODEL_PRESETS,
   WELFARE_BASE_URL_ALIAS,
@@ -443,7 +444,9 @@ async function handleApi(method, url, req, res) {
         }
       }
 
-      saveVisionConfig(cleaned)
+      // The form snapshot only owns the fields this version knows; keys the
+      // persisted file holds beyond that set survive the save verbatim.
+      saveVisionConfig(preserveUnknownConfigKeys(cleaned, current))
 
       const masked = { ...cleaned, baseUrl: maskWelfareBaseUrl(cleaned.baseUrl) }
       if (cleaned.apiKey) {
@@ -771,7 +774,12 @@ async function handleApi(method, url, req, res) {
         testVision: body.testVision !== false,
         signal: abortContext.signal,
       })
-      sendJson(res, 200, { ok: true, message: connectionResult })
+      sendJson(res, 200, {
+        ok: true,
+        message: connectionResult.message,
+        visionVerified: connectionResult.visionVerified,
+        reason: connectionResult.reason,
+      })
     } catch (err) {
       if (!res.writableEnded) sendJson(res, err.statusCode || 400, { error: err.message })
     } finally {

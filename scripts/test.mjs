@@ -3,14 +3,14 @@ import { execFile } from 'node:child_process'
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, symlinkSync, truncateSync, unlinkSync, utimesSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
-import { request as httpRequest } from 'node:http'
+import { createServer, request as httpRequest } from 'node:http'
 import { fileURLToPath } from 'node:url'
 import { Script } from 'node:vm'
 import { buildSkillScript } from './build-skill.mjs'
 import { buildDshCoreBundle } from './build-dsh.mjs'
-import { DEFAULT_VISION_BASE_URL, getConfigFilePath, getInboxDir, getSkillStateFilePath, getDefaultBaseUrlForModel, loadVisionConfig, markSkillConfigNeedsSetup, markSkillConfigVerified, normalizeBaseUrl, normalizeConfigObject, resolveModelCapabilities, saveVisionConfig, VISION_MODEL_PRESETS, resolveWelfareBaseUrl, maskWelfareBaseUrl } from '../src/config.js'
+import { DEFAULT_VISION_BASE_URL, getConfigFilePath, getInboxDir, getSkillStateFilePath, getDefaultBaseUrlForModel, loadVisionConfig, markSkillConfigNeedsSetup, markSkillConfigVerified, normalizeBaseUrl, normalizeConfigObject, preserveUnknownConfigKeys, resolveModelCapabilities, saveVisionConfig, VISION_MODEL_PRESETS, resolveWelfareBaseUrl, maskWelfareBaseUrl } from '../src/config.js'
 import { toolInputSchema } from '../src/schema.js'
-import { describeImage, normalizeBase64Image, parseRetryAfterMs, resolvePublicImageUrl, testModelConnection } from '../src/vision-core.js'
+import { describeImage, fetchFromVerifiedAddresses, normalizeBase64Image, parseRetryAfterMs, renderChallengePng, resolvePublicImageUrl, testModelConnection } from '../src/vision-core.js'
 import { probeWebuiServer, startOrReuseWebuiServer, startWebuiServer } from '../src/webui/server.js'
 import { WEBUI_HTML } from '../src/webui/index-html.js'
 import { deleteStagedImage, listStagedImages, readStagedImage, stageImageBuffer } from '../src/image-inbox.js'
@@ -540,6 +540,14 @@ try {
     ]),
     /resolve only to publicly reachable addresses/,
   )
+  // Public IPv6 literal: WHATWG URL keeps the brackets in `hostname`, and the
+  // literal fast path must strip them (net.isIP rejects the bracketed form) —
+  // otherwise the URL is misread as an unresolvable hostname.
+  {
+    const literal = await resolvePublicImageUrl('http://[2606:4700::6810:85e5]/image.png')
+    assert.deepEqual(literal.addresses, [{ address: '2606:4700::6810:85e5', family: 6 }])
+    assert.equal(literal.url.hostname, '[2606:4700::6810:85e5]')
+  }
   await assertRejectsMessage(
     () => describeImage({ image_url: 'http://localhost/image.png' }, testConfig()),
     /publicly reachable/,
@@ -585,6 +593,41 @@ try {
       () => describeImage({ image_url: `http://${address}/image.png` }, testConfig()),
       /publicly reachable/,
     )
+  }
+  // Address-set failover: DNS round-robin frequently mixes a healthy and a dead
+  // address for one hostname. The verified set is tried in (shuffled) sequence,
+  // so a dead member must not fail the whole download.
+  {
+    // The live server listens on 127.0.0.1 only; ::1 on the same port is a
+    // guaranteed-immediate connection refusal on every platform.
+    const server = createServer((req, res) => {
+      res.writeHead(200, { 'content-type': 'image/png' })
+      res.end(pngBytes)
+    })
+    await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve))
+    try {
+      const url = new URL(`http://failover.example:${server.address().port}/image.png`)
+      const response = await fetchFromVerifiedAddresses(url, [
+        { address: '::1', family: 6 },
+        { address: '127.0.0.1', family: 4 },
+      ], 5000, null)
+      assert.equal(response.statusCode, 200)
+      response.resume()
+      // When every address fails, the last connection error surfaces instead
+      // of being swallowed by the loop.
+      await assert.rejects(
+        () => fetchFromVerifiedAddresses(url, [{ address: '::1', family: 6 }], 5000, null),
+      )
+      // An already-aborted signal must propagate immediately, not spend the
+      // remaining addresses.
+      const aborted = new AbortController()
+      aborted.abort()
+      await assert.rejects(
+        () => fetchFromVerifiedAddresses(url, [{ address: '127.0.0.1', family: 4 }], 5000, aborted.signal),
+      )
+    } finally {
+      server.close()
+    }
   }
   await assertRejectsMessage(
     () => describeImage({ image_url: 'https://example.com/image.png' }, testConfig({ apiKey: '' })),
@@ -827,8 +870,9 @@ try {
     },
   )
 
-  // A thinking-only Anthropic reply still counts as a verified connection:
-  // hidden reasoning can exhaust the token budget with no visible text.
+  // A thinking-only Anthropic reply must NOT pass the visual challenge: hidden
+  // reasoning proves the model processed the prompt, but not that it read the
+  // image, so the probe stays unverified while the endpoint is reachable.
   await withSequencedFetch(
     [
       {
@@ -843,12 +887,79 @@ try {
       },
     ],
     async (calls) => {
-      const message = await testModelConnection(
+      const result = await testModelConnection(
         testConfig({ model: 'claude-3-5-sonnet-20241022', baseUrl: 'https://api.anthropic.com/v1', protocol: 'anthropic' }),
+        { challengeCode: '1234' },
       )
-      assert.match(message, /visual connection verified/i)
+      assert.equal(result.visionVerified, false)
+      assert.equal(result.reason, 'no_visible_challenge_answer')
+      assert.match(result.message, /no visible answer/i)
       assert.equal(calls.length, 1)
       assert.equal(calls[0].url, 'https://api.anthropic.com/v1/messages')
+    },
+  )
+
+  // Visual probe challenge: the expected code is rendered into the image and
+  // never appears in the prompt, so a provider that ignores the image can only
+  // fail the check. A text-only mock answering "OK" is a deterministic
+  // false-positive detector for that scenario.
+  await withSequencedFetch(
+    [
+      { status: 200, body: JSON.stringify({ choices: [{ message: { content: 'OK' } }] }) },
+    ],
+    async (calls) => {
+      const result = await testModelConnection(testConfig(), { challengeCode: '1234' })
+      assert.equal(result.visionVerified, false, 'a provider that never reads the image must fail the probe')
+      assert.equal(result.reason, 'challenge_mismatch')
+      assert.match(result.message, /could not read the challenge image/)
+      assert.equal(result.challengeDigits, 4)
+      assert.equal(calls.length, 1)
+      const messages = calls[0].body.messages
+      assert.ok(!JSON.stringify(messages).includes('1234'), 'the challenge code must never appear in the request text')
+      const imageUrl = messages[1].content.find((part) => part.type === 'image_url')?.image_url?.url
+      assert.equal(imageUrl, `data:image/png;base64,${renderChallengePng('1234').toString('base64')}`)
+    },
+  )
+
+  // Only a provider that actually reads the image can return the code.
+  await withSequencedFetch(
+    [
+      { status: 200, body: JSON.stringify({ choices: [{ message: { content: '1234' } }] }) },
+    ],
+    async (calls) => {
+      const result = await testModelConnection(testConfig(), { challengeCode: '1234' })
+      assert.equal(result.visionVerified, true)
+      assert.equal(result.reason, 'challenge_ok')
+      assert.equal(calls.length, 1)
+    },
+  )
+
+  // A single wrong digit or extra decoration fails the probe.
+  await withSequencedFetch(
+    [
+      { status: 200, body: JSON.stringify({ choices: [{ message: { content: 'The code is 1235.' } }] }) },
+    ],
+    async (calls) => {
+      const result = await testModelConnection(testConfig(), { challengeCode: '1234' })
+      assert.equal(result.visionVerified, false)
+      assert.equal(result.reason, 'challenge_mismatch')
+      assert.equal(calls.length, 1)
+    },
+  )
+
+  // Consecutive probes without a fixed code use different challenge images.
+  await withSequencedFetch(
+    [
+      { status: 200, body: JSON.stringify({ choices: [{ message: { content: 'captured' } }] }) },
+      { status: 200, body: JSON.stringify({ choices: [{ message: { content: 'captured' } }] }) },
+    ],
+    async (calls) => {
+      const first = await testModelConnection(testConfig())
+      const second = await testModelConnection(testConfig())
+      assert.equal(first.visionVerified, false)
+      assert.equal(second.visionVerified, false)
+      const imageOf = (call) => call.body.messages[1].content.find((part) => part.type === 'image_url').image_url.url
+      assert.notEqual(imageOf(calls[0]), imageOf(calls[1]), 'each probe must render a fresh random challenge')
     },
   )
 
@@ -1135,8 +1246,11 @@ try {
       'data: {"choices":[{"delta":{"role":"assistant"}}]}',
       '',
       'data: {"choices":[{"delta":{"content":"streamed "}}]}',
+      '',
       'data: {"choices":[{"delta":{"content":"answer"}}]}',
+      '',
       'data: {"choices":[{"delta":{},"finish_reason":"stop"}]}',
+      '',
       'data: [DONE]',
       '',
     ].join('\n')
@@ -1165,8 +1279,11 @@ try {
       'data: {"type":"message_start","message":{"role":"assistant"}}',
       '',
       'data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"anthropic "}}',
+      '',
       'data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"ok"}}',
+      '',
       'data: {"type":"message_delta","delta":{"stop_reason":"end_turn"}}',
+      '',
       'data: {"type":"message_stop"}',
       '',
     ].join('\n')
@@ -1188,21 +1305,106 @@ try {
     }
   }
 
-  // A thinking-only stream still proves a connection for testModelConnection.
+  // Standard SSE allows a single event to span multiple `data:` lines joined
+  // with newlines until the blank dispatch line; parsed as one JSON payload.
+  {
+    const multilineEvent = [
+      'data: {"choices":[{"delta":{"content":"split-json"},',
+      'data: "finish_reason":"stop"}]}',
+      '',
+      'data: [DONE]',
+      '',
+    ].join('\n')
+    const originalFetch = globalThis.fetch
+    globalThis.fetch = async () => new Response(multilineEvent, { status: 200, headers: { 'content-type': 'text/event-stream' } })
+    try {
+      const result = await describeImage(
+        { image_base64: gifBytes.toString('base64'), prompt: 'multiline event' },
+        testConfig(),
+      )
+      assert.equal(stripBanner(result), 'split-json')
+    } finally {
+      globalThis.fetch = originalFetch
+    }
+  }
+
+  // CRLF line endings and a one-character-per-chunk body both parse cleanly.
+  {
+    const crlfBody = 'data: {"choices":[{"delta":{"content":"crlf "}}]}\r\n\r\ndata: {"choices":[{"delta":{"content":"ok"},"finish_reason":"stop"}]}\r\n\r\ndata: [DONE]\r\n\r\n'
+    const originalFetch = globalThis.fetch
+    globalThis.fetch = async () => {
+      const stream = new ReadableStream({
+        start(controller) {
+          for (const char of crlfBody) controller.enqueue(new TextEncoder().encode(char))
+          controller.close()
+        },
+      })
+      return new Response(stream, { status: 200, headers: { 'content-type': 'text/event-stream' } })
+    }
+    try {
+      const result = await describeImage(
+        { image_base64: gifBytes.toString('base64'), prompt: 'crlf chunks' },
+        testConfig(),
+      )
+      assert.equal(stripBanner(result), 'crlf ok')
+    } finally {
+      globalThis.fetch = originalFetch
+    }
+  }
+
+  // `: keepalive` comment lines are pure metadata: they must not dispatch
+  // events, contribute content, or disarm the first-token watchdog. A stream
+  // of endless comments therefore still fails at the first-byte deadline.
+  {
+    const originalFetch = globalThis.fetch
+    globalThis.fetch = (url, options) => new Promise((resolveStall) => {
+      const stream = new ReadableStream({
+        start(controller) {
+          const encoder = new TextEncoder()
+          const timer = setInterval(() => {
+            try { controller.enqueue(encoder.encode(': keepalive\n\n')) } catch { /* closed */ }
+          }, 5)
+          options.signal.addEventListener('abort', () => {
+            clearInterval(timer)
+            try { controller.error(new Error('aborted')) } catch { /* already closed */ }
+          }, { once: true })
+        },
+      })
+      resolveStall(new Response(stream, { status: 200, headers: { 'content-type': 'text/event-stream' } }))
+    })
+    try {
+      await assertRejectsMessage(
+        () => describeImage(
+          { image_base64: gifBytes.toString('base64'), prompt: 'comment heartbeat' },
+          testConfig({ requestTimeoutMs: 5_000, firstByteTimeoutMs: 60, maxRetries: 0 }),
+        ),
+        /did not start responding within 60ms/,
+      )
+    } finally {
+      globalThis.fetch = originalFetch
+    }
+  }
+
+  // A thinking-only stream proves the endpoint is reachable but must NOT pass
+  // the visual challenge: no visible answer means the image was never read.
   {
     const reasoningSse = [
       'data: {"choices":[{"delta":{"reasoning_content":"thinking hard"}}]}',
+      '',
       'data: {"choices":[{"delta":{},"finish_reason":"length"}]}',
+      '',
       'data: [DONE]',
       '',
     ].join('\n')
     const originalFetch = globalThis.fetch
     globalThis.fetch = async () => new Response(reasoningSse, { status: 200, headers: { 'content-type': 'text/event-stream' } })
     try {
-      const message = await testModelConnection(
+      const result = await testModelConnection(
         testConfig({ model: 'reasoning-stream-model', baseUrl: 'https://gateway.example.com/v1' }),
       )
-      assert.match(message, /visual connection verified; reasoning model/i)
+      assert.equal(result.visionVerified, false)
+      assert.equal(result.reason, 'no_visible_challenge_answer')
+      assert.match(result.message, /no visible answer/i)
     } finally {
       globalThis.fetch = originalFetch
     }
@@ -2457,6 +2659,27 @@ try {
     () => normalizeConfigObject({ baseUrl: 'file:///tmp' }),
     /baseUrl must use http or https/,
   )
+
+  // --- preserveUnknownConfigKeys: a PUT keeps file keys it does not know ---
+  // The WebUI form snapshot owns the known fields only; hand-added or
+  // future-version keys in the persisted file must survive the save.
+  {
+    const replacement = normalizeConfigObject({ apiKey: 'sk-new', model: 'test-model', baseUrl: 'https://api.example.com/v1' })
+    // Built via JSON.parse so "__proto__" is a real own property, exactly like
+    // a config file read from disk.
+    const previous = JSON.parse('{"apiKey":"sk-old","model":"old-model","futureField":{"nested":1},"VISIONPOWER_API_KEY":"legacy-env-style-key","enabled":true,"__proto__":{"x":1},"constructor":"evil"}')
+    const preserved = preserveUnknownConfigKeys(replacement, previous)
+    assert.equal(preserved.apiKey, 'sk-new')                 // known fields: PUT wins
+    assert.equal(preserved.model, 'test-model')
+    assert.deepEqual(preserved.futureField, { nested: 1 })   // unknown fields survive
+    assert.equal(preserved.VISIONPOWER_API_KEY, 'legacy-env-style-key')
+    assert.equal('enabled' in preserved, false)              // migrated to dshEnabled by the PUT path, never rewritten
+    assert.equal(preserved.__proto__?.x, undefined)          // prototype-pollution keys never round-trip
+    assert.equal(Object.getPrototypeOf(preserved), Object.prototype)
+    assert.equal(preserved.constructor, Object.prototype.constructor)
+    // Nothing to preserve -> the replacement object is returned unchanged.
+    assert.equal(preserveUnknownConfigKeys(replacement, null), replacement)
+  }
   assertThrowsMessage(
     () => normalizeConfigObject({ baseUrl: 'https://user:password@api.example.com/v1' }),
     /baseUrl must not include credentials/,
@@ -2783,6 +3006,25 @@ try {
       const mixedConfig = await mixedConfigResponse.json()
       assert.equal(mixedConfig.apiKey, 'file****7890')
 
+      // A full-form PUT preserves persisted keys this version does not know:
+      // the browser form owns the known fields, never the whole file.
+      writeFileSync(process.env.VISIONPOWER_CONFIG, JSON.stringify({
+        apiKey: savedKey,
+        handAddedFlag: 'keep-me',
+      }))
+      const putKeepUnknown = await localHttpRequest(`${origin}/api/config`, {
+        method: 'PUT',
+        body: { apiKey: savedKey, model: 'kimi-k3', baseUrl: 'https://api.moonshot.cn/v1' },
+      })
+      assert.equal(putKeepUnknown.status, 200)
+      assert.equal(putKeepUnknown.json.ok, true)
+      const afterPut = JSON.parse(readFileSync(process.env.VISIONPOWER_CONFIG, 'utf8'))
+      assert.equal(afterPut.model, 'kimi-k3')
+      assert.equal(afterPut.handAddedFlag, 'keep-me')
+      // Restore the plain file so the credential-mask assertions below see the
+      // same starting state they were written against.
+      writeFileSync(process.env.VISIONPOWER_CONFIG, JSON.stringify({ apiKey: savedKey }))
+
         const saveChangedEndpointWithMask = await localHttpRequest(`${origin}/api/config`, {
           method: 'PUT',
           body: {
@@ -2895,11 +3137,13 @@ try {
             },
         })
         assert.equal(connectionResponse.status, 200)
-        assert.equal(connectionResponse.json.message, 'Visual connection verified: connected')
+        assert.equal(connectionResponse.json.visionVerified, false, 'a provider answering a fixed word cannot read the challenge')
+        assert.equal(connectionResponse.json.reason, 'challenge_mismatch')
+        assert.match(connectionResponse.json.message, /could not read the challenge image/i)
         assert.equal(providerCalls.length, 1)
         assert.equal(providerCalls[0].options.headers.Authorization, 'Bearer openai-env-secret')
         assert.equal(providerCalls[0].body.messages[0].role, 'system')
-        assert.match(providerCalls[0].body.messages[1].content[0].text, /1x1 probe image/i)
+        assert.match(providerCalls[0].body.messages[1].content[0].text, /exactly four digits/i)
           assert.equal(providerCalls[0].body.messages[1].content[1].type, 'image_url')
           assert.match(providerCalls[0].body.messages[1].content[1].image_url.url, /^data:image\/png;base64,/)
 
@@ -3344,7 +3588,7 @@ try {
     ])
 
     const explicit = { image_path: '/tmp/example.png', prompt: 'read' }
-    assert.equal(await withDshImageAttachments(explicit, {}, undefined), explicit)
+    assert.deepEqual(await withDshImageAttachments(explicit, {}, undefined), explicit)
 
     let disabledReads = 0
     await assertRejectsMessage(
@@ -3410,8 +3654,54 @@ try {
     )
     await assertRejectsMessage(
       () => withDshImageAttachments({ prompt: 'read' }, { agent: { session: { deriveMessages: () => [] } } }, { readImage() {} }),
-      /explicit image source or an image attachment/i,
+      /No image in the current message/,
     )
+
+    // Current-turn semantics: an image from an earlier turn is never picked up
+    // implicitly. The user's latest message is plain text; the default scope
+    // must refuse, while an explicit latest_in_session opt-in reads the old
+    // image.
+    const turnMessages = [
+      { source: { kind: 'user' }, content: [{ type: 'image', attachment: first }] },
+      { source: { kind: 'assistant' }, content: [{ type: 'text', text: 'old analysis' }] },
+      { source: { kind: 'user' }, content: [{ type: 'text', text: '再解释一下这张' }] },
+    ]
+    let defaultTurnReads = 0
+    await assertRejectsMessage(
+      () => withDshImageAttachments(
+        { prompt: 'follow-up' },
+        { agent: { session: { deriveMessages: () => turnMessages } } },
+        { async readImage() { defaultTurnReads += 1 } },
+        testConfig(),
+      ),
+      /No image in the current message/,
+    )
+    assert.equal(defaultTurnReads, 0, 'an earlier-turn image must never be read implicitly')
+    const scopedReads = []
+    const scoped = await withDshImageAttachments(
+      { prompt: 'follow-up', attachment_scope: 'latest_in_session' },
+      { agent: { session: { deriveMessages: () => turnMessages } } },
+      {
+        async readImage(ref) {
+          scopedReads.push(ref)
+          return { ref, data: pngBytes }
+        },
+      },
+      testConfig(),
+    )
+    assert.deepEqual(scopedReads, [first], 'explicit latest_in_session reuses the newest image of earlier turns')
+    assert.deepEqual(scoped.images, [{ image_base64: pngBytes.toString('base64'), image_mime_type: 'image/png' }])
+    // attachment_scope is dsh-only routing metadata and must be stripped on
+    // every return path: the canonical core rejects unknown request fields, so
+    // a surviving attachment_scope would fail the whole call after the image
+    // was already read and encoded.
+    assert.equal('attachment_scope' in scoped, false)
+    const explicitWithScope = await withDshImageAttachments(
+      { image_path: '/tmp/example.png', prompt: 'read', attachment_scope: 'current_turn' },
+      {},
+      undefined,
+    )
+    assert.deepEqual(explicitWithScope, { image_path: '/tmp/example.png', prompt: 'read' })
 
     const clientSource = readFileSync(new URL('../src/dsh/client.js', import.meta.url), 'utf8')
     assert.ok(clientSource.includes("id: 'visionpower/dsh'"))
@@ -3465,6 +3755,7 @@ try {
     assert.doesNotThrow(() => tabRegistration.component())
     const packageJson = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8'))
     assert.equal(packageJson.exports['./client'], './src/dsh/client.js')
+    assert.equal(packageJson.exports['./dsh/client'], './src/dsh/client.js')
     assert.equal(packageJson.exports['./dsh/package.json'], './src/dsh/package.json')
     assert.equal(packageJson.dsh.client.platform, 'web')
     assert.ok(packageJson.dsh.client.inject.includes('@deepseek-ai/dsh-client-ui-settings-plugins'))
@@ -3499,13 +3790,38 @@ try {
     assert.ok(upgradedVersioned.content.includes(RULES_TEXT))
     assert.ok(upgradedVersioned.content.includes('# User tail\nkeep'))
 
+    // 已发布旧版规则的末行固定是「3. 回复风格：…」；其后无 # 标题的用户尾注
+    // 必须原样保留，迁移只替换规则块本身。
+    const releasedLegacyTail = `# 图片的定位与识图规则（VisionPower）
+
+## 非多模态模型的定位与识图
+
+1. 旧版第一步。
+2. 调用 describe_image。
+3. 回复风格：定位与识图都是内部步骤——拿到识图结果后一次性答复用户。`
+    const legacyWithUserTail = `# My notes\n\n${releasedLegacyTail}\n\nAlways answer in Chinese.\nDo not remove this line.\n`
+    const migratedTail = upsertVisionPowerRules(legacyWithUserTail)
+    assert.equal(migratedTail.status, 'updated')
+    assert.ok(migratedTail.content.includes('Always answer in Chinese.'))
+    assert.ok(migratedTail.content.includes('Do not remove this line.'))
+    assert.ok(migratedTail.content.includes(RULES_TEXT))
+    assert.ok(!migratedTail.content.includes('旧版第一步'))
+
+    // 识别不出已知末行、又没有后续顶级标题的变体：降级为追加新块，
+    // 既有内容一个字符都不能少。
+    const unrecognizableVariant = `${legacyBlock}\n\nplain trailing note without any heading\n`
+    const appended = upsertVisionPowerRules(unrecognizableVariant)
+    assert.equal(appended.status, 'added')
+    assert.ok(appended.content.includes('plain trailing note without any heading'))
+    assert.ok(appended.content.includes('用 unzstd 读取会话日志'))
+
     const current = upsertVisionPowerRules(RULES_TEXT + '\n')
     assert.equal(current.status, 'current')
   }
 
   // ── setup-dsh 纯函数与补丁自测 ────────────────────────────────────────────
   {
-    const { compareVersions, composeCordisContent, parsePatchedInstallations, validatePluginSource } = await import('./setup-dsh.mjs')
+    const { compareVersions, composeCordisContent, parsePatchedInstallations, syncLocalDshClientFiles, validatePluginSource } = await import('./setup-dsh.mjs')
     assert.equal(compareVersions('2.8.0', '3.0.0'), -1)
     assert.equal(compareVersions('3.0.0', '3.0.0'), 0)
     assert.equal(compareVersions('3.0.1', '3.0.0'), 1)
@@ -3527,6 +3843,36 @@ try {
     assert.equal(validatePluginSource('github:RunhuaHuang/VisionPower#v3.0.1'), 'github:RunhuaHuang/VisionPower#v3.0.1')
     assert.throws(() => validatePluginSource('github:RunhuaHuang/VisionPower'), /固定 Git tag\/commit/)
     assert.throws(() => validatePluginSource('visionpower@3.0.1 & touch owned'), /shell 元字符/)
+    // POSIX 上本地 file: 路径按 argv 传递、不经 shell，括号等属于合法文件名
+    if (process.platform !== 'win32') {
+      assert.equal(validatePluginSource('file:/tmp/dev (x)/VisionPower'), 'file:/tmp/dev (x)/VisionPower')
+    }
+    // pnpm 同版本 file: 源会复用旧导入快照：新增文件必须补齐，既有文件不能覆盖
+    {
+      const devRoot = join(tempDir, 'dev-source')
+      const devDsh = join(devRoot, 'src', 'dsh')
+      mkdirSync(join(devDsh, 'nested'), { recursive: true })
+      writeFileSync(join(devDsh, 'package.json'), '{"name":"visionpower/dsh"}')
+      writeFileSync(join(devDsh, 'client.js'), 'new client entry')
+      writeFileSync(join(devDsh, 'nested', 'extra.js'), 'nested new file')
+      writeFileSync(join(devDsh, 'index.js'), 'existing hardlinked file')
+      const profileModules = join(tempDir, 'profile', 'node_modules', 'visionpower', 'src', 'dsh')
+      mkdirSync(profileModules, { recursive: true })
+      writeFileSync(join(profileModules, 'index.js'), 'existing hardlinked file')
+      writeFileSync(join(profileModules, 'stale-removed.js'), 'no longer in source')
+      syncLocalDshClientFiles(join(tempDir, 'profile'), `file:${devRoot}`)
+      assert.equal(readFileSync(join(profileModules, 'client.js'), 'utf8'), 'new client entry')
+      assert.equal(readFileSync(join(profileModules, 'package.json'), 'utf8'), '{"name":"visionpower/dsh"}')
+      assert.equal(readFileSync(join(profileModules, 'nested', 'extra.js'), 'utf8'), 'nested new file')
+      assert.ok(!readdirSync(profileModules).some((name) => name.endsWith('.tmp')), 'atomic copies must not leave temp files')
+    }
+    // src/index.js 的主模块守卫必须经 realpath 归一化：npm/pnpm/npx 的 bin 是符号链接，
+    // 朴素比较 import.meta.url 与 argv[1] 会让 main() 在符号链接调用下静默不执行
+    {
+      const binEntrySource = readFileSync(new URL('../src/index.js', import.meta.url), 'utf8')
+      assert.ok(binEntrySource.includes('realpathSync'), 'the direct-run guard must normalize both paths through realpathSync')
+      assert.ok(!binEntrySource.includes('import.meta.url === pathToFileURL(process.argv[1]).href'))
+    }
     // dsh 默认文件（注释 + 独立 [] 行）追加后必须剥掉 []，否则 YAML 非法、profile 起不来
     const dshDefault = '# comment\n# more\n[]\n'
     const mounted = composeCordisContent(dshDefault)
@@ -3548,6 +3894,159 @@ try {
     })
     assert.ok(!selfTest.error, `patch-dsh self-test failed: ${selfTest.error}`)
     assert.ok(selfTest.stdout.includes('SELF-TEST PASS'))
+  }
+  {
+    // patch-dsh 事务化：写入走 temp+rename，语法校验失败时回滚本次写入的全部
+    // 文件——绝不留下半补丁安装。夹具复刻 self-test 的「补丁前」片段，但每个
+    // 片段都补齐括号，使整个文件能通过 node --check（CJS goal，顶层无 await）。
+    const patchScript = fileURLToPath(new URL('./patch-dsh.mjs', import.meta.url))
+    const T = (n) => '\t'.repeat(n)
+    const S1 = [
+      'async function caseS1() {',
+      T(4) + 'const hasImage = content.some((part) => part.type === "image");',
+      T(4) + 'const admit = async () => {',
+      T(5) + 'try {',
+      T(6) + 'if (hasImage) {',
+      T(7) + 'const current = selectionFor(agent).current;',
+      T(7) + 'const modelInfo = await ctx.llm.resolveModelInfo(current.provider, current.model);',
+      T(7) + 'if (modelInfo.inputModalities !== void 0 && !modelInfo.inputModalities.includes("image")) return err(request, {',
+      T(8) + 'code: "attachment-error",',
+      T(8) + 'message: `Model "${current.model}" does not support image input.`,',
+      T(8) + 'details: { reason: "MODEL_DOES_NOT_SUPPORT_IMAGES" }',
+      T(7) + '});',
+      T(6) + '}',
+      T(6) + 'const message = createUserMessage({',
+      T(7) + 'dummy: 1',
+      T(6) + '});',
+      T(5) + '} finally {}',
+      T(4) + '};',
+      '}',
+    ].join('\n')
+    const S2 = [
+      'async function caseS2() {',
+      T(6) + 'if ([...found.agent.inbox.nextTurn, ...found.agent.inbox.nextStep].some((message) => contentHasImage(message.content)) || messagesHaveImage(found.agent.session.deriveMessages())) {',
+      T(7) + 'const info = await ctx.llm.resolveModelInfo(resolved.provider, resolved.model);',
+      T(7) + 'if (info.inputModalities !== void 0 && !info.inputModalities.includes("image")) return err(request, {',
+      T(8) + 'code: "model-unavailable",',
+      T(8) + 'message: `Model "${resolved.model}" does not accept image input, but this session already contains images; select an image-capable model.`,',
+      T(8) + 'details: {',
+      T(9) + 'provider,',
+      T(9) + 'model',
+      T(8) + '}',
+      T(7) + '});',
+      T(6) + '}',
+      T(6) + 'const selected = {',
+      T(7) + 'model: resolved.model',
+      T(6) + '};',
+      T(6) + 'return selected;',
+      '}',
+    ].join('\n')
+    const S3 = [
+      '/** Reject core image content before any text-flattening path can silently erase it. */',
+      'function assertTextOnly(blocks) {',
+      T(1) + 'if (contentHasImage(blocks)) throw new LlmError("The DeepSeek chat-completions adapter does not support image content.", "UNSUPPORTED_CONTENT");',
+      '}',
+    ].join('\n')
+    const S4 = [
+      'function toolResultText(blocks) {',
+      T(1) + 'return blocks.map((block) => block.type === "text" ? block.text : block.type === "tool-result" ? toolResultText(block.content) : "").join("");',
+      '}',
+    ].join('\n')
+    const S5 = [
+      'async function caseS5() {',
+      T(4) + 'const containsImage = options.messages.some((message) => contentHasImage(message.content));',
+      T(4) + 'if (containsImage && !model.input.includes("image")) throw new LlmError(`pi-ai model "${model.id}" does not support image input`, "UNSUPPORTED_CONTENT");',
+      T(4) + 'const attachments = containsImage ? this.config.resolveAttachments?.() : void 0;',
+      T(4) + 'if (containsImage && attachments === void 0) throw new LlmError("pi-ai image input requires the durable attachment service", "UNSUPPORTED_CONTENT");',
+      T(4) + 'const context = attachments === void 0 ? toPiContext(options) : await toPiContext(options, attachments);',
+      '}',
+    ].join('\n')
+    const makeRoot = (variant) => {
+      // variant: 'good' | 'syntax-break' | 'missing-pi-ai'
+      const root = mkdtempSync(join(tempDir, 'patch-root-'))
+      const apiProxyDir = join(root, '@deepseek-ai', 'dsh-host-apiproxy', 'lib')
+      const deepseekDir = join(root, '@deepseek-ai', 'dsh-llm-deepseek', 'lib')
+      const piAiDir = join(root, '@deepseek-ai', 'dsh-llm-pi-ai', 'lib')
+      for (const dir of [apiProxyDir, deepseekDir, piAiDir]) mkdirSync(dir, { recursive: true })
+      const files = {
+        apiProxy: join(apiProxyDir, 'api-proxy.js'),
+        deepseek: join(deepseekDir, 'adapter.js'),
+        piAi: join(piAiDir, 'pi-ai.js'),
+      }
+      writeFileSync(files.apiProxy, `${S1}\n${S2}\n`)
+      writeFileSync(files.deepseek, `${S3}\n`)
+      writeFileSync(files.piAi, variant === 'missing-pi-ai'
+        ? 'export const unrelated = 1\n'
+        : `${S4}\n${S5}\n${variant === 'syntax-break' ? ')))' : ''}`)
+      return { root, files }
+    }
+    // 隔离安装发现逻辑：npx 缓存、npm 全局、HOME 全部指向空目录，只处理手动
+    // 指定的 root——否则测试可能打到开发机/CI 上真实存在的 dsh 安装。
+    const isolatedSpawnOptions = () => {
+      const emptyCache = mkdtempSync(join(tempDir, 'empty-npm-cache-'))
+      const emptyHome = mkdtempSync(join(tempDir, 'empty-home-'))
+      const fakeBin = mkdtempSync(join(tempDir, 'fake-npm-bin-'))
+      if (process.platform === 'win32') {
+        writeFileSync(join(fakeBin, 'npm.cmd'), '@echo off\r\necho %TEMP%\\vp-nonexistent\r\n')
+      } else {
+        writeFileSync(join(fakeBin, 'npm'), '#!/bin/sh\necho /vp-nonexistent\n', { mode: 0o755 })
+      }
+      const pathSep = process.platform === 'win32' ? ';' : ':'
+      return {
+        cwd: fakeBin,
+        env: {
+          ...process.env,
+          NPM_CONFIG_CACHE: emptyCache,
+          LOCALAPPDATA: emptyCache,
+          HOME: emptyHome,
+          USERPROFILE: emptyHome,
+          PATH: `${fakeBin}${pathSep}${process.env.PATH ?? ''}`,
+        },
+      }
+    }
+    const runPatchDsh = (root) => new Promise((resolve) => {
+      execFile(process.execPath, [patchScript, root], { encoding: 'utf8', ...isolatedSpawnOptions() },
+        (error, stdout) => resolve({ error, stdout }))
+    })
+
+    // 场景 A：合法夹具全部打上补丁，且幂等重跑全部命中「已打过」
+    const good = makeRoot('good')
+    const firstRun = await runPatchDsh(good.root)
+    assert.ok(!firstRun.error, `patch-dsh should succeed on well-formed fixtures:\n${firstRun.stdout}`)
+    assert.match(firstRun.stdout, /应用补丁 5 处/)
+    assert.ok(readFileSync(good.files.apiProxy, 'utf8').includes('Image content is admitted regardless'))
+    assert.ok(readFileSync(good.files.piAi, 'utf8').includes('const supportsImage = model.input.includes("image");'))
+    const secondRun = await runPatchDsh(good.root)
+    assert.ok(!secondRun.error, `idempotent re-run should succeed:\n${secondRun.stdout}`)
+    assert.match(secondRun.stdout, /已打过 5 处/)
+
+    // 场景 B：补丁后文件语法损坏（夹具尾部多了 `)))`）→ 退出码非 0，且本次
+    // 写入的所有文件（含语法检查通过的那些）全部回滚到原始内容。
+    const bad = makeRoot('syntax-break')
+    const before = Object.fromEntries(
+      Object.entries(bad.files).map(([name, file]) => [name, readFileSync(file, 'utf8')]),
+    )
+    const failingRun = await runPatchDsh(bad.root)
+    assert.ok(failingRun.error, 'patch-dsh must exit non-zero when a patched file fails node --check')
+    assert.match(failingRun.stdout, /回滚/)
+    for (const [name, file] of Object.entries(bad.files)) {
+      assert.equal(readFileSync(file, 'utf8'), before[name], `${name} must be restored to its pre-patch content`)
+    }
+
+    // 场景 C：pi-ai 包存在但结构漂移（找不到旧拒绝代码 → structureFail）→
+    // 已成功写入的 apiproxy/deepseek 补丁同样全部回滚，不留下「一部分文件放行
+    // 图片、另一部分仍拒绝」的半补丁安装。
+    const drifted = makeRoot('missing-pi-ai')
+    const beforeDrift = Object.fromEntries(
+      Object.entries(drifted.files).map(([name, file]) => [name, readFileSync(file, 'utf8')]),
+    )
+    const driftedRun = await runPatchDsh(drifted.root)
+    assert.ok(driftedRun.error, 'patch-dsh must exit non-zero when a package drifts structurally')
+    assert.match(driftedRun.stdout, /结构不匹配 [1-9]/)
+    assert.match(driftedRun.stdout, /回滚/)
+    for (const [name, file] of Object.entries(drifted.files)) {
+      assert.equal(readFileSync(file, 'utf8'), beforeDrift[name], `${name} must be restored after structure-drift rollback`)
+    }
   }
 
   console.log('Unit tests passed.')

@@ -310,6 +310,29 @@ function selfTest() {
 // 主流程
 // ─────────────────────────────────────────────────────────────────────────────
 
+// 事务化写入：原始内容先留在内存里，写入走 temp+rename 原子替换（进程中断也
+// 不会留下写了一半的文件）。任何失败（结构不匹配 / 语法校验失败）都把本次已
+// 写入的全部文件恢复到补丁前状态——绝不留下半补丁安装（一部分文件打了、
+// 另一部分没打且行为混杂）。
+const originals = new Map();
+
+function writeAtomic(file, content) {
+  const temp = `${file}.visionpower-${process.pid}.tmp`;
+  fs.writeFileSync(temp, content);
+  fs.renameSync(temp, file);
+}
+
+function rollbackWrittenFiles() {
+  let restored = 0;
+  for (const [file, before] of originals) {
+    try { writeAtomic(file, before); restored++; }
+    catch (e) { console.error(`  ✗ 回滚失败: ${file}（${e.message}）——该文件需手动恢复`); }
+  }
+  if (restored > 0) console.error(`已将 ${restored} 个已写入文件回滚到补丁前状态。`);
+  originals.clear();
+  return restored;
+}
+
 function main() {
   const argv = process.argv.slice(2);
   if (argv.includes('--self-test')) return selfTest();
@@ -346,9 +369,12 @@ function main() {
           console.error(`  ✗ ${p.id}  [${rel}] 锚点存在但替换失败——版本结构已变，需按配置提示词手动修改`);
           continue;
         }
-        if (!dryRun) fs.writeFileSync(file, after);
+        if (!dryRun) {
+          if (!originals.has(file)) originals.set(file, before);
+          writeAtomic(file, after);
+          touched.push(file);
+        }
         applied++;
-        if (!dryRun) touched.push(file);
         console.log(`  ● ${p.id}  [${rel}] ${dryRun ? '待打补丁（dry-run，未写入）' : '已打补丁'}`);
       }
       // 响亮失败：包存在却找不到任何旧拒绝代码（可能 dsh 版本已更新），不能静默跳过
@@ -366,13 +392,19 @@ function main() {
     if (r.status !== 0) { syntaxFail++; console.error(`  ✗ node --check 失败: ${file}\n${r.stderr}`); }
   }
 
+  // 事务收尾：结构不匹配（dsh 结构漂移，本次补丁无法完整应用）或语法失败都
+  // 意味着安装会停在行为混杂的半补丁状态——一部分文件放行图片、另一部分仍
+  // 拒绝——回滚本次写入的全部文件，回到干净的补丁前状态后退出报错。
+  let rolledBack = 0;
+  if ((syntaxFail > 0 || structureFail > 0) && !dryRun) rolledBack = rollbackWrittenFiles();
+
   // 提示：识图规则默认由 visionpower 插件在运行时注入，无需 AGENTS.md 文件（可选写入）
   const dshHome = process.env.DSH_HOME || path.join(os.homedir(), '.dsh');
   const agents = path.join(dshHome, 'AGENTS.md');
   if (!fs.existsSync(agents)) console.log(`\nℹ 识图规则默认由 visionpower 插件运行时注入，无需 ${agents}；如需可见可编辑的规则文件，运行 setup-dsh --write-agents 写入。`);
 
   console.log('\n──────────────────────────────────────────');
-  console.log(`应用补丁 ${applied} 处，已打过 ${alreadyOk} 处，结构不匹配 ${structureFail} 处，语法失败 ${syntaxFail} 处${dryRun ? '（dry-run，未写入任何文件）' : ''}。`);
+  console.log(`应用补丁 ${applied} 处，已打过 ${alreadyOk} 处，结构不匹配 ${structureFail} 处，语法失败 ${syntaxFail} 处${rolledBack > 0 ? `（已回滚 ${rolledBack} 个文件的写入）` : ''}${dryRun ? '（dry-run，未写入任何文件）' : ''}。`);
   if (applied > 0 && !dryRun) console.log('请重启 DSH 生效：npm exec @deepseek-ai/dsh web');
   if (syntaxFail > 0 || structureFail > 0) {
     console.error('存在未解决的问题，请按上面的 ✗ 提示手动处理。');

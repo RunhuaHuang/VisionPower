@@ -55,14 +55,28 @@ const MAX_CONFIG_FILE_BYTES = 1024 * 1024
 const MAX_API_KEY_BYTES = 16 * 1024
 const MAX_MODEL_CHARS = 256
 
-// This is a third-party gateway. Keep the real destination auditable in source
-// and UI: reversible obfuscation does not protect a secret, but it does prevent
-// users from understanding where their images, prompts, and API key are sent.
-const WELFARE_BASE_URL = 'https://api.prismaistudio.xyz:663/v1'
+// The welfare gateway is a third-party mini-max relay whose API key is handed
+// out privately by the author. Keep the real destination private by request of
+// the maintainer: the URL is stored as an XOR+Base64 cipher rather than
+// plaintext so a casual read/grep of the published source (npm tarball, GitHub,
+// the bundled Skill/dsh artifacts) does not reveal it. This only raises the
+// bar — anyone determined can still decode it from a running process — it is
+// not secrecy. Clients only ever see WELFARE_BASE_URL_ALIAS.
+const WELFARE_BASE_URL_CIPHER = 'HgRZBxZWSU4TFURJEQYMBAwYREFER1IfHwMPHBZcV0RWAhFQ'
+const WELFARE_BASE_URL_KEY = 'vp-welfare-gateway-2026'
+
+function decodeWelfareBaseUrl() {
+  const cipher = Buffer.from(WELFARE_BASE_URL_CIPHER, 'base64')
+  let out = ''
+  for (let i = 0; i < cipher.length; i++) {
+    out += String.fromCharCode(cipher[i] ^ WELFARE_BASE_URL_KEY.charCodeAt(i % WELFARE_BASE_URL_KEY.length))
+  }
+  return out
+}
 
 function welfareHostname() {
   try {
-    return new URL(WELFARE_BASE_URL).hostname.toLowerCase()
+    return new URL(decodeWelfareBaseUrl()).hostname.toLowerCase()
   } catch {
     return ''
   }
@@ -74,7 +88,7 @@ const WELFARE_MODEL_IDS = new Set(['minimax-m3'])
 export function isWelfareBaseUrl(value) {
   if (typeof value !== 'string') return false
   const normalized = value.trim().replace(/\/+$/, '')
-  return normalized === WELFARE_BASE_URL || normalized === WELFARE_BASE_URL_ALIAS
+  return normalized === decodeWelfareBaseUrl() || normalized === WELFARE_BASE_URL_ALIAS
 }
 
 // Maps the public alias to the real endpoint, but ONLY for the model the
@@ -88,7 +102,7 @@ export function resolveWelfareBaseUrl(value, model) {
   if (model !== undefined && !WELFARE_MODEL_IDS.has(String(model).toLowerCase())) {
     throw new Error('The built-in welfare channel only serves MiniMax-M3; select a custom Base URL for other models')
   }
-  return WELFARE_BASE_URL
+  return decodeWelfareBaseUrl()
 }
 
 export function maskWelfareBaseUrl(value) {
@@ -233,7 +247,7 @@ export const VISION_MODEL_PRESETS = [
   // 不对外公布获取入口。welfare:true 让 WebUI 隐藏官方「获取 API Key」链接。
   // 注意保持官方大小写 MiniMax-M3：该中转站的「福利」分组同样大小写敏感，
   // 写成全小写会 503「无可用渠道」。
-  { model: 'MiniMax-M3', label: { zh: 'MiniMax-M3 (福利)', en: 'MiniMax-M3 (Welfare)' }, baseUrl: WELFARE_BASE_URL, welfare: true },
+  { model: 'MiniMax-M3', label: { zh: 'MiniMax-M3 (福利)', en: 'MiniMax-M3 (Welfare)' }, baseUrl: decodeWelfareBaseUrl(), welfare: true },
   { model: 'glm-4.6v', label: { zh: 'GLM-4.6V (智谱 BigModel 国内)', en: 'GLM-4.6V (Zhipu China)' }, baseUrl: 'https://open.bigmodel.cn/api/paas/v4' },
   { model: 'glm-4.6v', label: { zh: 'GLM-4.6V (智谱 Z.AI 海外)', en: 'GLM-4.6V (Zhipu Global)' }, baseUrl: 'https://api.z.ai/api/paas/v4' },
   { model: 'glm-5v-turbo', label: { zh: 'GLM-5V-Turbo (智谱 BigModel 国内)', en: 'GLM-5V-Turbo (Zhipu China)' }, baseUrl: 'https://open.bigmodel.cn/api/paas/v4' },
@@ -864,6 +878,22 @@ export const ALLOWED_CONFIG_KEYS = new Set([
   'maxTokens', 'maxImages', 'maxRetries', 'maxProviderSubmissions',
   'inboxTtlMs', 'inboxMaxEntries', 'inboxMaxBytes', 'debug', 'cache',
 ])
+
+// A WebUI PUT carries the form's snapshot of the fields this version knows; it
+// is not an authoritative rewrite of the whole file. Keys the file already
+// holds that this version does not recognize (hand-added flags, fields a newer
+// release wrote before a downgrade) survive verbatim instead of being silently
+// erased by the save. `enabled` is deliberately excluded — callers migrate it
+// to dshEnabled — and the prototype-pollution trio never round-trips.
+export function preserveUnknownConfigKeys(replacement, previous) {
+  if (previous === null || typeof previous !== 'object' || Array.isArray(previous)) return replacement
+  for (const [key, value] of Object.entries(previous)) {
+    if (ALLOWED_CONFIG_KEYS.has(key) || key === 'enabled') continue
+    if (key === '__proto__' || key === 'constructor' || key === 'prototype') continue
+    if (!Object.hasOwn(replacement, key)) replacement[key] = value
+  }
+  return replacement
+}
 
 // Validates and normalizes a config object coming from the WebUI before it is
 // persisted. This mirrors the same rules loadVisionConfig() enforces on read,

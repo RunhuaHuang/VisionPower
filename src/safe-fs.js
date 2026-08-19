@@ -1,4 +1,4 @@
-import { constants as fsConstants, closeSync, fstatSync, lstatSync, openSync, readSync } from 'node:fs'
+import { constants as fsConstants, closeSync, fstatSync, futimesSync, lstatSync, openSync, readSync } from 'node:fs'
 import { lstat, open } from 'node:fs/promises'
 
 function sameSafeFileVersion(before, after) {
@@ -76,6 +76,12 @@ export function safeReadFileSync(filePath, options) {
     }
     const after = fstatSync(fd, { bigint: true })
     if (!sameSafeFileVersion(opened, after)) throw new Error(`${options?.label ?? 'file'} changed during read`)
+    // Touch the recency timestamps through the already-verified descriptor:
+    // a path-based utimes() after close would reopen the TOCTOU window. On the
+    // open fd the file identity cannot be swapped. Failures are best-effort.
+    if (options?.updateAccessTime) {
+      try { futimesSync(fd, Date.now(), Date.now()) } catch { /* read-only FS, permissions, etc. */ }
+    }
     return data
   } finally {
     closeSync(fd)
@@ -102,6 +108,9 @@ export async function safeReadFile(filePath, options) {
     }
     const after = await handle.stat({ bigint: true })
     if (!sameSafeFileVersion(opened, after)) throw new Error(`${options?.label ?? 'file'} changed during read`)
+    if (options?.updateAccessTime) {
+      try { await handle.utimes(new Date(), new Date()) } catch { /* best-effort, see sync variant */ }
+    }
     return data
   } finally {
     await handle.close()

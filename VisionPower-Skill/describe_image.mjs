@@ -4,13 +4,14 @@
 // Source of truth: src/safe-fs.js + src/config.js + src/image-inbox.js + src/vision-core.js.
 // Regenerate with: npm run build:skill
 
-import { constants as fsConstants, closeSync, fstatSync, lstatSync, openSync, readSync, writeFileSync, mkdirSync, renameSync, unlinkSync, readdirSync, realpathSync } from 'node:fs'
-import { lstat, open, readdir, chmod, mkdir, rename, unlink, writeFile, realpath, stat, utimes } from 'node:fs/promises'
+import { constants as fsConstants, closeSync, fstatSync, futimesSync, lstatSync, openSync, readSync, writeFileSync, mkdirSync, renameSync, unlinkSync, readdirSync, realpathSync } from 'node:fs'
+import { lstat, open, readdir, chmod, mkdir, rename, unlink, writeFile, realpath, stat } from 'node:fs/promises'
 import { basename, dirname, join, resolve, extname, isAbsolute, sep } from 'node:path'
 import { homedir } from 'node:os'
-import { createHash, randomBytes } from 'node:crypto'
+import { createHash, randomBytes, randomInt } from 'node:crypto'
 import { lookup } from 'node:dns/promises'
 import { BlockList, isIP } from 'node:net'
+import { deflateSync } from 'node:zlib'
 import { request as httpRequest } from 'node:http'
 import { request as httpsRequest } from 'node:https'
 
@@ -89,6 +90,12 @@ function safeReadFileSync(filePath, options) {
     }
     const after = fstatSync(fd, { bigint: true })
     if (!sameSafeFileVersion(opened, after)) throw new Error(`${options?.label ?? 'file'} changed during read`)
+    // Touch the recency timestamps through the already-verified descriptor:
+    // a path-based utimes() after close would reopen the TOCTOU window. On the
+    // open fd the file identity cannot be swapped. Failures are best-effort.
+    if (options?.updateAccessTime) {
+      try { futimesSync(fd, Date.now(), Date.now()) } catch { /* read-only FS, permissions, etc. */ }
+    }
     return data
   } finally {
     closeSync(fd)
@@ -115,6 +122,9 @@ async function safeReadFile(filePath, options) {
     }
     const after = await handle.stat({ bigint: true })
     if (!sameSafeFileVersion(opened, after)) throw new Error(`${options?.label ?? 'file'} changed during read`)
+    if (options?.updateAccessTime) {
+      try { await handle.utimes(new Date(), new Date()) } catch { /* best-effort, see sync variant */ }
+    }
     return data
   } finally {
     await handle.close()
@@ -172,14 +182,28 @@ const MAX_CONFIG_FILE_BYTES = 1024 * 1024
 const MAX_API_KEY_BYTES = 16 * 1024
 const MAX_MODEL_CHARS = 256
 
-// This is a third-party gateway. Keep the real destination auditable in source
-// and UI: reversible obfuscation does not protect a secret, but it does prevent
-// users from understanding where their images, prompts, and API key are sent.
-const WELFARE_BASE_URL = 'https://api.prismaistudio.xyz:663/v1'
+// The welfare gateway is a third-party mini-max relay whose API key is handed
+// out privately by the author. Keep the real destination private by request of
+// the maintainer: the URL is stored as an XOR+Base64 cipher rather than
+// plaintext so a casual read/grep of the published source (npm tarball, GitHub,
+// the bundled Skill/dsh artifacts) does not reveal it. This only raises the
+// bar — anyone determined can still decode it from a running process — it is
+// not secrecy. Clients only ever see WELFARE_BASE_URL_ALIAS.
+const WELFARE_BASE_URL_CIPHER = 'HgRZBxZWSU4TFURJEQYMBAwYREFER1IfHwMPHBZcV0RWAhFQ'
+const WELFARE_BASE_URL_KEY = 'vp-welfare-gateway-2026'
+
+function decodeWelfareBaseUrl() {
+  const cipher = Buffer.from(WELFARE_BASE_URL_CIPHER, 'base64')
+  let out = ''
+  for (let i = 0; i < cipher.length; i++) {
+    out += String.fromCharCode(cipher[i] ^ WELFARE_BASE_URL_KEY.charCodeAt(i % WELFARE_BASE_URL_KEY.length))
+  }
+  return out
+}
 
 function welfareHostname() {
   try {
-    return new URL(WELFARE_BASE_URL).hostname.toLowerCase()
+    return new URL(decodeWelfareBaseUrl()).hostname.toLowerCase()
   } catch {
     return ''
   }
@@ -191,7 +215,7 @@ const WELFARE_MODEL_IDS = new Set(['minimax-m3'])
 function isWelfareBaseUrl(value) {
   if (typeof value !== 'string') return false
   const normalized = value.trim().replace(/\/+$/, '')
-  return normalized === WELFARE_BASE_URL || normalized === WELFARE_BASE_URL_ALIAS
+  return normalized === decodeWelfareBaseUrl() || normalized === WELFARE_BASE_URL_ALIAS
 }
 
 // Maps the public alias to the real endpoint, but ONLY for the model the
@@ -205,7 +229,7 @@ function resolveWelfareBaseUrl(value, model) {
   if (model !== undefined && !WELFARE_MODEL_IDS.has(String(model).toLowerCase())) {
     throw new Error('The built-in welfare channel only serves MiniMax-M3; select a custom Base URL for other models')
   }
-  return WELFARE_BASE_URL
+  return decodeWelfareBaseUrl()
 }
 
 function maskWelfareBaseUrl(value) {
@@ -350,7 +374,7 @@ const VISION_MODEL_PRESETS = [
   // 不对外公布获取入口。welfare:true 让 WebUI 隐藏官方「获取 API Key」链接。
   // 注意保持官方大小写 MiniMax-M3：该中转站的「福利」分组同样大小写敏感，
   // 写成全小写会 503「无可用渠道」。
-  { model: 'MiniMax-M3', label: { zh: 'MiniMax-M3 (福利)', en: 'MiniMax-M3 (Welfare)' }, baseUrl: WELFARE_BASE_URL, welfare: true },
+  { model: 'MiniMax-M3', label: { zh: 'MiniMax-M3 (福利)', en: 'MiniMax-M3 (Welfare)' }, baseUrl: decodeWelfareBaseUrl(), welfare: true },
   { model: 'glm-4.6v', label: { zh: 'GLM-4.6V (智谱 BigModel 国内)', en: 'GLM-4.6V (Zhipu China)' }, baseUrl: 'https://open.bigmodel.cn/api/paas/v4' },
   { model: 'glm-4.6v', label: { zh: 'GLM-4.6V (智谱 Z.AI 海外)', en: 'GLM-4.6V (Zhipu Global)' }, baseUrl: 'https://api.z.ai/api/paas/v4' },
   { model: 'glm-5v-turbo', label: { zh: 'GLM-5V-Turbo (智谱 BigModel 国内)', en: 'GLM-5V-Turbo (Zhipu China)' }, baseUrl: 'https://open.bigmodel.cn/api/paas/v4' },
@@ -981,6 +1005,22 @@ const ALLOWED_CONFIG_KEYS = new Set([
   'maxTokens', 'maxImages', 'maxRetries', 'maxProviderSubmissions',
   'inboxTtlMs', 'inboxMaxEntries', 'inboxMaxBytes', 'debug', 'cache',
 ])
+
+// A WebUI PUT carries the form's snapshot of the fields this version knows; it
+// is not an authoritative rewrite of the whole file. Keys the file already
+// holds that this version does not recognize (hand-added flags, fields a newer
+// release wrote before a downgrade) survive verbatim instead of being silently
+// erased by the save. `enabled` is deliberately excluded — callers migrate it
+// to dshEnabled — and the prototype-pollution trio never round-trips.
+function preserveUnknownConfigKeys(replacement, previous) {
+  if (previous === null || typeof previous !== 'object' || Array.isArray(previous)) return replacement
+  for (const [key, value] of Object.entries(previous)) {
+    if (ALLOWED_CONFIG_KEYS.has(key) || key === 'enabled') continue
+    if (key === '__proto__' || key === 'constructor' || key === 'prototype') continue
+    if (!Object.hasOwn(replacement, key)) replacement[key] = value
+  }
+  return replacement
+}
 
 // Validates and normalizes a config object coming from the WebUI before it is
 // persisted. This mirrors the same rules loadVisionConfig() enforces on read,
@@ -1827,6 +1867,11 @@ function createSseAccumulator(protocol = 'openai') {
     done: false,
     sawFinishReason: false,
     eventIndex: 0,
+    // A single SSE event may span several `data:` lines joined by newlines
+    // until the blank dispatch line; see feedSseLine below.
+    eventData: [],
+    eventBytes: 0,
+    disarmed: false,
   }
 }
 
@@ -1848,10 +1893,8 @@ function pushSseContent(state, text) {
   }
 }
 
-function feedSseLine(state, line) {
-  if (!line.startsWith('data:')) return
-  const payload = line.slice(5).trim()
-  if (!payload) return
+function dispatchSseEvent(state, payload) {
+  state.eventIndex += 1
   if (payload === '[DONE]') {
     state.done = true
     return
@@ -1860,11 +1903,10 @@ function feedSseLine(state, line) {
   try {
     event = JSON.parse(payload)
   } catch {
-    const error = new Error(`Vision model returned malformed SSE data at event ${state.eventIndex + 1}`)
+    const error = new Error(`Vision model returned malformed SSE data at event ${state.eventIndex}`)
     error.code = 'VISION_INCOMPLETE_STREAM'
     throw error
   }
-  state.eventIndex += 1
   const upstreamMessage = streamEventErrorMessage(event)
   if (upstreamMessage) throw providerError(`Vision model API error: ${upstreamMessage}`)
 
@@ -1896,6 +1938,41 @@ function feedSseLine(state, line) {
   if (event.type === 'message_stop') state.done = true
 }
 
+function feedSseLine(state, line, onFirstDataLine) {
+  // Blank line dispatches the accumulated event. The SSE spec joins multiple
+  // `data:` lines of one event with a newline; some providers rely on this.
+  if (line === '') {
+    if (state.eventData.length > 0) dispatchSseEvent(state, state.eventData.join('\n'))
+    state.eventData.length = 0
+    state.eventBytes = 0
+    return
+  }
+  // `:` comment lines (keepalive heartbeats) must neither dispatch nor
+  // contribute content — and they must not disarm the first-token watchdog.
+  if (line.startsWith(':')) return
+  if (line.startsWith('data:')) {
+    let payload = line.slice(5)
+    if (payload.startsWith(' ')) payload = payload.slice(1)
+    if (!payload) return
+    // Only a real data payload proves the provider started answering; comment
+    // heartbeats alone must keep the watchdog armed.
+    if (!state.disarmed) {
+      state.disarmed = true
+      onFirstDataLine?.()
+    }
+    state.eventData.push(payload)
+    state.eventBytes += payload.length + 1
+    if (state.eventBytes > MAX_RESPONSE_BODY_BYTES) {
+      const error = new Error('Vision model single SSE event is too large; max is 5MB')
+      error.code = 'VISION_RESPONSE_TOO_LARGE'
+      throw error
+    }
+    return
+  }
+  // event:/id:/retry: and other metadata fields are safe to ignore; the data
+  // lines of the same event keep accumulating until the blank line.
+}
+
 function finishSse(state) {
   // OpenAI-compatible providers do not all emit the optional `[DONE]`
   // sentinel. A final choice carrying a non-null finish_reason is also an
@@ -1921,16 +1998,15 @@ async function readSseCompletion(response, onFirstByte, protocol) {
   const decoder = new TextDecoder()
   const state = createSseAccumulator(protocol)
   let buffer = ''
-  let firstByte = true
   let totalBytes = 0
+  // The first-token watchdog must be disarmed only by a real SSE data payload
+  // (or [DONE]); `: keepalive` comment heartbeats and blank chunks must not
+  // count as "the provider started answering".
+  const onFirstDataLine = () => onFirstByte?.()
   try {
     for (;;) {
       const { done, value } = await reader.read()
       if (done) break
-      if (firstByte && value?.byteLength) {
-        firstByte = false
-        onFirstByte?.()
-      }
       // Raw-byte cap mirrors readResponseText: a hostile upstream streaming
       // one endless newline-less event must not grow `buffer` unboundedly.
       totalBytes += value.byteLength
@@ -1944,7 +2020,7 @@ async function readSseCompletion(response, onFirstByte, protocol) {
       while ((newlineIndex = buffer.indexOf('\n')) !== -1) {
         const line = buffer.slice(0, newlineIndex).replace(/\r$/, '')
         buffer = buffer.slice(newlineIndex + 1)
-        feedSseLine(state, line)
+        feedSseLine(state, line, onFirstDataLine)
         if (state.done) break
       }
       if (state.done) break
@@ -1953,8 +2029,13 @@ async function readSseCompletion(response, onFirstByte, protocol) {
     // arrived without its trailing newline — a truncated or nonconformant
     // stream must not silently drop its last event.
     buffer += decoder.decode()
-    if (!state.done && buffer.trim()) {
-      feedSseLine(state, buffer.replace(/\r$/, ''))
+    if (!state.done && buffer.trim()) feedSseLine(state, buffer.replace(/\r$/, ''), onFirstDataLine)
+    // The stream may have ended without a trailing blank line; dispatch the
+    // last accumulated event so it is not silently dropped.
+    if (!state.done && state.eventData.length > 0) {
+      dispatchSseEvent(state, state.eventData.join('\n'))
+      state.eventData.length = 0
+      state.eventBytes = 0
     }
   } finally {
     // On error paths the socket may still hold unread events; drain-cancel so
@@ -1970,6 +2051,11 @@ function completionFromSseText(bodyText, protocol) {
   for (const line of bodyText.split('\n')) {
     feedSseLine(state, line.replace(/\r$/, ''))
     if (state.done) break
+  }
+  if (!state.done && state.eventData.length > 0) {
+    dispatchSseEvent(state, state.eventData.join('\n'))
+    state.eventData.length = 0
+    state.eventBytes = 0
   }
   return finishSse(state)
 }
@@ -2334,9 +2420,14 @@ function waitWithSignal(promise, signal) {
 
 async function resolvePublicImageUrl(imageUrl, lookupAddresses = lookup, signal) {
   const url = parsePublicImageUrl(imageUrl)
-  if (isIP(url.hostname)) {
-    assertPublicAddress({ address: url.hostname, family: isIP(url.hostname) })
-    return { url, addresses: [{ address: url.hostname, family: isIP(url.hostname) }] }
+  // WHATWG URL keeps the brackets on IPv6 literals inside `hostname`, and
+  // `isIP` rejects the bracketed form — strip them for the literal fast path
+  // the same way isPrivateHostname does.
+  const literal = url.hostname.replace(/^\[|\]$/g, '')
+  const literalFamily = isIP(literal)
+  if (literalFamily) {
+    assertPublicAddress({ address: literal, family: literalFamily })
+    return { url, addresses: [{ address: literal, family: literalFamily }] }
   }
 
   let addresses
@@ -2359,7 +2450,10 @@ function requestRemoteImage(url, address, timeoutMs, signal) {
   const request = url.protocol === 'https:' ? httpsRequest : httpRequest
   return new Promise((resolveRequest, rejectRequest) => {
     const req = request(url, {
-      lookup: (_hostname, _options, callback) => callback(null, address.address, address.family),
+      // Array form, not the legacy (err, address, family) triple: Node's
+      // default autoSelectFamily happy-eyeballs path only accepts arrays and
+      // throws ERR_INVALID_IP_ADDRESS on the triple form.
+      lookup: (_hostname, _options, callback) => callback(null, [{ address: address.address, family: address.family }]),
       headers: { Accept: 'image/*', 'Accept-Encoding': 'identity' },
       signal,
     }, (response) => resolveRequest(response))
@@ -2367,6 +2461,31 @@ function requestRemoteImage(url, address, timeoutMs, signal) {
     req.once('error', rejectRequest)
     req.end()
   })
+}
+
+// Walk the verified address set in sequence: DNS round-robin frequently mixes
+// a healthy and a dead address for the same hostname, and pinning one random
+// pick turns that mix into a hard failure. The order is shuffled per request
+// so dual-stack hosts still spread load, and the overall download budget stays
+// the single requestTimeoutMs controller — failover only re-spends whatever
+// is left of it. Abort/timeout failures propagate immediately instead of
+// burning the remaining addresses.
+async function fetchFromVerifiedAddresses(url, addresses, timeoutMs, signal) {
+  const order = [...addresses]
+  for (let i = order.length - 1; i > 0; i -= 1) {
+    const j = Math.floor(Math.random() * (i + 1))
+    ;[order[i], order[j]] = [order[j], order[i]]
+  }
+  let lastError = null
+  for (const address of order) {
+    try {
+      return await requestRemoteImage(url, address, timeoutMs, signal)
+    } catch (error) {
+      if (signal?.aborted) throw error
+      lastError = error
+    }
+  }
+  throw lastError ?? new Error('image_url download failed: no verified addresses')
 }
 
 async function downloadPublicImage(imageUrl, config, signal) {
@@ -2387,11 +2506,7 @@ async function downloadPublicImage(imageUrl, config, signal) {
     let nextUrl = imageUrl
     for (let redirectCount = 0; redirectCount <= MAX_REMOTE_IMAGE_REDIRECTS; redirectCount += 1) {
       const { url, addresses } = await resolvePublicImageUrl(nextUrl, lookup, controller.signal)
-    // Pin a randomly selected verified address for each request. Choosing a
-    // single address avoids Node re-resolving a hostname after validation;
-    // every answer was checked above, so normal dual-stack hosts remain safe.
-      const address = addresses[Math.floor(Math.random() * addresses.length)]
-      const response = await requestRemoteImage(url, address, config.requestTimeoutMs, controller.signal)
+      const response = await fetchFromVerifiedAddresses(url, addresses, config.requestTimeoutMs, controller.signal)
       const status = response.statusCode ?? 0
       if ([301, 302, 303, 307, 308].includes(status)) {
         const location = response.headers.location
@@ -3117,6 +3232,9 @@ async function readDiskResultCache(key, config) {
       requireOwnerOnly: true,
       rejectMultipleLinks: true,
       label: 'disk cache entry',
+      // Touch recency on the same verified descriptor, never by pathname:
+      // a path-based utimes() after close would reopen the TOCTOU window.
+      updateAccessTime: true,
     })).toString('utf8')
   } catch (error) {
     if (error?.code !== 'ENOENT') debugLog(config, `disk cache read failed: ${error?.message ?? error}`)
@@ -3131,10 +3249,6 @@ async function readDiskResultCache(key, config) {
     await unlink(filePath).catch(() => {})
     return undefined
   }
-  // Refresh recency so the mtime-based eviction below matches the memory
-  // cache's LRU semantics.
-  const now = new Date()
-  await utimes(filePath, now, now).catch(() => {})
   debugLog(config, `disk cache hit (${key.slice(0, 12)}…)`)
   return entry.value
 }
@@ -3528,20 +3642,145 @@ async function describeImage(params, config, signal) {
   return result
 }
 
-const VISUAL_PROBE_IMAGE_BASE64 = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII='
+// ─────────────────────────────────────────────────────────────────────────────
+// Visual probe challenge. A text-only model (or a gateway that ignores the
+// image part) can answer "reply OK" without ever reading the image, so the
+// probe must demand an answer that ONLY reading the image can produce: a
+// random digit code rendered into a small PNG. The expected code is generated
+// at probe time and never appears in the prompt, so any reply that matches it
+// proves the provider actually consumed the image data.
+//
+// Font and PNG writer are deliberately tiny and dependency-free: a 5x7 bitmap
+// font for digits 0-9 plus a minimal PNG encoder (zlib is built into Node).
+// ─────────────────────────────────────────────────────────────────────────────
 
-async function testModelConnection(config, { testVision = true, signal } = {}) {
+const CHALLENGE_DIGIT_FONT = {
+  '0': ['.###.', '#...#', '#..##', '#.#.#', '##..#', '#...#', '.###.'],
+  '1': ['..#..', '.##..', '..#..', '..#..', '..#..', '..#..', '.###.'],
+  '2': ['.###.', '#...#', '....#', '...#.', '..#..', '.#...', '#####'],
+  '3': ['.###.', '#...#', '....#', '..##.', '....#', '#...#', '.###.'],
+  '4': ['...#.', '..##.', '.#.#.', '#..#.', '#####', '....#', '....#'],
+  '5': ['#####', '#....', '####.', '....#', '....#', '#...#', '.###.'],
+  '6': ['..##.', '.#...', '#....', '####.', '#...#', '#...#', '.###.'],
+  '7': ['#####', '....#', '...#.', '..#..', '.#...', '.#...', '.#...'],
+  '8': ['.###.', '#...#', '#...#', '.###.', '#...#', '#...#', '.###.'],
+  '9': ['.###.', '#...#', '#...#', '.####', '....#', '...#.', '.##..'],
+}
+
+function crc32(buf) {
+  let table = crc32.table
+  if (!table) {
+    table = crc32.table = new Int32Array(256)
+    for (let n = 0; n < 256; n++) {
+      let c = n
+      for (let k = 0; k < 8; k++) c = (c & 1) ? (0xEDB88320 ^ (c >>> 1)) : (c >>> 1)
+      table[n] = c
+    }
+  }
+  let crc = -1
+  for (let i = 0; i < buf.length; i++) crc = table[(crc ^ buf[i]) & 0xFF] ^ (crc >>> 8)
+  return (crc ^ -1) >>> 0
+}
+
+function pngChunk(type, data) {
+  const typeBuf = Buffer.from(type, 'ascii')
+  const length = Buffer.alloc(4)
+  length.writeUInt32BE(data.length)
+  const crcInput = Buffer.concat([typeBuf, data])
+  const crc = Buffer.alloc(4)
+  crc.writeUInt32BE(crc32(crcInput))
+  return Buffer.concat([length, typeBuf, data, crc])
+}
+
+// Renders the challenge code as black digits on white (8-bit RGB PNG).
+// Exported so tests can build the exact image a mock provider would receive.
+function renderChallengePng(code) {
+  const digits = String(code).replace(/[^0-9]/g, '')
+  if (!digits) throw new Error('challenge code must contain digits')
+  const SCALE = 4
+  const GAP = 4
+  const MARGIN = 4
+  const GLYPH_W = 5
+  const GLYPH_H = 7
+  const width = MARGIN * 2 + digits.length * (GLYPH_W * SCALE) + (digits.length - 1) * GAP
+  const height = MARGIN * 2 + GLYPH_H * SCALE
+  const rgb = Buffer.alloc(width * height * 3, 0xff) // white background
+  for (let di = 0; di < digits.length; di++) {
+    const glyph = CHALLENGE_DIGIT_FONT[digits[di]] ?? CHALLENGE_DIGIT_FONT['0']
+    const xBase = MARGIN + di * (GLYPH_W * SCALE + GAP)
+    const yBase = MARGIN
+    for (let row = 0; row < GLYPH_H; row++) {
+      for (let col = 0; col < GLYPH_W; col++) {
+        if (glyph[row][col] !== '#') continue
+        const x0 = xBase + col * SCALE
+        const y0 = yBase + row * SCALE
+        for (let dy = 0; dy < SCALE; dy++) {
+          for (let dx = 0; dx < SCALE; dx++) {
+            const offset = ((y0 + dy) * width + (x0 + dx)) * 3
+            rgb[offset] = 0
+            rgb[offset + 1] = 0
+            rgb[offset + 2] = 0
+          }
+        }
+      }
+    }
+  }
+  // Raw scanlines, filter byte 0 per row (no filtering).
+  const raw = Buffer.alloc(height * (1 + width * 3))
+  for (let y = 0; y < height; y++) {
+    raw[y * (1 + width * 3)] = 0
+    rgb.copy(raw, y * (1 + width * 3) + 1, y * width * 3, (y + 1) * width * 3)
+  }
+  const ihdr = Buffer.alloc(13)
+  ihdr.writeUInt32BE(width, 0)
+  ihdr.writeUInt32BE(height, 4)
+  ihdr[8] = 8 // bit depth
+  ihdr[9] = 2 // color type: truecolor RGB
+  ihdr[10] = 0 // compression
+  ihdr[11] = 0 // filter
+  ihdr[12] = 0 // interlace
+  return Buffer.concat([
+    Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+    pngChunk('IHDR', ihdr),
+    pngChunk('IDAT', deflateSync(raw)),
+    pngChunk('IEND', Buffer.alloc(0)),
+  ])
+}
+
+function randomChallengeCode(length = 4) {
+  let code = ''
+  for (let i = 0; i < length; i += 1) code += String(randomInt(0, 10))
+  return code
+}
+
+function normalizeChallengeAnswer(text) {
+  return String(text ?? '').replace(/[^0-9]/g, '')
+}
+
+function probeResult({ visionVerified, reason, message, challengeDigits, elapsedMs }) {
+  return { visionVerified, reason, message, challengeDigits: challengeDigits ?? null, elapsedMs }
+}
+
+async function testModelConnection(config, {
+  testVision = true,
+  signal,
+  challengeCode,
+} = {}) {
   if (!config.apiKey) {
     throw new Error('API key is not configured.')
   }
+  const startedAt = Date.now()
+
   if (testVision) {
+    const code = challengeCode ?? randomChallengeCode(4)
+    const png = renderChallengePng(code)
     const { requestBody } = buildProviderRequestBody(config, [
       { role: 'system', content: buildSystemMessage(false) },
       {
         role: 'user',
         content: [
-          { type: 'text', text: 'Look at this 1x1 probe image and reply with one short word: OK.' },
-          { type: 'image_url', image_url: { url: `data:image/png;base64,${VISUAL_PROBE_IMAGE_BASE64}` } },
+          { type: 'text', text: 'The image contains exactly four digits. Reply with ONLY those four digits and nothing else.' },
+          { type: 'image_url', image_url: { url: `data:image/png;base64,${png.toString('base64')}` } },
         ],
       },
     ])
@@ -3556,27 +3795,63 @@ async function testModelConnection(config, { testVision = true, signal } = {}) {
       if (!compatibilityRequest) throw error
       completion = await fetchVisionCompletionCompatible(compatibilityRequest, config, signal, submissionBudget)
     }
-    if (completion.text) return `Visual connection verified: ${completion.text}`
-    // Hidden thinking blocks or a populated reasoning channel still prove the
-    // model processed the prompt; a connection test only needs reachability.
+    const digits = normalizeChallengeAnswer(completion.text)
+    if (digits === code) {
+      return probeResult({
+        visionVerified: true,
+        reason: 'challenge_ok',
+        message: `Visual connection verified: the model read the challenge code (${code}).`,
+        challengeDigits: code.length,
+        elapsedMs: Date.now() - startedAt,
+      })
+    }
+    if (completion.text && completion.text.trim()) {
+      // The model replied but could not read the image. This is a real
+      // classification, not a transport failure; never report it as verified.
+      const got = digits ? digits.slice(0, 8) : '"non-digits"'
+      return probeResult({
+        visionVerified: false,
+        reason: 'challenge_mismatch',
+        message: `The endpoint works, but the model could not read the challenge image (expected ${code.length} digits, got ${got}).`,
+        challengeDigits: code.length,
+        elapsedMs: Date.now() - startedAt,
+      })
+    }
     if (completion.sawReasoning) {
-      return '(visual connection verified; reasoning model produced no visible reply within the token budget)'
+      return probeResult({
+        visionVerified: false,
+        reason: 'no_visible_challenge_answer',
+        message: 'The endpoint works, but the model produced no visible answer for the challenge image (reasoning only).',
+        challengeDigits: code.length,
+        elapsedMs: Date.now() - startedAt,
+      })
     }
     throw new Error('Model returned no text content for the visual probe')
   }
+
   const { requestBody } = buildProviderRequestBody(config, [
     { role: 'user', content: 'hi' }
   ])
   const completion = await fetchVisionCompletionCompatible(requestBody, config, signal)
-  if (completion.text) return completion.text
-
+  if (completion.text) {
+    return probeResult({
+      visionVerified: null,
+      reason: 'transport_ok',
+      message: completion.text,
+      elapsedMs: Date.now() - startedAt,
+    })
+  }
   // Fallback: even with a generous budget a reasoning model can still spend it
-  // all thinking and return an empty content. A connection test only needs to
-  // confirm the key/endpoint/model are reachable and the model responded — a
-  // populated reasoning channel proves the model actually processed the prompt,
-  // so treat that as a successful connection rather than a false failure.
+  // all thinking and return an empty content. A populated reasoning channel
+  // proves the model actually processed the prompt, so treat that as a
+  // successful connection rather than a false failure.
   if (completion.sawReasoning) {
-    return '(connection ok; reasoning model produced no visible reply within the token budget)'
+    return probeResult({
+      visionVerified: null,
+      reason: 'transport_reasoning_only',
+      message: 'Connection ok; the reasoning model produced no visible reply within the token budget.',
+      elapsedMs: Date.now() - startedAt,
+    })
   }
   throw new Error('Model returned no text content')
 }

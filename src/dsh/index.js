@@ -195,34 +195,66 @@ function userGlobalAgentsHasRules() {
 }
 
 // 异步运行一键安装器：绝不能 spawnSync——那会阻塞 dsh web 宿主的事件循环长达
-// 数分钟，期间 UI 无响应且取消信号无法派发。收集 stdout/stderr，超时与取消都
-// 先 kill 子进程、由 close 事件统一收尾（保留已产生的输出）。
+// 数分钟，期间 UI 无响应且取消信号无法派发。收集 stdout/stderr（设上限，超限丢
+// 头留尾）；超时与取消只负责杀整棵进程组——安装器自己还会 spawn dsh web 等
+// 孙进程，只杀直接子进程会留孤儿——最终统一由 close 事件收尾：保证子进程被
+// reap、已产生的输出完整保留。
+const INSTALLER_OUTPUT_LIMIT = 256 * 1024
+
 function runInstaller(argv, signal) {
   const script = fileURLToPath(new URL('../../scripts/setup-dsh.mjs', import.meta.url))
   return new Promise((resolve) => {
     let out = ''
+    let truncated = false
     let settled = false
+    let killReason = null
     const finish = (payload) => {
       if (settled) return
       settled = true
       clearTimeout(timer)
-      resolve({ out, ...payload })
+      signal?.removeEventListener('abort', onAbort)
+      resolve({
+        out: truncated ? `…（输出超出 ${INSTALLER_OUTPUT_LIMIT} 字符，仅保留末尾）\n${out}` : out,
+        ...payload,
+      })
     }
-    const child = spawn(process.execPath, [script, ...argv], { cwd: os.homedir() })
+    const child = spawn(process.execPath, [script, ...argv], {
+      cwd: os.homedir(),
+      // detached 让安装器成为新进程组 leader（POSIX），负 pid 信号才能覆盖
+      // 它派生的孙进程；Windows 无负 pid 语义，退回只杀直接子进程。
+      detached: process.platform !== 'win32',
+      stdio: ['ignore', 'pipe', 'pipe'],
+    })
+    const killTree = () => {
+      try {
+        process.kill(-child.pid, 'SIGKILL')
+      } catch {
+        try { child.kill('SIGKILL') } catch { /* already dead */ }
+      }
+      // 兜底：万一进程组外仍有孙进程持有 stdout 写端，close 可能迟迟不来。
+      setTimeout(() => finish({ status: null, error: killReason ?? 'killed' }), 10000).unref?.()
+    }
     const timer = setTimeout(() => {
-      child.kill('SIGKILL')
-      finish({ status: null, error: 'timeout after 300s' })
+      killReason = 'timeout after 300s'
+      killTree()
     }, 300000)
-    child.stdout.on('data', (chunk) => { out += chunk })
-    child.stderr.on('data', (chunk) => { out += chunk })
-    child.on('error', (error) => finish({ status: null, error: error instanceof Error ? error.message : String(error) }))
-    child.on('close', (status) => finish({ status, error: null }))
-    const onAbort = () => child.kill('SIGKILL')
-    if (signal?.aborted) {
-      onAbort()
-      return
+    const append = (chunk) => {
+      out += chunk
+      if (out.length > INSTALLER_OUTPUT_LIMIT) {
+        out = out.slice(-INSTALLER_OUTPUT_LIMIT)
+        truncated = true
+      }
     }
-    signal?.addEventListener('abort', onAbort, { once: true })
+    child.stdout.on('data', append)
+    child.stderr.on('data', append)
+    child.on('error', (error) => finish({ status: null, error: error instanceof Error ? error.message : String(error) }))
+    child.on('close', (status) => finish({ status, error: killReason }))
+    const onAbort = () => {
+      killReason = 'aborted'
+      killTree()
+    }
+    if (signal?.aborted) killTree()
+    else signal?.addEventListener('abort', onAbort, { once: true })
   })
 }
 
@@ -247,7 +279,7 @@ export function apply(ctx, config) {
 
   ctx.tools.register(defineTool({
     name: 'describe_image',
-    description: 'See and understand images — screenshots, photos, diagrams, charts. Extract text (OCR), describe scenes, compare images, and answer questions about what is shown. In dsh, omit image fields to analyze the most recent user image attachment automatically; explicit image_path, image_url, image_base64, image_ref, and images[] inputs remain supported. For faster, more useful answers, ask the specific question you need answered.',
+    description: 'See and understand images — screenshots, photos, diagrams, charts. Extract text (OCR), describe scenes, compare images, and answer questions about what is shown. In dsh, omit image fields to analyze the current user message\u2019s image attachments automatically (images from earlier turns are never reused implicitly; pass attachment_scope="latest_in_session" when the user explicitly refers to a previously sent image). Explicit image_path, image_url, image_base64, image_ref, and images[] inputs remain supported. For faster, more useful answers, ask the specific question you need answered.',
     parameters: {
       ...imageSourceParameters,
       images: {
@@ -267,6 +299,11 @@ export function apply(ctx, config) {
         type: 'string',
         enum: ['text', 'structured'],
         description: "Output shape. 'text' (default) returns a free-form description with an untrusted-source banner. 'structured' returns a JSON envelope: when formatValid is true, a single image has {answer, observations, extractedText?, limitations?} and multiple images have images[]; otherwise formatValid is false with formatError and rawResponse.",
+      },
+      attachment_scope: {
+        type: 'string',
+        enum: ['current_turn', 'latest_in_session'],
+        description: "Which images to read when no explicit image field is passed (dsh only). 'current_turn' (default) reads the current user message's attachments only; 'latest_in_session' explicitly reuses the newest image from an earlier turn when the user asks about a previously sent image.",
       },
     },
     output: {

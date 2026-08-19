@@ -3,7 +3,9 @@
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { createRequire } from 'node:module'
-import { pathToFileURL } from 'node:url'
+import path from 'node:path'
+import { realpathSync } from 'node:fs'
+import { fileURLToPath } from 'node:url'
 import { loadVisionConfig, getConfigFilePath } from './config.js'
 import { describeImage } from './vision-core.js'
 import { toolInputSchemaShape } from './schema.js'
@@ -171,7 +173,18 @@ export async function main(argv = process.argv.slice(2)) {
   await server.connect(transport)
 }
 
-if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+// npm/pnpm/npx 安装的 bin 是指向本文件的符号链接：Node 会把主模块 realpath，
+// 而 process.argv[1] 保持符号链接路径，直接比较 URL 会永远不相等（main 静默不
+// 执行）。两侧都做 realpath 归一化后再比较；Windows 路径大小写不敏感另做一次
+// 忽略大小写的兜底（与 scripts/setup-dsh.mjs 的判据保持一致）。
+const entryPath = fileURLToPath(import.meta.url)
+const invokedPath = process.argv[1] ? path.resolve(process.argv[1]) : ''
+const realPath = (p) => {
+  try { return realpathSync(p) } catch { return p }
+}
+const isDirectRun = (invokedPath && realPath(invokedPath) === realPath(entryPath))
+  || (process.platform === 'win32' && invokedPath.toLowerCase() === entryPath.toLowerCase())
+if (isDirectRun) {
   main().catch((error) => {
     console.error('VisionPower server error:', error)
     process.exitCode = 1

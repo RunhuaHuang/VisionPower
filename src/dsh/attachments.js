@@ -11,6 +11,24 @@ export function hasExplicitImageInput(args) {
 }
 
 export function latestUserImageRefs(messages) {
+  // Current turn only: the most recent user message, skipping any follow-up
+  // plugin/assistant/tool messages. Images from earlier turns are NEVER picked
+  // up implicitly — silent reuse of a previous image would mislead the user;
+  // explicit attachment_scope='latest_in_session' opts into that behavior.
+  if (!Array.isArray(messages)) return []
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const message = messages[index]
+    if (message?.source?.kind !== 'user' || !Array.isArray(message.content)) continue
+    return message.content
+      .filter((block) => block?.type === 'image' && block.attachment)
+      .map((block) => block.attachment)
+  }
+  return []
+}
+
+export function sessionUserImageRefs(messages) {
+  // Explicit reuse scope: scan the whole session for the newest user message
+  // that carries images (used when the caller asks for latest_in_session).
   if (!Array.isArray(messages)) return []
   for (let index = messages.length - 1; index >= 0; index -= 1) {
     const message = messages[index]
@@ -34,12 +52,24 @@ export async function withDshImageAttachments(args, exec, attachments, config = 
   // Explicit image inputs still pass through untouched when enabled and are
   // validated by the canonical core below.
   if (config.dshEnabled === false) throw disabledError()
-  if (hasExplicitImageInput(args)) return args
+  // attachment_scope is dsh-only routing metadata: strip it on every return
+  // path so the canonical core's unknown-field validation never sees it.
+  const { attachment_scope: scopeArg, ...coreArgs } = args ?? {}
+  if (hasExplicitImageInput(coreArgs)) return coreArgs
 
+  // Default to the current turn. Reusing a previously sent image requires the
+  // explicit attachment_scope='latest_in_session' so the user is never silently
+  // billed against (or misled by) an old image.
+  const scope = scopeArg === 'latest_in_session' ? 'latest_in_session' : 'current_turn'
   const messages = exec?.agent?.session?.deriveMessages?.()
-  const refs = latestUserImageRefs(messages)
+  const refs = scope === 'latest_in_session'
+    ? sessionUserImageRefs(messages)
+    : latestUserImageRefs(messages)
   if (refs.length === 0) {
-    throw new Error('describe_image needs an explicit image source or an image attachment in the current dsh session')
+    if (scope === 'latest_in_session') {
+      throw new Error('No image attachment exists in the dsh session history')
+    }
+    throw new Error('No image in the current message. If the image was sent in an earlier message, call again with attachment_scope="latest_in_session".')
   }
   if (!attachments || typeof attachments.readImage !== 'function') {
     throw new Error('dsh durable attachment service is unavailable; cannot read the current image attachment')
@@ -86,7 +116,7 @@ export async function withDshImageAttachments(args, exec, attachments, config = 
   // count and byte limit. A later oversized attachment therefore cannot leave
   // earlier images encoded unnecessarily.
   return {
-    ...args,
+    ...coreArgs,
     images: storedImages.map(({ data, mimeType }) => ({
       image_base64: data.toString('base64'),
       image_mime_type: mimeType,

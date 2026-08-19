@@ -443,7 +443,7 @@ Deployers must still control these boundaries:
 3. **Third-party providers**: image bytes, prompts, and possible OCR text are sent to the configured upstream provider. Review its data-processing policy first.
 4. **Image URLs**: VisionPower downloads images from the local machine, exposing that machine's network address to the target site. Use trusted sources only.
 5. **Cache and Inbox**: cached results may contain sensitive text, and the Inbox temporarily stores original images. Disable caching and shorten TTLs for sensitive workflows.
-6. **Built-in welfare route**: this preset uses the third-party relay `https://api.prismaistudio.xyz:663/v1`. Do not send private or regulated images unless you understand its operator, logging, retention, quota, and privacy policy.
+6. **Built-in welfare route**: this preset is a private built-in welfare channel whose relay endpoint is not published (API keys are distributed privately by the author). Do not send private or regulated images unless you understand its operator, logging, retention, quota, and privacy policy.
 7. **Image prompt injection**: the safety prefix informs downstream agents but cannot by itself neutralize malicious instructions inside an image. Preserve source labels and prevent vision results from directly triggering privileged actions.
 8. **WebUI**: keep it local, do not share its browser session, and never commit the config file.
 
