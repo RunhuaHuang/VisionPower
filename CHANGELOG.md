@@ -2,7 +2,7 @@
 
 ## Unreleased
 
-## 3.1.0 - 2026-08-18
+## 3.1.0 - 2026-08-19
 
 - Updated the dsh/Cordis integration baseline to DeepSeek Harness
   `0.1.0-rc.7`. Dragged and pasted images are now read through the host's
@@ -32,6 +32,31 @@
 - Embedded Settings status reflects the server-applied dsh enable state while
   the standalone Playground remains available. Changing the checkbox remains a
   draft until **Save and apply configuration** succeeds.
+- Hardened the whole surface in a review-driven pass: the welfare gateway
+  endpoint is stored and shipped only as XOR+Base64 ciphertext (no plaintext
+  in the repo, bundles, or any webui response); the connection test proves
+  real vision capability with a random four-digit challenge PNG and reports
+  `visionVerified`/`reason`; SSE parsing handles standard multi-line `data:`
+  events and comments no longer unlock the first-byte watchdog; and the disk
+  result cache refreshes recency through the already-verified file descriptor,
+  closing a TOCTOU window.
+- dsh tool requests gained strict current-turn attachment semantics with an
+  explicit `attachment_scope="latest_in_session"` opt-in for reusing a
+  previously sent image; the routing parameter is stripped before core
+  validation, which previously rejected every documented use of it.
+- The `image_url` download path now fails over sequentially across the
+  verified address set, uses the array-form DNS lookup callback (the legacy
+  triple form throws `ERR_INVALID_IP_ADDRESS` on Node 20+ happy-eyeballs),
+  and accepts public IPv6 literals.
+- `patch-dsh.mjs` writes are transactional — temp+rename with full rollback on
+  any structure or syntax failure, never leaving a half-patched install — and
+  `setup-dsh --check` reports missing patches instead of false-passing after a
+  dsh upgrade; spawned console/dsh-web processes carry error handlers and the
+  Windows `.cmd` launch path survives spaces in the install path.
+- The `setup_visionpower` installer runner bounds captured output, kills the
+  whole installer process group on timeout/cancel, and always waits for child
+  close; `PUT /api/config` preserves persisted keys unknown to this version;
+  CI now also runs the full matrix on macOS.
 
 ## 3.0.1 - 2026-08-16
 
