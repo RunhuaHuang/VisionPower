@@ -3962,7 +3962,7 @@ try {
       '}',
     ].join('\n')
     const makeRoot = (variant) => {
-      // variant: 'good' | 'syntax-break' | 'missing-pi-ai'
+      // variant: 'good' | 'syntax-break' | 'missing-pi-ai' | 'missing-apiproxy'
       const root = mkdtempSync(join(tempDir, 'patch-root-'))
       const apiProxyDir = join(root, '@deepseek-ai', 'dsh-host-apiproxy', 'lib')
       const deepseekDir = join(root, '@deepseek-ai', 'dsh-llm-deepseek', 'lib')
@@ -3973,7 +3973,9 @@ try {
         deepseek: join(deepseekDir, 'adapter.js'),
         piAi: join(piAiDir, 'pi-ai.js'),
       }
-      writeFileSync(files.apiProxy, `${S1}\n${S2}\n`)
+      writeFileSync(files.apiProxy, variant === 'missing-apiproxy'
+        ? 'export const unrelated = 1\n'
+        : `${S1}\n${S2}\n`)
       writeFileSync(files.deepseek, `${S3}\n`)
       writeFileSync(files.piAi, variant === 'missing-pi-ai'
         ? 'export const unrelated = 1\n'
@@ -4033,19 +4035,35 @@ try {
       assert.equal(readFileSync(file, 'utf8'), before[name], `${name} must be restored to its pre-patch content`)
     }
 
-    // 场景 C：pi-ai 包存在但结构漂移（找不到旧拒绝代码 → structureFail）→
-    // 已成功写入的 apiproxy/deepseek 补丁同样全部回滚，不留下「一部分文件放行
-    // 图片、另一部分仍拒绝」的半补丁安装。
+    // 场景 C：pi-ai 渠道适配器结构漂移（找不到旧拒绝代码）→ 降级为警告：
+    // 不阻塞安装（exit 0），已写入的 apiproxy/deepseek 补丁保留生效，
+    // 汇总里明确「渠道适配器跳过 N 处」。
     const drifted = makeRoot('missing-pi-ai')
-    const beforeDrift = Object.fromEntries(
-      Object.entries(drifted.files).map(([name, file]) => [name, readFileSync(file, 'utf8')]),
-    )
     const driftedRun = await runPatchDsh(drifted.root)
-    assert.ok(driftedRun.error, 'patch-dsh must exit non-zero when a package drifts structurally')
-    assert.match(driftedRun.stdout, /结构不匹配 [1-9]/)
-    assert.match(driftedRun.stdout, /回滚/)
-    for (const [name, file] of Object.entries(drifted.files)) {
-      assert.equal(readFileSync(file, 'utf8'), beforeDrift[name], `${name} must be restored after structure-drift rollback`)
+    assert.ok(!driftedRun.error, 'adapter drift must not fail the install')
+    assert.match(driftedRun.stdout, /渠道适配器跳过 [1-9]/)
+    assert.match(driftedRun.stdout, /不影响其他渠道/)
+    assert.ok(
+      readFileSync(drifted.files.apiProxy, 'utf8').includes('Image content is admitted regardless'),
+      'apiproxy patches must stay applied on adapter drift',
+    )
+    assert.ok(
+      readFileSync(drifted.files.deepseek, 'utf8').includes('no-op'),
+      'deepseek patches must stay applied on adapter drift',
+    )
+
+    // 场景 D：宿主核心 apiproxy 结构失配 → 仍算失败，且已写入的
+    // deepseek/pi-ai 补丁全部回滚，不留半补丁安装。
+    const coreDrift = makeRoot('missing-apiproxy')
+    const beforeCoreDrift = Object.fromEntries(
+      Object.entries(coreDrift.files).map(([name, file]) => [name, readFileSync(file, 'utf8')]),
+    )
+    const coreDriftRun = await runPatchDsh(coreDrift.root)
+    assert.ok(coreDriftRun.error, 'core-package drift must fail the install')
+    assert.match(coreDriftRun.stdout, /结构不匹配 [1-9]/)
+    assert.match(coreDriftRun.stdout, /回滚/)
+    for (const [name, file] of Object.entries(coreDrift.files)) {
+      assert.equal(readFileSync(file, 'utf8'), beforeCoreDrift[name], `${name} must be restored after core-drift rollback`)
     }
   }
 

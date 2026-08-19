@@ -539,12 +539,13 @@ async function ensureConsole(profile, noConsole, waitSecs, forceConsole) {
     }
     log(`已验证 VisionPower 配置控制台正在运行 http://127.0.0.1:${PORT}，跳过启动`)
     if (!visionConfigHasKey()) warn('控制台在运行但 ~/.visionpower/config.json 尚无 API key')
-  } else if (visionConfigHasKey() && !forceConsole) {
-    // 复跑场景（如新增/更换模型后重跑）：配置已就绪就不再拉起常驻进程；
-    // 需要调整视觉模型/API Key 时用 --console 强制启动。
-    log('VisionPower 已配置（~/.visionpower/config.json 含 API key），跳过启动配置控制台（如需调整视觉模型/API Key，加 --console 强制启动）')
-    return { status: 'configured' }
   } else {
+    // 已配置的复跑场景也照常拉起控制台：安装跑完总要能亲眼看到一眼才算闭环
+    //（用户反馈：装完什么都不弹会以为没装上）。控制台进程本就设计为可复用，
+    // 需要完全跳过用 --no-console；端口已被占用时上面会复用既有实例。
+    if (visionConfigHasKey() && !forceConsole) {
+      log('VisionPower 已配置（~/.visionpower/config.json 含 API key）；安装完成后仍会打开配置控制台供确认')
+    }
     // 用 node 直接跑包内 src/index.js，避免平台相关的 .bin shim（visionpower(.cmd/.ps1)）；
     // node 是真实可执行文件，不加 shell（避免路径含空格时被 shell 拆分）。
     // 子进程禁用自开浏览器（VISIONPOWER_NO_OPEN=1）：由安装器在身份探测通过后

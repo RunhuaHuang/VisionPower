@@ -2,6 +2,21 @@
 
 ## Unreleased
 
+## 3.1.1 - 2026-08-19
+
+- Channel-adapter patch drift (`dsh-llm-deepseek` / `dsh-llm-pi-ai`) now
+  downgrades to an explicit warning instead of failing the whole install:
+  users who never configured that channel are not blocked by a structure
+  mismatch inside an adapter they do not use, and the warning spells out the
+  consequence (drag-and-drop on that channel would still be rejected until
+  VisionPower is upgraded). Core host patches (`dsh-host-apiproxy`) still
+  fail the run and roll back every write.
+- The installer always opens the configuration console at the end of a run —
+  including already-configured re-runs — instead of silently skipping it;
+  `--no-console` still skips entirely.
+- The AGENTS.md hint prints `~/.dsh/AGENTS.md` instead of an absolute home
+  path.
+
 ## 3.1.0 - 2026-08-19
 
 - Updated the dsh/Cordis integration baseline to DeepSeek Harness

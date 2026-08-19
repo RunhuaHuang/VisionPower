@@ -11,7 +11,7 @@
 推荐用一键安装器（详见主 README「一行命令安装」）：
 
 ```bash
-npx -y visionpower@3.1.0 setup-dsh --launch
+npx -y visionpower@3.1.1 setup-dsh --launch
 ```
 
 手动安装：

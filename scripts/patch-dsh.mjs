@@ -166,6 +166,12 @@ function discoverRoots(argv) {
   return [...roots];
 }
 
+// 渠道适配器包（dsh-llm-deepseek / dsh-llm-pi-ai）只是各 LLM 渠道的接入层：
+// 用户可能根本没配该渠道，补丁跟不上 dsh 新结构时卡死整个安装并不合理——
+// 降级为警告并说清后果（真用该渠道拖图会被官方拒绝）。宿主核心
+// dsh-host-apiproxy 所有渠道必经，失配仍算失败。
+const ADAPTER_PATCH_PACKAGES = new Set(['dsh-llm-deepseek', 'dsh-llm-pi-ai']);
+
 function pkgJsFiles(root, pkg) {
   const dir = path.join(root, '@deepseek-ai', pkg);
   if (!fs.existsSync(dir)) return [];
@@ -345,7 +351,7 @@ function main() {
     process.exit(2);
   }
 
-  let applied = 0, alreadyOk = 0, structureFail = 0, touched = [];
+  let applied = 0, alreadyOk = 0, structureFail = 0, adapterSkipped = 0, touched = [];
   for (const root of roots) {
     console.log(`\n== 安装位置: ${root}`);
     // 版本戳：打印该安装的 dsh 版本，便于对照补丁适用性。
@@ -365,8 +371,13 @@ function main() {
         foundAny = true;
         const after = p.apply(before);
         if (after === before) {
-          structureFail++;
-          console.error(`  ✗ ${p.id}  [${rel}] 锚点存在但替换失败——版本结构已变，需按配置提示词手动修改`);
+          if (ADAPTER_PATCH_PACKAGES.has(p.pkg)) {
+            adapterSkipped++;
+            console.warn(`  ⚠ ${p.id}  [${rel}] 锚点存在但替换失败——dsh 结构已变。若你在 dsh 使用该渠道（${p.pkg}），拖图识图会被官方拒绝；不影响其他渠道。升级 VisionPower 后重跑可修复`);
+          } else {
+            structureFail++;
+            console.error(`  ✗ ${p.id}  [${rel}] 锚点存在但替换失败——版本结构已变，需按配置提示词手动修改`);
+          }
           continue;
         }
         if (!dryRun) {
@@ -377,10 +388,16 @@ function main() {
         applied++;
         console.log(`  ● ${p.id}  [${rel}] ${dryRun ? '待打补丁（dry-run，未写入）' : '已打补丁'}`);
       }
-      // 响亮失败：包存在却找不到任何旧拒绝代码（可能 dsh 版本已更新），不能静默跳过
+      // 响亮失败：包存在却找不到任何旧拒绝代码（可能 dsh 版本已更新），不能静默跳过；
+      // 渠道适配器包例外——用户可能没配该渠道，降级为警告。
       if (!foundAny) {
-        structureFail++;
-        console.error(`  ⚠ ${p.id}  未发现旧拒绝代码——dsh 版本可能已更新或官方已修复，请升级 patch-dsh.mjs 后重试`);
+        if (ADAPTER_PATCH_PACKAGES.has(p.pkg)) {
+          adapterSkipped++;
+          console.warn(`  ⚠ ${p.id}  未发现旧拒绝代码——可能官方已移除或 dsh 结构已变。若你在 dsh 使用该渠道（${p.pkg}）且拖图被拒，升级 VisionPower 后重跑；不影响其他渠道`);
+        } else {
+          structureFail++;
+          console.error(`  ⚠ ${p.id}  未发现旧拒绝代码——dsh 版本可能已更新或官方已修复，请升级 patch-dsh.mjs 后重试`);
+        }
       }
     }
   }
@@ -398,13 +415,15 @@ function main() {
   let rolledBack = 0;
   if ((syntaxFail > 0 || structureFail > 0) && !dryRun) rolledBack = rollbackWrittenFiles();
 
-  // 提示：识图规则默认由 visionpower 插件在运行时注入，无需 AGENTS.md 文件（可选写入）
+  // 提示：识图规则默认由 visionpower 插件在运行时注入，无需 AGENTS.md 文件（可选写入）。
+  // 路径按 ~ 缩写展示，避免打印绝对路径让人误以为是硬编码。
   const dshHome = process.env.DSH_HOME || path.join(os.homedir(), '.dsh');
   const agents = path.join(dshHome, 'AGENTS.md');
-  if (!fs.existsSync(agents)) console.log(`\nℹ 识图规则默认由 visionpower 插件运行时注入，无需 ${agents}；如需可见可编辑的规则文件，运行 setup-dsh --write-agents 写入。`);
+  const agentsDisplay = agents.split(os.homedir())[0] === '' ? agents.replace(os.homedir(), '~') : agents;
+  if (!fs.existsSync(agents)) console.log(`\nℹ 识图规则默认由 visionpower 插件运行时注入，无需 ${agentsDisplay}；如需可见可编辑的规则文件，运行 setup-dsh --write-agents 写入。`);
 
   console.log('\n──────────────────────────────────────────');
-  console.log(`应用补丁 ${applied} 处，已打过 ${alreadyOk} 处，结构不匹配 ${structureFail} 处，语法失败 ${syntaxFail} 处${rolledBack > 0 ? `（已回滚 ${rolledBack} 个文件的写入）` : ''}${dryRun ? '（dry-run，未写入任何文件）' : ''}。`);
+  console.log(`应用补丁 ${applied} 处，已打过 ${alreadyOk} 处，结构不匹配 ${structureFail} 处，语法失败 ${syntaxFail} 处${adapterSkipped > 0 ? `，渠道适配器跳过 ${adapterSkipped} 处（不影响其他渠道）` : ''}${rolledBack > 0 ? `（已回滚 ${rolledBack} 个文件的写入）` : ''}${dryRun ? '（dry-run，未写入任何文件）' : ''}。`);
   if (applied > 0 && !dryRun) console.log('请重启 DSH 生效：npm exec @deepseek-ai/dsh web');
   if (syntaxFail > 0 || structureFail > 0) {
     console.error('存在未解决的问题，请按上面的 ✗ 提示手动处理。');
