@@ -84,7 +84,7 @@ MCP 与 Skill 可以并存，但一般只需要一种运行入口；WebUI 可与
 ### 2. 打开本地配置台
 
 ```bash
-npx -y --package visionpower@3.1.1 visionpower --webui
+npx -y --package visionpower@3.2.0 visionpower --webui
 ```
 
 浏览器会打开 `http://127.0.0.1:17900`。在 **CONFIG** 页填写模型、API Key、Base URL 与协议；在 **PLAYGROUND** 页用一张小图先完成真实视觉测试。
@@ -103,7 +103,7 @@ Claude Desktop、Cursor、Cline 等使用 JSON 的宿主可写入：
   "mcpServers": {
     "visionpower": {
       "command": "npx",
-      "args": ["-y", "--package", "visionpower@3.1.1", "visionpower"],
+      "args": ["-y", "--package", "visionpower@3.2.0", "visionpower"],
       "timeoutMs": 120000
     }
   }
@@ -116,7 +116,7 @@ Codex TOML：
 [mcp_servers.visionpower]
 type = "stdio"
 command = "npx"
-args = ["-y", "--package", "visionpower@3.1.1", "visionpower"]
+args = ["-y", "--package", "visionpower@3.2.0", "visionpower"]
 ```
 
 WebUI 的 **PATCH BAY** 也可以直接生成常见宿主的配置片段：
@@ -152,7 +152,7 @@ chmod 600 ~/.visionpower/config.json
 ```
 
 > [!WARNING]
-> 在当前 3.1.1 行为中，`allowedDirs` 为空表示**不限制绝对路径**。只要 Agent 能构造路径，VisionPower 就可能读取当前系统用户可读的任意受支持图片。生产或共享环境必须显式配置最小目录白名单。
+> 在当前 3.2.0 行为中，`allowedDirs` 为空表示**不限制绝对路径**。只要 Agent 能构造路径，VisionPower 就可能读取当前系统用户可读的任意受支持图片。生产或共享环境必须显式配置最小目录白名单。
 
 ---
 
@@ -383,7 +383,7 @@ cat request.json | node ~/.claude/skills/visionpower/describe_image.mjs
 启动：
 
 ```bash
-npx -y --package visionpower@3.1.1 visionpower --webui --port 17900
+npx -y --package visionpower@3.2.0 visionpower --webui --port 17900
 ```
 
 WebUI 默认只监听 `127.0.0.1`，包含：
@@ -409,7 +409,7 @@ WebUI 也提供浅色主题：
 
 dsh 集成位于 `src/dsh/`，安装器与补丁脚本位于 `scripts/setup-dsh.mjs`、`scripts/patch-dsh.mjs`。
 
-当前集成以 **DeepSeek Harness `0.1.0-rc.7`** 为基线。rc.7 的图片附件通过宿主 `AttachmentStore` 读取：VisionPower 不解析附件 ID、不读取会话日志，也不拼接 `~/.dsh/attachments` 路径。启动 `dsh web` 后，可直接在 **Settings → Plugins → VisionPower** 中开启或关闭 **dsh 插件**、选择视觉模型、填写 API Key、测试连通性。dsh 开关切换后立即保存并生效；模型、API Key 等其他字段仍通过“保存并应用配置”提交，无需手动编辑配置文件。这个开关只停止 dsh 的规则注入并让 dsh 中的 `describe_image` 拒绝新请求；MCP、Skill 和独立 WebUI 不受影响。MCP 的 Node 进程由 Claude Desktop、Cursor、Codex 等宿主管理，配置页不会也不应尝试终止它；要停止 MCP，请在对应宿主中禁用/移除服务器或退出宿主。
+当前集成以 **DeepSeek Harness `0.1.0-rc.8`** 为基线，兼容 `0.1.0-rc.6` – `rc.8`：安装器自动识别所装 dsh 版本并应用对应补丁集（补丁按代码形状自选；版本识别用于报告启用了哪套，并让 rc.8+ 专属补丁在更早版本上整体跳过、不产生误导演报）。rc.7 起图片附件通过宿主 `AttachmentStore` 读取：VisionPower 不解析附件 ID、不读取会话日志，也不拼接 `~/.dsh/attachments` 路径。rc.8 起 dsh 官方支持给声明了 `inputModalities: [text, image]` 的模型原生直发图片——VisionPower 补丁保留该原生路由不动，同时继续为纯文本模型放行图片消息（图片在线上丢弃，由 `describe_image` 识图）。启动 `dsh web` 后，可直接在 **Settings → Plugins → VisionPower** 中开启或关闭 **dsh 插件**、选择视觉模型、填写 API Key、测试连通性。dsh 开关切换后立即保存并生效；模型、API Key 等其他字段仍通过“保存并应用配置”提交，无需手动编辑配置文件。这个开关只停止 dsh 的规则注入并让 dsh 中的 `describe_image` 拒绝新请求；MCP、Skill 和独立 WebUI 不受影响。MCP 的 Node 进程由 Claude Desktop、Cursor、Codex 等宿主管理，配置页不会也不应尝试终止它；要停止 MCP，请在对应宿主中禁用/移除服务器或退出宿主。
 
 > [!CAUTION]
 > 这是实验性、侵入式集成：安装流程可能安装/更新插件、改写 Cordis 配置、修改第三方 dsh 文件并启动后台进程。请先备份 dsh profile，在非关键环境验证，并固定 VisionPower 与 dsh 版本。不要把来源不明的 `--plugin-source` 交给对话模型执行。
@@ -417,18 +417,18 @@ dsh 集成位于 `src/dsh/`，安装器与补丁脚本位于 `scripts/setup-dsh.
 先做只读检查：
 
 ```bash
-npx -y visionpower@3.1.1 setup-dsh --check
+npx -y visionpower@3.2.0 setup-dsh --check
 ```
 
 确认报告无误后再安装：
 
 ```bash
-npx -y visionpower@3.1.1 setup-dsh --launch
+npx -y visionpower@3.2.0 setup-dsh --launch
 ```
 
-安装器默认使用精确来源 `visionpower@3.1.1`；`pnpm` 缺失时会停止并提示，不会自动修改全局包管理器。高权限的 `setup_visionpower` 管理工具默认不注册，只有运维人员显式设置 `enableAdminTool: true` 时才会暴露。dsh 规则只让工具读取当前会话中最近一条带图用户消息的附件，不扫描近期文件，也不做跨会话附件猜测。
+安装器默认使用精确来源 `visionpower@3.2.0`；`pnpm` 缺失时会停止并提示，不会自动修改全局包管理器。高权限的 `setup_visionpower` 管理工具默认不注册，只有运维人员显式设置 `enableAdminTool: true` 时才会暴露。dsh 规则只让工具读取当前会话中最近一条带图用户消息的附件，不扫描近期文件，也不做跨会话附件猜测。
 
-完整说明见 [`src/dsh/README.md`](./src/dsh/README.md)。从 rc.6 升级到 rc.7 或以后版本后应重新运行安装器检查并重打补丁，不要假设旧补丁仍然安全适用。
+完整说明见 [`src/dsh/README.md`](./src/dsh/README.md)。dsh 升级（rc.6 → rc.7 → rc.8 …）后应重新运行安装器检查并重打补丁，不要假设旧补丁仍然安全适用。
 
 ---
 

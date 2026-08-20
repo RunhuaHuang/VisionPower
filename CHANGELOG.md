@@ -2,6 +2,25 @@
 
 ## Unreleased
 
+## 3.2.0 - 2026-08-20
+
+- Added DeepSeek Harness `0.1.0-rc.8` support to the dsh patcher. Patches
+  self-select by code shape and remain compatible with `rc.6`/`rc.7`; the
+  patcher now also detects and reports the installed dsh version and which
+  patch set it maps to (`rc.8+` vs pre-`rc.8`).
+- rc.8's new rejection at the DeepSeek adapter `stream()` entry (models without
+  a catalog-declared `image` input modality refuse image-bearing requests) is
+  now patched: image-capable models keep rc.8's native data-URL route untouched,
+  while text-only models no longer throw — images are dropped on the wire and
+  recognized by the harness tool layer (`describe_image`) instead.
+- Extended the pi-ai `stream()` patch for rc.8's `toPiContext` signature (the
+  image branch gained a `profile.maxRequestImageBytes` argument), retaining
+  rc.6/rc.7 matching and self-tests.
+- Fixed a cosmetic double-indentation on the first replaced line of the
+  pi-ai `stream()` patch (present since the rc.7 release); patched output now
+  preserves the original indentation exactly.
+- The `setup-dsh` last-resort `npx` fallback now pins `@deepseek-ai/dsh@0.1.0-rc.8`.
+
 ## 3.1.1 - 2026-08-19
 
 - Channel-adapter patch drift (`dsh-llm-deepseek` / `dsh-llm-pi-ai`) now

@@ -628,7 +628,7 @@ async function launchDshWeb() {
       ? (IS_WIN
         ? spawn(process.env.comspec || 'cmd.exe', ['/d', '/s', '/c', `"${recordedBin}" web`], { detached: true, stdio })
         : spawn(recordedBin, ['web'], { detached: true, stdio }))
-      : spawn('npx', ['-y', `@deepseek-ai/dsh@${state?.dshVersion || '0.1.0-rc.7'}`, 'web'], shimOpts({ detached: true, stdio }))
+      : spawn('npx', ['-y', `@deepseek-ai/dsh@${state?.dshVersion || '0.1.0-rc.8'}`, 'web'], shimOpts({ detached: true, stdio }))
     // spawn 失败以异步 'error' 事件送达；不挂监听会成为 uncaught exception
     // 崩掉安装器，绕过 main() 的兜底 catch。
     child.on('error', (e) => warn(`dsh web 进程启动失败：${e.message}；请查看日志 ${logFile} 或手动启动`))

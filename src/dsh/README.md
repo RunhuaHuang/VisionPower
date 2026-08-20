@@ -4,14 +4,14 @@
 
 本插件**随主包 `visionpower` 一起发布**（子路径 `visionpower/dsh`），与 MCP（`src/index.js`）和 Skill（`VisionPower-Skill/`）三形态共存于同一个包，共享同一份内核，不需要任何单独的 npm 包。
 
-当前兼容基线为 **dsh `0.1.0-rc.7`**。rc.7 将图片作为持久化、不透明附件管理；插件通过宿主 `AttachmentStore.readImage()` 读取并校验字节，绝不解析附件 ID 或推导宿主的落盘路径。
+当前兼容基线为 **dsh `0.1.0-rc.8`**（补丁兼容 `rc.6` – `rc.8`，`scripts/patch-dsh.mjs` 按代码形状自动匹配所装版本）。rc.7 起图片作为持久化、不透明附件管理；插件通过宿主 `AttachmentStore.readImage()` 读取并校验字节，绝不解析附件 ID 或推导宿主的落盘路径。rc.8 起 dsh 官方支持给声明了 `inputModalities: [text, image]` 的模型原生直发图片，补丁保留该路由；纯文本模型的图片消息仍由补丁放行（线上丢弃），由本插件的 `describe_image` 识图。
 
 ## 安装与挂载
 
 推荐用一键安装器（详见主 README「一行命令安装」）：
 
 ```bash
-npx -y visionpower@3.1.1 setup-dsh --launch
+npx -y visionpower@3.2.0 setup-dsh --launch
 ```
 
 手动安装：

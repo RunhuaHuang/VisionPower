@@ -84,7 +84,7 @@ MCP and the Skill can coexist, although most users need only one runtime entry p
 ### 2. Open the local configuration console
 
 ```bash
-npx -y --package visionpower@3.1.1 visionpower --webui
+npx -y --package visionpower@3.2.0 visionpower --webui
 ```
 
 Your browser opens `http://127.0.0.1:17900`. On **CONFIG**, enter the model, API key, base URL, and protocol. Then use a small image on **PLAYGROUND** to run a real vision test.
@@ -103,7 +103,7 @@ For JSON-based hosts such as Claude Desktop, Cursor, and Cline:
   "mcpServers": {
     "visionpower": {
       "command": "npx",
-      "args": ["-y", "--package", "visionpower@3.1.1", "visionpower"],
+      "args": ["-y", "--package", "visionpower@3.2.0", "visionpower"],
       "timeoutMs": 120000
     }
   }
@@ -116,7 +116,7 @@ Codex TOML:
 [mcp_servers.visionpower]
 type = "stdio"
 command = "npx"
-args = ["-y", "--package", "visionpower@3.1.1", "visionpower"]
+args = ["-y", "--package", "visionpower@3.2.0", "visionpower"]
 ```
 
 The WebUI **PATCH BAY** can also generate configuration snippets for common hosts:
@@ -152,7 +152,7 @@ chmod 600 ~/.visionpower/config.json
 ```
 
 > [!WARNING]
-> In version 3.1.1, an empty `allowedDirs` means **absolute paths are unrestricted**. If an agent can construct a path, VisionPower may read any supported image readable by the current OS user. Production and shared environments should always configure a minimal directory allowlist.
+> In version 3.2.0, an empty `allowedDirs` means **absolute paths are unrestricted**. If an agent can construct a path, VisionPower may read any supported image readable by the current OS user. Production and shared environments should always configure a minimal directory allowlist.
 
 ---
 
@@ -383,7 +383,7 @@ After changing shared source such as `src/vision-core.js`, `src/config.js`, or `
 Start it with:
 
 ```bash
-npx -y --package visionpower@3.1.1 visionpower --webui --port 17900
+npx -y --package visionpower@3.2.0 visionpower --webui --port 17900
 ```
 
 The WebUI listens only on `127.0.0.1` by default and includes:
@@ -409,7 +409,7 @@ Do not expose the current WebUI to a LAN or the public internet through port for
 
 The dsh integration lives in `src/dsh/`. The installer and patcher are `scripts/setup-dsh.mjs` and `scripts/patch-dsh.mjs`.
 
-The current baseline is **DeepSeek Harness `0.1.0-rc.7`**. rc.7 images are read through the host `AttachmentStore`: VisionPower does not parse attachment IDs, read session logs, or construct paths below `~/.dsh/attachments`. After `dsh web` starts, open **Settings → Plugins → VisionPower** to enable or disable the **dsh plugin**, choose a vision model, enter an API key, and test connectivity. The dsh switch saves and takes effect immediately; model, API-key, and other fields still use **Save and apply configuration**. Users do not need to edit the configuration file manually. This switch only stops dsh rule injection and makes dsh `describe_image` reject new requests; MCP, Skill, and the standalone WebUI remain available. MCP Node processes are owned by hosts such as Claude Desktop, Cursor, or Codex, so the configuration page neither can nor should terminate them. Disable/remove the MCP server in its host, or exit the host, to stop that process.
+The current baseline is **DeepSeek Harness `0.1.0-rc.8`**, with compatibility back to `0.1.0-rc.6`: the installer detects the installed dsh version and applies the matching patch set (patches self-select by code shape; version detection reports which set is active and makes rc.8-only patches skip cleanly on older versions). Since rc.7, images are read through the host `AttachmentStore`: VisionPower does not parse attachment IDs, read session logs, or construct paths below `~/.dsh/attachments`. As of rc.8, dsh natively forwards images to models that declare `inputModalities: [text, image]` — the patch keeps that native route untouched while continuing to admit image messages for text-only models (dropped on the wire, recognized by `describe_image`). After `dsh web` starts, open **Settings → Plugins → VisionPower** to enable or disable the **dsh plugin**, choose a vision model, enter an API key, and test connectivity. The dsh switch saves and takes effect immediately; model, API-key, and other fields still use **Save and apply configuration**. Users do not need to edit the configuration file manually. This switch only stops dsh rule injection and makes dsh `describe_image` reject new requests; MCP, Skill, and the standalone WebUI remain available. MCP Node processes are owned by hosts such as Claude Desktop, Cursor, or Codex, so the configuration page neither can nor should terminate them. Disable/remove the MCP server in its host, or exit the host, to stop that process.
 
 > [!CAUTION]
 > This is an experimental, invasive integration. It may install or update a plugin, rewrite Cordis configuration, patch third-party dsh files, and start background processes. Back up the dsh profile, test in a non-critical environment, and pin both VisionPower and dsh versions. Never let a conversational model execute an untrusted `--plugin-source`.
@@ -417,18 +417,18 @@ The current baseline is **DeepSeek Harness `0.1.0-rc.7`**. rc.7 images are read 
 Run a read-only check first:
 
 ```bash
-npx -y visionpower@3.1.1 setup-dsh --check
+npx -y visionpower@3.2.0 setup-dsh --check
 ```
 
 After reviewing the report, install and launch:
 
 ```bash
-npx -y visionpower@3.1.1 setup-dsh --launch
+npx -y visionpower@3.2.0 setup-dsh --launch
 ```
 
-The installer defaults to the exact source `visionpower@3.1.1`. If `pnpm` is missing, it stops with guidance and does not modify the global package manager. The high-privilege `setup_visionpower` administration tool is not registered by default; an operator must explicitly set `enableAdminTool: true`. The dsh tool reads attachments only from the most recent image-bearing user message in the current session; it does not scan recent files or guess across sessions.
+The installer defaults to the exact source `visionpower@3.2.0`. If `pnpm` is missing, it stops with guidance and does not modify the global package manager. The high-privilege `setup_visionpower` administration tool is not registered by default; an operator must explicitly set `enableAdminTool: true`. The dsh tool reads attachments only from the most recent image-bearing user message in the current session; it does not scan recent files or guess across sessions.
 
-See [`src/dsh/README.md`](./src/dsh/README.md) for full instructions. After upgrading from rc.6 to rc.7 or later, rerun the installer to verify and reapply the patch; do not assume an old patch remains safe or applicable.
+See [`src/dsh/README.md`](./src/dsh/README.md) for full instructions. After a dsh upgrade (rc.6 → rc.7 → rc.8 …), rerun the installer to verify and reapply the patch; do not assume an old patch remains safe or applicable.
 
 ---
 

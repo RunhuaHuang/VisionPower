@@ -4,6 +4,11 @@
 // 用途：DSH 升级 / npx 重装后，官方源码自带的「图片拒绝」逻辑会回来。
 //       更新后运行一次本脚本，自动重打全部补丁（幂等，可重复运行）。
 //
+// 版本适配：补丁按代码形状自动匹配（锚点只命中对应版本的源码结构），
+//       覆盖 dsh 0.1.0-rc.6 / rc.7 / rc.8；主流程会报告识别出的版本与
+//       启用的补丁集。rc.8 新增：deepseek stream() 入口拒绝、pi-ai
+//       toPiContext 的 maxRequestImageBytes 参数变体。
+//
 // 用法：
 //   node patch-dsh.mjs                  # 自动发现 DSH 安装位置并打补丁
 //   node patch-dsh.mjs --dry-run        # 只探测与统计，不写入任何文件
@@ -21,7 +26,7 @@ import path from 'node:path';
 
 const T = (n) => '\t'.repeat(n);
 
-function patchedPiStream(replayBlock = '') {
+function patchedPiStream(replayBlock = '', extraArg = '') {
   const lines = [
     "const containsImage = options.messages.some((message) => contentHasImage(message.content));",
     'const supportsImage = model.input.includes("image");',
@@ -30,11 +35,15 @@ function patchedPiStream(replayBlock = '') {
     ": options.messages;",
     "const attachments = containsImage && supportsImage ? this.config.resolveAttachments?.() : void 0;",
     'if (containsImage && supportsImage && attachments === void 0) throw new LlmError("pi-ai image input requires the durable attachment service", "UNSUPPORTED_CONTENT");',
-  ].map((line, i) => (i === 3 || i === 4 ? T(5) : T(4)) + line)
+  ].map((line, i) => (i === 0 ? '' : i === 3 || i === 4 ? T(5) : T(4)) + line)
+  // 首行不带缩进：正则匹配从原行缩进之后开始，原缩进会保留在替换文本之前，
+  // 首行再带一层缩进就会叠成双倍（rc.7 时代的历史瑕疵，这里一并修正）。
   if (replayBlock) lines.push(replayBlock)
+  // extraArg：rc.8 起 toPiContext 带图分支多出第 4 个参数（profile.maxRequestImageBytes），
+  // 原样透传，保持与所在 dsh 版本的调用签名一致。
   lines.push(T(4) + (replayBlock
-    ? 'const context = attachments === void 0 ? toPiContext({ ...options, messages }, void 0, onReplayDegrade) : await toPiContext({ ...options, messages }, attachments, onReplayDegrade);'
-    : 'const context = attachments === void 0 ? toPiContext({ ...options, messages }) : await toPiContext({ ...options, messages }, attachments);'))
+    ? `const context = attachments === void 0 ? toPiContext({ ...options, messages }, void 0, onReplayDegrade) : await toPiContext({ ...options, messages }, attachments, onReplayDegrade${extraArg});`
+    : `const context = attachments === void 0 ? toPiContext({ ...options, messages }) : await toPiContext({ ...options, messages }, attachments${extraArg});`))
   return lines.join('\n')
 }
 
@@ -93,6 +102,37 @@ const patches = [
     )
   },
   {
+    // rc.8 新增：stream() 入口在序列化之前就按模型目录的 inputModalities 拒绝带图
+    // 请求。改写为：声明了 image 模态的模型保留官方原生 data-URL 路由（rc.8 新增
+    // 能力，不动）；未声明的文本模型不再抛错，attachments 保持 undefined 走纯文本
+    // 序列化（assertTextOnly 已 no-op，图片在 wire 上丢弃，由 MCP 视觉工具识图）。
+    // requiresRc：该拒绝代码 rc.8 才出现，识别为更早版本时整体跳过（见主流程），
+    // 版本识别不出时仍按代码形状扫描兜底。
+    id: 'deepseek 适配器 stream() 入口图片拒绝（rc.8）',
+    pkg: 'dsh-llm-deepseek',
+    requiresRc: 8,
+    already: (s) => /image-capable models keep the native data-URL route/.test(s),
+    anchor: (s) => /DeepSeek model .*does not accept image input/.test(s) && /DeepSeek image conversion requires the durable attachment service/.test(s),
+    apply: (s) => s.replace(
+      /const hasImages = options\.messages\.some\(\(message\) => contentHasImage\(message\.content\)\);\n[ \t]*let attachments;\n[ \t]*if \(hasImages\) \{\n[ \t]*if \(connection\.models\.find\(\(entry\) => entry\.id === options\.model\)\?\.inputModalities\?\.includes\("image"\) !== true\) throw new LlmError\(`DeepSeek model "\$\{options\.model\}" does not accept image input\.`, "UNSUPPORTED_CONTENT"\);\n[ \t]*attachments = this\.config\.resolveAttachments\?\.\(\);\n[ \t]*if \(attachments === void 0\) throw new LlmError\("DeepSeek image conversion requires the durable attachment service\.", "UNSUPPORTED_CONTENT"\);\n[ \t]*\}/,
+      [
+        [0, 'const hasImages = options.messages.some((message) => contentHasImage(message.content));'],
+        [3, 'let attachments;'],
+        [3, 'if (hasImages) {'],
+        [4, "// Image content is admitted regardless of the catalog's declared modalities:"],
+        [4, '// image-capable models keep the native data-URL route, while text-only routes'],
+        [4, '// drop images on the wire and let the harness tool layer (MCP vision tools /'],
+        [4, '// skills) recognize them when needed.'],
+        [4, 'const supportsImage = connection.models.find((entry) => entry.id === options.model)?.inputModalities?.includes("image") === true;'],
+        [4, 'if (supportsImage) {'],
+        [5, 'attachments = this.config.resolveAttachments?.();'],
+        [5, 'if (attachments === void 0) throw new LlmError("DeepSeek image conversion requires the durable attachment service.", "UNSUPPORTED_CONTENT");'],
+        [4, '}'],
+        [3, '}'],
+      ].map(([n, line]) => T(n) + line).join('\n')
+    )
+  },
+  {
     id: 'pi-ai 辅助函数 withoutImages',
     pkg: 'dsh-llm-pi-ai',
     already: (s) => /function withoutImages\(content\)/.test(s),
@@ -120,6 +160,11 @@ const patches = [
     anchor: (s) => /pi-ai model .*does not support image input/.test(s),
     apply: (s) => {
       const common = /const containsImage = options\.messages\.some\(\(message\) => contentHasImage\(message\.content\)\);\n[ \t]*if \(containsImage && !model\.input\.includes\("image"\)\) throw new LlmError\([\s\S]*?UNSUPPORTED_CONTENT"\);\n[ \t]*const attachments = containsImage \? this\.config\.resolveAttachments\?\.\(\) : void 0;\n[ \t]*if \(containsImage && attachments === void 0\) throw new LlmError\("pi-ai image input requires the durable attachment service", "UNSUPPORTED_CONTENT"\);\n/
+      // rc.8：带图分支的 toPiContext 多出第 4 个参数 profile.maxRequestImageBytes，
+      // 替换后原样保留该参数，与所在版本的调用签名一致。
+      const rc8 = new RegExp(common.source + '([ \\t]*const onReplayDegrade = \\(reason\\) => \\{\\n[\\s\\S]*?\\n[ \\t]*\\};)\\n[ \\t]*const context = attachments === void 0 \\? toPiContext\\(options, void 0, onReplayDegrade\\) : await toPiContext\\(options, attachments, onReplayDegrade, profile\\.maxRequestImageBytes\\);')
+      const withRc8 = s.replace(rc8, (_match, replayBlock) => patchedPiStream(replayBlock, ', profile.maxRequestImageBytes'))
+      if (withRc8 !== s) return withRc8
       const rc7 = new RegExp(common.source + '([ \\t]*const onReplayDegrade = \\(reason\\) => \\{\\n[\\s\\S]*?\\n[ \\t]*\\};)\\n[ \\t]*const context = attachments === void 0 \\? toPiContext\\(options, void 0, onReplayDegrade\\) : await toPiContext\\(options, attachments, onReplayDegrade\\);')
       const withRc7 = s.replace(rc7, (_match, replayBlock) => patchedPiStream(replayBlock))
       if (withRc7 !== s) return withRc7
@@ -283,6 +328,31 @@ function selfTest() {
     T(4) + '};',
     T(4) + 'const context = attachments === void 0 ? toPiContext(options, void 0, onReplayDegrade) : await toPiContext(options, attachments, onReplayDegrade);'
   ].join('\n');
+  // rc.8：stream() 入口的 toPiContext 带图分支多出第 4 个参数
+  const S5rc8 = [
+    T(4) + 'const containsImage = options.messages.some((message) => contentHasImage(message.content));',
+    T(4) + 'if (containsImage && !model.input.includes("image")) throw new LlmError(`pi-ai model "${model.id}" does not support image input`, "UNSUPPORTED_CONTENT");',
+    T(4) + 'const attachments = containsImage ? this.config.resolveAttachments?.() : void 0;',
+    T(4) + 'if (containsImage && attachments === void 0) throw new LlmError("pi-ai image input requires the durable attachment service", "UNSUPPORTED_CONTENT");',
+    T(4) + 'const onReplayDegrade = (reason) => {',
+    T(5) + 'this.config.onReplayDegrade?.({',
+    T(6) + 'provider: options.provider,',
+    T(6) + 'model: options.model,',
+    T(6) + 'reason',
+    T(5) + '});',
+    T(4) + '};',
+    T(4) + 'const context = attachments === void 0 ? toPiContext(options, void 0, onReplayDegrade) : await toPiContext(options, attachments, onReplayDegrade, profile.maxRequestImageBytes);'
+  ].join('\n');
+  // rc.8：deepseek 适配器 stream() 入口按模型目录 inputModalities 拒绝带图请求
+  const S6rc8 = [
+    T(3) + 'const hasImages = options.messages.some((message) => contentHasImage(message.content));',
+    T(3) + 'let attachments;',
+    T(3) + 'if (hasImages) {',
+    T(4) + 'if (connection.models.find((entry) => entry.id === options.model)?.inputModalities?.includes("image") !== true) throw new LlmError(`DeepSeek model "${options.model}" does not accept image input.`, "UNSUPPORTED_CONTENT");',
+    T(4) + 'attachments = this.config.resolveAttachments?.();',
+    T(4) + 'if (attachments === void 0) throw new LlmError("DeepSeek image conversion requires the durable attachment service.", "UNSUPPORTED_CONTENT");',
+    T(3) + '}'
+  ].join('\n');
 
   const cases = [
     { id: 'apiproxy: prompt 提交处理器图片拒绝', before: S1, mustHave: 'Image content is admitted regardless', mustNotHave: 'MODEL_DOES_NOT_SUPPORT_IMAGES' },
@@ -292,7 +362,9 @@ function selfTest() {
     { id: 'deepseek 适配器 assertTextOnly', before: S3, mustHave: 'no-op', mustNotHave: 'does not support image content' },
     { id: 'pi-ai 辅助函数 withoutImages', before: S4, mustHave: 'function withoutImages(content)', mustNotHave: '' },
     { id: 'pi-ai stream() 非多模态不拒绝', before: S5, mustHave: 'const supportsImage', mustNotHave: 'does not support image input' },
-    { id: 'pi-ai stream() 非多模态不拒绝', before: S5rc7, mustHave: 'onReplayDegrade', mustNotHave: 'does not support image input' }
+    { id: 'pi-ai stream() 非多模态不拒绝', before: S5rc7, mustHave: 'onReplayDegrade', mustNotHave: 'does not support image input' },
+    { id: 'pi-ai stream() 非多模态不拒绝', before: S5rc8, mustHave: 'profile.maxRequestImageBytes', mustNotHave: 'does not support image input' },
+    { id: 'deepseek 适配器 stream() 入口图片拒绝（rc.8）', before: S6rc8, mustHave: 'const supportsImage', mustNotHave: 'does not accept image input' }
   ];
   let failed = 0;
   for (const c of cases) {
@@ -354,12 +426,32 @@ function main() {
   let applied = 0, alreadyOk = 0, structureFail = 0, adapterSkipped = 0, touched = [];
   for (const root of roots) {
     console.log(`\n== 安装位置: ${root}`);
-    // 版本戳：打印该安装的 dsh 版本，便于对照补丁适用性。
+    // 版本戳：打印该安装的 dsh 版本并识别补丁集，便于对照适用性。
+    // 补丁的应用始终按代码形状自选（锚点只命中对应版本的源码结构），
+    // 这里的识别用于把「启用了哪套补丁」讲清楚，并让 rc.8+ 专属补丁
+    // （requiresRc）在更早版本上整体跳过、不产生误导演报；识别不出
+    // 版本号时不设限，仍按代码形状兜底扫描。
+    let rootRc = null;
     try {
       const dshPkg = JSON.parse(fs.readFileSync(path.join(root, '@deepseek-ai', 'dsh', 'package.json'), 'utf8'));
-      console.log(`   dsh 版本: ${dshPkg.version}（补丁覆盖 0.1.0-rc.6 / rc.7，版本差异较大时请升级本脚本）`);
+      console.log(`   dsh 版本: ${dshPkg.version}（补丁覆盖 0.1.0-rc.6 / rc.7 / rc.8）`);
+      const rc = /^0\.1\.0-rc\.(\d+)$/.exec(dshPkg.version);
+      if (rc) rootRc = Number(rc[1]);
+      if (rootRc !== null && rootRc >= 8) {
+        console.log('   识别为 rc.8+：启用 rc.8 补丁集（deepseek stream() 入口放行 + pi-ai maxRequestImageBytes 变体；声明了 image 模态的模型保留官方原生发图路由）');
+      } else if (rootRc !== null && rootRc >= 6) {
+        console.log('   识别为 rc.8 之前的版本：沿用 rc.6 / rc.7 补丁集');
+      } else if (rootRc !== null) {
+        console.warn('   识别为 rc.6 之前的版本：不在补丁覆盖范围内，若补丁结果异常请升级本脚本');
+      } else {
+        console.warn('   无法识别的 dsh 版本号：补丁将按代码形状自动匹配，若失败请升级本脚本');
+      }
     } catch { /* 无 dsh 主包则跳过 */ }
     for (const p of patches) {
+      if (p.requiresRc !== undefined && rootRc !== null && rootRc < p.requiresRc) {
+        console.log(`  - ${p.id}\n    dsh 版本早于 rc.${p.requiresRc}，无此拒绝代码，跳过`);
+        continue;
+      }
       const files = pkgJsFiles(root, p.pkg);
       if (files.length === 0) { console.log(`  - ${p.id}\n    包不存在，跳过`); continue; }
       let foundAny = false;
