@@ -95,10 +95,11 @@ function portListening(port, host = '127.0.0.1') {
   })
 }
 
-function probeConsoleIdentity(port, {
+export function probeConsoleIdentity(port, {
   expectedVersion = PKG_VERSION,
   expectedConfigPath = VISIONPOWER_CONFIG,
   timeoutMs = 1500,
+  tolerateVersionMismatch = false,
 } = {}) {
   return new Promise((resolveProbe, rejectProbe) => {
     const req = httpRequest({
@@ -134,7 +135,7 @@ function probeConsoleIdentity(port, {
           rejectProbe(new Error('listener is not a compatible VisionPower console'))
           return
         }
-        if (expectedVersion && identity.version !== expectedVersion) {
+        if (expectedVersion && identity.version !== expectedVersion && !tolerateVersionMismatch) {
           rejectProbe(new Error(`VisionPower version is ${identity.version ?? 'unknown'}, expected ${expectedVersion}`))
           return
         }
@@ -532,12 +533,23 @@ async function ensureConsole(profile, noConsole, waitSecs, forceConsole) {
   const expectedVersion = installedPluginVersion(profileDir(profile)) || PKG_VERSION
   let spawned = false
   if (await portListening(PORT)) {
+    // 版本不匹配不再致命：同产品、协议兼容、同配置路径的监听者几乎必然是
+    // 「仍在运行的 dsh web」——VisionPower 插件在 dsh web 进程内起控制台，
+    // 运行中的进程加载的还是它启动时的插件版本。升级插件本就要求重启
+    // dsh web，此刻中断安装（①–④ 已全部完成）只会把用户卡死在报错上；
+    // 降级为警告并继续。真正的异常占用（非 VisionPower / 协议不兼容 /
+    // 配置路径不同）仍然报错。
+    let identity
     try {
-      await probeConsoleIdentity(PORT, { expectedVersion })
+      identity = await probeConsoleIdentity(PORT, { expectedVersion, tolerateVersionMismatch: true })
     } catch (error) {
-      throw new Error(`端口 ${PORT} 已被占用，但不是当前安装所需的 VisionPower 配置控制台：${error.message}。请关闭占用该端口的旧实例或其他程序后重试。`)
+      throw new Error(`端口 ${PORT} 已被占用，但不是当前安装所需的 VisionPower 配置控制台：${error.message}。请关闭占用该端口的程序后重试。`)
     }
-    log(`已验证 VisionPower 配置控制台正在运行 http://127.0.0.1:${PORT}，跳过启动`)
+    if (identity.version !== expectedVersion) {
+      warn(`端口 ${PORT} 正由另一版本的 VisionPower 控制台（v${identity.version ?? 'unknown'}，本次安装 v${expectedVersion}）占用——通常来自仍在运行的 dsh web（进程内加载的是其启动时的插件版本）。本次不启动新控制台；重启 dsh web 后即加载当前版本。`)
+    } else {
+      log(`已验证 VisionPower 配置控制台正在运行 http://127.0.0.1:${PORT}，跳过启动`)
+    }
     if (!visionConfigHasKey()) warn('控制台在运行但 ~/.visionpower/config.json 尚无 API key')
   } else {
     // 已配置的复跑场景也照常拉起控制台：安装跑完总要能亲眼看到一眼才算闭环
@@ -571,7 +583,9 @@ async function ensureConsole(profile, noConsole, waitSecs, forceConsole) {
   let identityReady = false
   do {
     try {
-      await probeConsoleIdentity(PORT, { expectedVersion })
+      // 容忍版本不匹配：就绪探测只关心「一个兼容的控制台在监听」，
+      // 版本差异已在上面的分类分支报告过，这里不该再次卡住浏览器打开。
+      await probeConsoleIdentity(PORT, { expectedVersion, tolerateVersionMismatch: true })
       identityReady = true
     } catch {
       if (Date.now() < readyDeadline) await sleep(500)

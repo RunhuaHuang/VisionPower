@@ -3821,7 +3821,7 @@ try {
 
   // ── setup-dsh 纯函数与补丁自测 ────────────────────────────────────────────
   {
-    const { compareVersions, composeCordisContent, parsePatchedInstallations, syncLocalDshClientFiles, validatePluginSource } = await import('./setup-dsh.mjs')
+    const { compareVersions, composeCordisContent, parsePatchedInstallations, probeConsoleIdentity, syncLocalDshClientFiles, validatePluginSource } = await import('./setup-dsh.mjs')
     assert.equal(compareVersions('2.8.0', '3.0.0'), -1)
     assert.equal(compareVersions('3.0.0', '3.0.0'), 0)
     assert.equal(compareVersions('3.0.1', '3.0.0'), 1)
@@ -3885,6 +3885,29 @@ try {
     assert.ok(noTrailing.includes('\n\n- insert:\n    - id: visionpower'))
     const inlined = composeCordisContent('items: []\n')
     assert.ok(inlined.includes('items: []'), 'inline arrays must not be stripped')
+    // 控制台身份探测：版本不匹配在容忍模式下放行（升级场景 dsh web 进程内
+    // 还是旧版插件起的控制台），产品/协议/配置路径不匹配在任何模式下都拒绝
+    {
+      const { createServer } = await import('node:http')
+      const serve = (body) => createServer((req, res) => {
+        if (req.url === '/api/identity') { res.writeHead(200, { 'content-type': 'application/json' }); res.end(body) }
+        else { res.writeHead(404); res.end('{}') }
+      })
+      const listen = (server) => new Promise((resolve) => server.listen(0, '127.0.0.1', resolve))
+      const opts = { expectedVersion: '3.2.1', expectedConfigPath: '/tmp/vp-identity-test.json', timeoutMs: 2000 }
+      const older = serve(JSON.stringify({ product: 'visionpower', protocolVersion: 1, version: '3.1.1', configPath: opts.expectedConfigPath, pid: 1 }))
+      await listen(older)
+      await assert.rejects(probeConsoleIdentity(older.address().port, opts), /version is 3\.1\.1, expected 3\.2\.1/)
+      const tolerated = await probeConsoleIdentity(older.address().port, { ...opts, tolerateVersionMismatch: true })
+      assert.equal(tolerated.version, '3.1.1')
+      const foreign = serve(JSON.stringify({ product: 'not-visionpower', protocolVersion: 1, version: '3.2.1', configPath: opts.expectedConfigPath, pid: 2 }))
+      await listen(foreign)
+      await assert.rejects(probeConsoleIdentity(foreign.address().port, { ...opts, tolerateVersionMismatch: true }), /not a compatible VisionPower console/)
+      const otherConfig = serve(JSON.stringify({ product: 'visionpower', protocolVersion: 1, version: '3.2.1', configPath: '/tmp/elsewhere.json', pid: 3 }))
+      await listen(otherConfig)
+      await assert.rejects(probeConsoleIdentity(otherConfig.address().port, { ...opts, tolerateVersionMismatch: true }), /different config/)
+      await Promise.all([older, foreign, otherConfig].map((server) => new Promise((resolve) => server.close(resolve))))
+    }
   }
   {
     // patch-dsh.mjs --self-test：dsh 结构漂移要在 CI 暴露，而不是用户装机时

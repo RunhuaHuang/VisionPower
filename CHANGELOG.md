@@ -2,6 +2,23 @@
 
 ## Unreleased
 
+## 3.2.1 - 2026-08-20
+
+- The dsh installer no longer aborts when port 17900 is already held by a
+  compatible VisionPower console of a different version. That occupant is
+  almost always a still-running `dsh web` — the plugin starts the console
+  in-process, so the process serves the plugin version it loaded at startup.
+  The installer now warns (naming both versions) and continues; restarting
+  `dsh web` loads the new version. Genuinely foreign listeners (wrong
+  product, incompatible protocol, or a different config path) still fail
+  the install.
+- `probeConsoleIdentity` gained a `tolerateVersionMismatch` mode and is now
+  exported and covered by unit tests (version mismatch tolerated vs
+  product/protocol/config-path mismatches rejected).
+- The README dsh quick start now shows the single `setup-dsh --launch`
+  command directly instead of a check-first, then-install two-step flow;
+  `--check` remains available for read-only verification.
+
 ## 3.2.0 - 2026-08-20
 
 - Added DeepSeek Harness `0.1.0-rc.8` support to the dsh patcher. Patches
