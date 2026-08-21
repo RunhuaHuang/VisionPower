@@ -5,9 +5,10 @@
 //       更新后运行一次本脚本，自动重打全部补丁（幂等，可重复运行）。
 //
 // 版本适配：补丁按代码形状自动匹配（锚点只命中对应版本的源码结构），
-//       覆盖 dsh 0.1.0-rc.6 / rc.7 / rc.8 / 0.1.1-rc.1；主流程会报告识别出的版本与
+//       覆盖 dsh 0.1.0-rc.6 / rc.7 / rc.8 / 0.1.1-rc.1 / rc.2；主流程会报告识别出的版本与
 //       启用的补丁集。rc.8 新增：deepseek stream() 入口拒绝、pi-ai
-//       toPiContext 的 maxRequestImageBytes 参数变体。
+//       toPiContext 的 maxRequestImageBytes 参数变体。0.1.1 起 selectModel 的
+//       图片拒绝官方已原生放行（serializeImageAdmission），按已达成跳过。
 //
 // 用法：
 //   node patch-dsh.mjs                  # 自动发现 DSH 安装位置并打补丁
@@ -26,7 +27,7 @@ import path from 'node:path';
 
 const T = (n) => '\t'.repeat(n);
 
-function patchedPiStream(replayBlock = '', extraArg = '') {
+function patchedPiStream(replayBlock = '', extraArg = '', rc2WireBudget = false) {
   const lines = [
     "const containsImage = options.messages.some((message) => contentHasImage(message.content));",
     'const supportsImage = model.input.includes("image");',
@@ -41,6 +42,19 @@ function patchedPiStream(replayBlock = '', extraArg = '') {
   if (replayBlock) lines.push(replayBlock)
   // extraArg：rc.8 起 toPiContext 带图分支多出第 4 个参数（profile.maxRequestImageBytes），
   // 原样透传，保持与所在 dsh 版本的调用签名一致。
+  // rc2WireBudget：0.1.1-rc.2 起带图分支首参改为 { ...options, signal } 多行展开并追加
+  // maxPixels/maxBytes 预算对象；保留该调用形状，仅代入去图后的 messages。
+  if (rc2WireBudget) {
+    lines.push(T(4) + 'const context = attachments === void 0 ? toPiContext({ ...options, messages }, void 0, onReplayDegrade) : await toPiContext({')
+    lines.push(T(5) + '...options,')
+    lines.push(T(5) + 'messages,')
+    lines.push(T(5) + 'signal: watchdog.signal')
+    lines.push(T(5) + '}, attachments, onReplayDegrade, profile.maxRequestImageBytes, {')
+    lines.push(T(5) + 'maxPixels: profile.requestImagePixelBudget,')
+    lines.push(T(5) + 'maxBytes: profile.requestImageMaxBytes')
+    lines.push(T(4) + '});')
+    return lines.join('\n')
+  }
   lines.push(T(4) + (replayBlock
     ? `const context = attachments === void 0 ? toPiContext({ ...options, messages }, void 0, onReplayDegrade) : await toPiContext({ ...options, messages }, attachments, onReplayDegrade${extraArg});`
     : `const context = attachments === void 0 ? toPiContext({ ...options, messages }) : await toPiContext({ ...options, messages }, attachments${extraArg});`))
@@ -73,7 +87,8 @@ const patches = [
   {
     id: 'apiproxy: selectModel 处理器图片拒绝',
     pkg: 'dsh-host-apiproxy',
-    already: (s) => /Model selection is admitted regardless of the session's image content/.test(s),
+    // dsh 0.1.1 起官方已原生放行（serializeImageAdmission），与补丁等效，按已达成跳过
+    already: (s) => /Model selection is admitted regardless of the session's image content/.test(s) || /serializeImageAdmission/.test(s),
     anchor: (s) => /does not accept image input/.test(s),
     apply: (s) => s.replace(
       /(?:if \(pendingImage \|\| messagesHaveImage\(found\.agent\.session\.deriveMessages\(\)\)\) \{|if \(\[\.\.\.found\.agent\.inbox\.nextTurn)[\s\S]*?does not accept image input[\s\S]*?\n(?=[ \t]*const selected = \{)/,
@@ -165,6 +180,11 @@ const patches = [
       const rc8 = new RegExp(common.source + '([ \\t]*const onReplayDegrade = \\(reason\\) => \\{\\n[\\s\\S]*?\\n[ \\t]*\\};)\\n[ \\t]*const context = attachments === void 0 \\? toPiContext\\(options, void 0, onReplayDegrade\\) : await toPiContext\\(options, attachments, onReplayDegrade, profile\\.maxRequestImageBytes\\);')
       const withRc8 = s.replace(rc8, (_match, replayBlock) => patchedPiStream(replayBlock, ', profile.maxRequestImageBytes'))
       if (withRc8 !== s) return withRc8
+      // 0.1.1-rc.2：带图分支调用改为多行（首参 { ...options, signal: watchdog.signal }
+      // 展开）并追加 maxPixels/maxBytes 预算对象，common 前段与 rc.8 相同。
+      const rc2 = new RegExp(common.source + '([ \\t]*const onReplayDegrade = \\(reason\\) => \\{\\n[\\s\\S]*?\\n[ \\t]*\\};)\\n[ \\t]*const context = attachments === void 0 \\? toPiContext\\(options, void 0, onReplayDegrade\\) : await toPiContext\\(\\{\\n[ \\t]*\\.\\.\\.options,\\n[ \\t]*signal: watchdog\\.signal\\n[ \\t]*\\}, attachments, onReplayDegrade, profile\\.maxRequestImageBytes, \\{\\n[ \\t]*maxPixels: profile\\.requestImagePixelBudget,\\n[ \\t]*maxBytes: profile\\.requestImageMaxBytes\\n[ \\t]*\\}\\);')
+      const withRc2 = s.replace(rc2, (_match, replayBlock) => patchedPiStream(replayBlock, ', profile.maxRequestImageBytes', true))
+      if (withRc2 !== s) return withRc2
       const rc7 = new RegExp(common.source + '([ \\t]*const onReplayDegrade = \\(reason\\) => \\{\\n[\\s\\S]*?\\n[ \\t]*\\};)\\n[ \\t]*const context = attachments === void 0 \\? toPiContext\\(options, void 0, onReplayDegrade\\) : await toPiContext\\(options, attachments, onReplayDegrade\\);')
       const withRc7 = s.replace(rc7, (_match, replayBlock) => patchedPiStream(replayBlock))
       if (withRc7 !== s) return withRc7
@@ -357,6 +377,27 @@ function selfTest() {
     T(4) + '};',
     T(4) + 'const context = attachments === void 0 ? toPiContext(options, void 0, onReplayDegrade) : await toPiContext(options, attachments, onReplayDegrade, profile.maxRequestImageBytes);'
   ].join('\n');
+  // 0.1.1-rc.2：带图分支多行展开（signal 覆写）+ 像素/字节预算对象
+  const S5rc2 = [
+    T(4) + 'const containsImage = options.messages.some((message) => contentHasImage(message.content));',
+    T(4) + 'if (containsImage && !model.input.includes("image")) throw new LlmError(`pi-ai model "${model.id}" does not support image input`, "UNSUPPORTED_CONTENT");',
+    T(4) + 'const attachments = containsImage ? this.config.resolveAttachments?.() : void 0;',
+    T(4) + 'if (containsImage && attachments === void 0) throw new LlmError("pi-ai image input requires the durable attachment service", "UNSUPPORTED_CONTENT");',
+    T(4) + 'const onReplayDegrade = (reason) => {',
+    T(5) + 'this.config.onReplayDegrade?.({',
+    T(6) + 'provider: options.provider,',
+    T(6) + 'model: options.model,',
+    T(6) + 'reason',
+    T(5) + '});',
+    T(4) + '};',
+    T(4) + 'const context = attachments === void 0 ? toPiContext(options, void 0, onReplayDegrade) : await toPiContext({',
+    T(5) + '...options,',
+    T(5) + 'signal: watchdog.signal',
+    T(5) + '}, attachments, onReplayDegrade, profile.maxRequestImageBytes, {',
+    T(5) + 'maxPixels: profile.requestImagePixelBudget,',
+    T(5) + 'maxBytes: profile.requestImageMaxBytes',
+    T(4) + '});'
+  ].join('\n');
   // rc.8：deepseek 适配器 stream() 入口按模型目录 inputModalities 拒绝带图请求
   const S6rc8 = [
     T(3) + 'const hasImages = options.messages.some((message) => contentHasImage(message.content));',
@@ -378,6 +419,7 @@ function selfTest() {
     { id: 'pi-ai stream() 非多模态不拒绝', before: S5, mustHave: 'const supportsImage', mustNotHave: 'does not support image input' },
     { id: 'pi-ai stream() 非多模态不拒绝', before: S5rc7, mustHave: 'onReplayDegrade', mustNotHave: 'does not support image input' },
     { id: 'pi-ai stream() 非多模态不拒绝', before: S5rc8, mustHave: 'profile.maxRequestImageBytes', mustNotHave: 'does not support image input' },
+    { id: 'pi-ai stream() 非多模态不拒绝', before: S5rc2, mustHave: 'profile.maxRequestImageBytes', mustNotHave: 'does not support image input' },
     { id: 'deepseek 适配器 stream() 入口图片拒绝（rc.8）', before: S6rc8, mustHave: 'const supportsImage', mustNotHave: 'does not accept image input' }
   ];
   let failed = 0;
@@ -462,7 +504,7 @@ function main() {
     try {
       const dshPkg = JSON.parse(fs.readFileSync(path.join(root, '@deepseek-ai', 'dsh', 'package.json'), 'utf8'));
       rootRc = eraRc(dshPkg.version);
-      console.log(`   dsh 版本: ${dshPkg.version}（补丁覆盖 0.1.0-rc.6 – rc.8 与 0.1.1-rc.1）`);
+      console.log(`   dsh 版本: ${dshPkg.version}（补丁覆盖 0.1.0-rc.6 – rc.8 与 0.1.1-rc.1/rc.2）`);
       if (rootRc !== null && rootRc >= 8) {
         console.log('   识别为 rc.8 及以后（含 0.1.1+）：启用 rc.8 补丁集（deepseek stream() 入口放行 + pi-ai maxRequestImageBytes 变体；声明了 image 模态的模型保留官方原生发图路由）');
       } else if (rootRc !== null && rootRc >= 6) {

@@ -2,6 +2,20 @@
 
 ## Unreleased
 
+## 3.2.3 - 2026-08-22
+
+- Added DeepSeek Harness `0.1.1-rc.2` support. The pi-ai `stream()` image
+  call changed shape in rc.2 — the multimodal branch now spreads
+  `{ ...options, signal: watchdog.signal }` across multiple lines and appends
+  a trailing `{ maxPixels, maxBytes }` budget object — so the patcher gained a
+  dedicated rc.2 variant (via a new `rc2WireBudget` mode in `patchedPiStream`)
+  that preserves the new call shape and only substitutes the image-stripped
+  `messages`. Covered by self-tests (`S5rc2`).
+- The apiproxy `selectModel` patch now treats dsh 0.1.1's native image
+  admission (`serializeImageAdmission`) as already-achieved: rc.2 deleted the
+  old rejection code outright, which previously failed the whole install with
+  "old rejection code not found".
+
 ## 3.2.2 - 2026-08-21
 
 - Added DeepSeek Harness `0.1.1-rc.1` support (verified end-to-end: all 8
