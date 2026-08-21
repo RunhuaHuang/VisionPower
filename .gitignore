@@ -8,3 +8,4 @@ yarn-error.log*
 .playwright-mcp/
 output/
 软著申请材料/
+.zcode/

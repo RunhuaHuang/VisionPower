@@ -1,6 +1,6 @@
 {
   "name": "visionpower",
-  "version": "3.2.1",
+  "version": "3.2.2",
   "description": "VisionPower: a portable image understanding MCP server for Codex, Claude Desktop, Cursor, and other agents.",
   "type": "module",
   "bin": {

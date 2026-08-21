@@ -5,7 +5,7 @@
 //       更新后运行一次本脚本，自动重打全部补丁（幂等，可重复运行）。
 //
 // 版本适配：补丁按代码形状自动匹配（锚点只命中对应版本的源码结构），
-//       覆盖 dsh 0.1.0-rc.6 / rc.7 / rc.8；主流程会报告识别出的版本与
+//       覆盖 dsh 0.1.0-rc.6 / rc.7 / rc.8 / 0.1.1-rc.1；主流程会报告识别出的版本与
 //       启用的补丁集。rc.8 新增：deepseek stream() 入口拒绝、pi-ai
 //       toPiContext 的 maxRequestImageBytes 参数变体。
 //
@@ -232,6 +232,20 @@ function pkgJsFiles(root, pkg) {
   return out;
 }
 
+// dsh 版本号 → 「补丁时代」编号，requiresRc 门控按它比较。0.1.0-rc.N 的 N 就是
+// 时代号；更高的 core（0.1.1+、0.2+ …）必然包含 rc.8 引入的代码形状，按 ≥8 记，
+// 绝不能拿新版本自己的 rc 小号（如 0.1.1-rc.1 的 1）去比 requiresRc 而误跳过；
+// 同 core 的稳定版（无 rc 后缀）晚于所有 rc，按 Infinity 记；0.0.x 老线记 0
+// （不在覆盖范围）；解析失败返回 null，主流程按代码形状兜底扫描。
+export function eraRc(version) {
+  const m = /^(\d+)\.(\d+)\.(\d+)(?:-rc\.(\d+))?$/.exec(String(version));
+  if (!m) return null;
+  const cmp = (+m[1] - 0) || (+m[2] - 1) || (+m[3] - 0);
+  if (cmp > 0) return Math.max(m[4] === undefined ? 0 : +m[4], 8);
+  if (cmp === 0) return m[4] === undefined ? Infinity : +m[4];
+  return 0;
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // 自测：用「补丁前」的原始代码片段验证正则在新结构下依然成立
 // ─────────────────────────────────────────────────────────────────────────────
@@ -380,6 +394,19 @@ function selfTest() {
     if (problems.length) { failed++; console.error(`✗ ${c.id}: ${problems.join('; ')}`); }
     else console.log(`✓ ${c.id}`);
   }
+  // eraRc：新版本号（0.1.1-rc.1 等）必须映射到 rc.8 补丁集，而不是被「无法识别」
+  // 警告或误判为早于 rc.8 而整体跳过。
+  const eraCases = [
+    ['0.1.0-rc.5', 5], ['0.1.0-rc.6', 6], ['0.1.0-rc.7', 7],
+    ['0.1.0-rc.8', 8], ['0.1.0-rc.9', 9], ['0.1.0', Infinity],
+    ['0.1.1-rc.1', 8], ['0.2.0-rc.1', 8], ['1.0.0', 8],
+    ['0.0.1-rc.5', 0], ['not-a-version', null]
+  ];
+  for (const [v, want] of eraCases) {
+    const got = eraRc(v);
+    if (got !== want) { failed++; console.error(`✗ eraRc(${v}) = ${got}，期望 ${want}`); }
+    else console.log(`✓ eraRc(${v}) → ${got}`);
+  }
   console.log(failed === 0 ? 'SELF-TEST PASS' : `SELF-TEST FAIL (${failed})`);
   process.exit(failed === 0 ? 0 : 1);
 }
@@ -434,11 +461,10 @@ function main() {
     let rootRc = null;
     try {
       const dshPkg = JSON.parse(fs.readFileSync(path.join(root, '@deepseek-ai', 'dsh', 'package.json'), 'utf8'));
-      console.log(`   dsh 版本: ${dshPkg.version}（补丁覆盖 0.1.0-rc.6 / rc.7 / rc.8）`);
-      const rc = /^0\.1\.0-rc\.(\d+)$/.exec(dshPkg.version);
-      if (rc) rootRc = Number(rc[1]);
+      rootRc = eraRc(dshPkg.version);
+      console.log(`   dsh 版本: ${dshPkg.version}（补丁覆盖 0.1.0-rc.6 – rc.8 与 0.1.1-rc.1）`);
       if (rootRc !== null && rootRc >= 8) {
-        console.log('   识别为 rc.8+：启用 rc.8 补丁集（deepseek stream() 入口放行 + pi-ai maxRequestImageBytes 变体；声明了 image 模态的模型保留官方原生发图路由）');
+        console.log('   识别为 rc.8 及以后（含 0.1.1+）：启用 rc.8 补丁集（deepseek stream() 入口放行 + pi-ai maxRequestImageBytes 变体；声明了 image 模态的模型保留官方原生发图路由）');
       } else if (rootRc !== null && rootRc >= 6) {
         console.log('   识别为 rc.8 之前的版本：沿用 rc.6 / rc.7 补丁集');
       } else if (rootRc !== null) {

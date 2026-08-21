@@ -8,7 +8,7 @@
 //
 // Keep the two delivery paths in sync: they both read this module.
 
-export const RULES_VERSION = 3
+export const RULES_VERSION = 4
 export const RULES_MARKER = `<!-- visionpower:dsh-rules:v${RULES_VERSION} -->`
 export const RULES_END_MARKER = '<!-- /visionpower:dsh-rules -->'
 export const LEGACY_RULES_HEADING = '# 图片的定位与识图规则（VisionPower）'
@@ -28,7 +28,7 @@ ${LEGACY_RULES_HEADING}
 - 用户消息文本为空/看似「没发内容」→ 这几乎总是「只发了一张图」（纯图片消息，图片块在纯文本线路上被丢弃）：直接调用 describe_image，把内容总结告诉用户；不要回复「没收到」，也不要反问用户想做什么。
 - 文本里提到 图/图片/截图/照片/screenshot 等关键词。
 - 上下文暗示有附件（如刚讨论过某张图、用户说「再发一张」）。
-- **不要调用 dsh 内置的 read_image**：纯文本路由无法消费它返回的图片块。describe_image 成功后也不要再调用其他图片工具做“二次确认”。
+- **纯文本路由（第 0 步看不到图片内容）禁止调用 dsh 内置的 read_image**——该路由下它必被宿主拒绝，一律用 describe_image；describe_image 成功后也不要再调用其他图片工具做“二次确认”。多模态路由（能直接看到图片内容）则优先原生看图，需要读取本地图片文件时可直接用 read_image，无需 describe_image。
 
 1. 调用 describe_image：当前消息带图时只传 prompt 即可，插件会按消息顺序自动读取当前消息中的一张或多张附件。**只读当前消息里的图**——用户提到更早发过的图（如「再解释一下这张」「和刚才那张对比」）时，显式传 attachment_scope: "latest_in_session" 复用最近的图片；否则不要臆测或复用旧图。不要解析 attachmentId，不要读取会话日志，也不要推导 ~/.dsh 下的存储路径；附件 ID 是宿主的不透明标识。
 2. 显式路径、URL、Base64、VisionPower Inbox 引用仍可通过 image_path / image_url / image_base64 / image_ref / images[] 传入。

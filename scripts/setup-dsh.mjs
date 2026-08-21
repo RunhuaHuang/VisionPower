@@ -348,6 +348,13 @@ function installPlugin(profile, source) {
     }
   } catch { /* dsh 命令不存在或不可用，走 pnpm */ }
 
+  // pnpm 对同一 file: 规格会复用 lockfile 里已有的目录导入快照——即使加了
+  // --force，源目录里已更新文件的变更也不会落盘（pnpm 11.22 实测：版本号已
+  // 变更，重跑 add 后 profile 里仍是旧文件）。先 remove 清掉 lockfile 条目，
+  // 随后的 add 才会按当前源目录全新导入。remove 失败（尚未安装过等）容忍。
+  if (source.startsWith('file:')) {
+    try { runShim('pnpm', ['--dir', dir, 'remove', 'visionpower'], { stdio: 'ignore' }) } catch { /* 未安装过则无需清理 */ }
+  }
   installPluginViaPnpm(dir, source)
   syncLocalDshClientFiles(dir, source)
   return { status: current ? 'upgraded' : 'installed', version: installedPluginVersion(dir) }
@@ -642,7 +649,7 @@ async function launchDshWeb() {
       ? (IS_WIN
         ? spawn(process.env.comspec || 'cmd.exe', ['/d', '/s', '/c', `"${recordedBin}" web`], { detached: true, stdio })
         : spawn(recordedBin, ['web'], { detached: true, stdio }))
-      : spawn('npx', ['-y', `@deepseek-ai/dsh@${state?.dshVersion || '0.1.0-rc.8'}`, 'web'], shimOpts({ detached: true, stdio }))
+      : spawn('npx', ['-y', `@deepseek-ai/dsh@${state?.dshVersion || '0.1.1-rc.1'}`, 'web'], shimOpts({ detached: true, stdio }))
     // spawn 失败以异步 'error' 事件送达；不挂监听会成为 uncaught exception
     // 崩掉安装器，绕过 main() 的兜底 catch。
     child.on('error', (e) => warn(`dsh web 进程启动失败：${e.message}；请查看日志 ${logFile} 或手动启动`))

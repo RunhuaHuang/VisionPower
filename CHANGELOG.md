@@ -2,6 +2,28 @@
 
 ## Unreleased
 
+## 3.2.2 - 2026-08-21
+
+- Added DeepSeek Harness `0.1.1-rc.1` support (verified end-to-end: all 8
+  patches match with zero structure/syntax failures). The patcher's version
+  detection now maps any dsh newer than `0.1.0-rc.8` — such as `0.1.1-rc.1` —
+  onto the rc.8 patch set via a new `eraRc()` classifier instead of warning
+  about an unrecognized version; pre-`rc.6` builds and unparseable versions
+  keep their previous behavior. The classifier's ordering (newer core lines
+  are never gated by their own small `rc` suffix) is covered by self-tests.
+- The `setup-dsh` last-resort `npx` fallback now pins `@deepseek-ai/dsh@0.1.1-rc.1`.
+- Injected dsh rules v4: the `read_image` guidance is now route-aware. On
+  multimodal routes (the message images are directly visible, e.g. dsh
+  `0.1.1-rc.1`'s `deepseek-v4-flash-vision-exp`), native image viewing is
+  preferred and `read_image` may read local image files directly; on text-only
+  routes the ban (and the no-double-check rule after `describe_image`) is
+  unchanged.
+- Fixed local `file:` plugin reinstalls going stale: pnpm reuses the lockfile's
+  directory-import snapshot for an unchanged `file:` spec even with `--force`,
+  so updated files never reached the dsh profile (observed with pnpm 11.22).
+  The installer now removes the lockfile entry first and re-adds, forcing a
+  fresh import of the current source tree.
+
 ## 3.2.1 - 2026-08-20
 
 - The dsh installer no longer aborts when port 17900 is already held by a

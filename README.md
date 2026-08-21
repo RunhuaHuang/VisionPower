@@ -409,7 +409,7 @@ WebUI 也提供浅色主题：
 
 dsh 集成位于 `src/dsh/`，安装器与补丁脚本位于 `scripts/setup-dsh.mjs`、`scripts/patch-dsh.mjs`。
 
-当前集成以 **DeepSeek Harness `0.1.0-rc.8`** 为基线，兼容 `0.1.0-rc.6` – `rc.8`：安装器自动识别所装 dsh 版本并应用对应补丁集（补丁按代码形状自选；版本识别用于报告启用了哪套，并让 rc.8+ 专属补丁在更早版本上整体跳过、不产生误导演报）。rc.7 起图片附件通过宿主 `AttachmentStore` 读取：VisionPower 不解析附件 ID、不读取会话日志，也不拼接 `~/.dsh/attachments` 路径。rc.8 起 dsh 官方支持给声明了 `inputModalities: [text, image]` 的模型原生直发图片——VisionPower 补丁保留该原生路由不动，同时继续为纯文本模型放行图片消息（图片在线上丢弃，由 `describe_image` 识图）。启动 `dsh web` 后，可直接在 **Settings → Plugins → VisionPower** 中开启或关闭 **dsh 插件**、选择视觉模型、填写 API Key、测试连通性。dsh 开关切换后立即保存并生效；模型、API Key 等其他字段仍通过“保存并应用配置”提交，无需手动编辑配置文件。这个开关只停止 dsh 的规则注入并让 dsh 中的 `describe_image` 拒绝新请求；MCP、Skill 和独立 WebUI 不受影响。MCP 的 Node 进程由 Claude Desktop、Cursor、Codex 等宿主管理，配置页不会也不应尝试终止它；要停止 MCP，请在对应宿主中禁用/移除服务器或退出宿主。
+当前集成以 **DeepSeek Harness `0.1.1-rc.1`** 为基线验证，兼容 `0.1.0-rc.6` – `rc.8` 与 `0.1.1-rc.1`：安装器自动识别所装 dsh 版本并应用对应补丁集（补丁按代码形状自选；版本识别用于报告启用了哪套，并让 rc.8+ 专属补丁在更早版本上整体跳过、不产生误导演报）。rc.7 起图片附件通过宿主 `AttachmentStore` 读取：VisionPower 不解析附件 ID、不读取会话日志，也不拼接 `~/.dsh/attachments` 路径。rc.8 起 dsh 官方支持给声明了 `inputModalities: [text, image]` 的模型原生直发图片（`0.1.1-rc.1` 起官方模型目录内置 `deepseek-v4-flash-vision-exp`，即走此路由）——VisionPower 补丁保留该原生路由不动，同时继续为纯文本模型放行图片消息（图片在线上丢弃，由 `describe_image` 识图）。启动 `dsh web` 后，可直接在 **Settings → Plugins → VisionPower** 中开启或关闭 **dsh 插件**、选择视觉模型、填写 API Key、测试连通性。dsh 开关切换后立即保存并生效；模型、API Key 等其他字段仍通过“保存并应用配置”提交，无需手动编辑配置文件。这个开关只停止 dsh 的规则注入并让 dsh 中的 `describe_image` 拒绝新请求；MCP、Skill 和独立 WebUI 不受影响。MCP 的 Node 进程由 Claude Desktop、Cursor、Codex 等宿主管理，配置页不会也不应尝试终止它；要停止 MCP，请在对应宿主中禁用/移除服务器或退出宿主。
 
 > [!CAUTION]
 > 这是实验性、侵入式集成：安装流程可能安装/更新插件、改写 Cordis 配置、修改第三方 dsh 文件并启动后台进程。请先备份 dsh profile，在非关键环境验证，并固定 VisionPower 与 dsh 版本。不要把来源不明的 `--plugin-source` 交给对话模型执行。
