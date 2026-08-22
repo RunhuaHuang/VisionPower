@@ -132,8 +132,8 @@ async function safeReadFile(filePath, options) {
 }
 
 const DEFAULT_PROTOCOL = 'openai'
-const DEFAULT_VISION_BASE_URL = 'https://dashscope.aliyuncs.com/compatible-mode/v1'
-const DEFAULT_VISION_MODEL = 'qwen3-vl-flash'
+const DEFAULT_VISION_BASE_URL = 'https://api.deepseek.com'
+const DEFAULT_VISION_MODEL = 'deepseek-v4-flash-vision-exp'
 const DEFAULT_MAX_IMAGE_BYTES = 20 * 1024 * 1024
 const DEFAULT_MAX_TOTAL_IMAGE_BYTES = 64 * 1024 * 1024
 const DEFAULT_REQUEST_TIMEOUT_MS = 60_000
@@ -258,6 +258,11 @@ const VISION_PROVIDER_CAPABILITIES = [
     auth: 'anthropic', vision: true, supportsPublicImageUrl: false, lastVerified: null,
   },
   {
+    provider: 'deepseek', hosts: ['api.deepseek.com'], region: 'china',
+    protocol: 'openai', tokenParameter: 'max_tokens', supportsSystemRole: true,
+    auth: 'bearer', vision: true, supportsPublicImageUrl: false, lastVerified: null,
+  },
+  {
     provider: 'alibaba-cloud', hosts: ['dashscope.aliyuncs.com'], modelPattern: '^qwen3\\.(?:6|7)-', region: 'china',
     protocol: 'openai', tokenParameter: 'max_completion_tokens', supportsSystemRole: true,
     auth: 'bearer', vision: true, supportsPublicImageUrl: true, lastVerified: '2026-08-11',
@@ -361,13 +366,18 @@ function resolveModelCapabilities(model, baseUrl) {
   }
 }
 
+// Aliyun DashScope OpenAI-compatible endpoint; kept separate from the default
+// so switching DEFAULT_VISION_* never silently rewires the Qwen presets.
+const DASHSCOPE_COMPAT_BASE_URL = 'https://dashscope.aliyuncs.com/compatible-mode/v1'
+
 const VISION_MODEL_PRESETS = [
   // —— 国内（China）端点 ——
-  { model: 'qwen3-vl-flash', label: { zh: 'Qwen3-VL Flash (阿里云百炼)', en: 'Qwen3-VL Flash (Alibaba Cloud)' }, baseUrl: DEFAULT_VISION_BASE_URL },
-  { model: 'qwen3-vl-plus', label: { zh: 'Qwen3-VL Plus (阿里云百炼)', en: 'Qwen3-VL Plus (Alibaba Cloud)' }, baseUrl: DEFAULT_VISION_BASE_URL },
-  { model: 'qwen3.6-flash', label: { zh: 'Qwen3.6 Flash (阿里云百炼)', en: 'Qwen3.6 Flash (Alibaba Cloud)' }, baseUrl: DEFAULT_VISION_BASE_URL },
-  { model: 'qwen3.7-flash', label: { zh: 'Qwen3.7 Flash (阿里云百炼)', en: 'Qwen3.7 Flash (Alibaba Cloud)' }, baseUrl: DEFAULT_VISION_BASE_URL },
-  { model: 'qwen3.7-plus', label: { zh: 'Qwen3.7 Plus (阿里云百炼)', en: 'Qwen3.7 Plus (Alibaba Cloud)' }, baseUrl: DEFAULT_VISION_BASE_URL },
+  { model: 'deepseek-v4-flash-vision-exp', label: { zh: 'DeepSeek V4 Flash Vision Exp (DeepSeek 开放平台)', en: 'DeepSeek V4 Flash Vision Exp (DeepSeek Platform)' }, baseUrl: DEFAULT_VISION_BASE_URL },
+  { model: 'qwen3-vl-flash', label: { zh: 'Qwen3-VL Flash (阿里云百炼)', en: 'Qwen3-VL Flash (Alibaba Cloud)' }, baseUrl: DASHSCOPE_COMPAT_BASE_URL },
+  { model: 'qwen3-vl-plus', label: { zh: 'Qwen3-VL Plus (阿里云百炼)', en: 'Qwen3-VL Plus (Alibaba Cloud)' }, baseUrl: DASHSCOPE_COMPAT_BASE_URL },
+  { model: 'qwen3.6-flash', label: { zh: 'Qwen3.6 Flash (阿里云百炼)', en: 'Qwen3.6 Flash (Alibaba Cloud)' }, baseUrl: DASHSCOPE_COMPAT_BASE_URL },
+  { model: 'qwen3.7-flash', label: { zh: 'Qwen3.7 Flash (阿里云百炼)', en: 'Qwen3.7 Flash (Alibaba Cloud)' }, baseUrl: DASHSCOPE_COMPAT_BASE_URL },
+  { model: 'qwen3.7-plus', label: { zh: 'Qwen3.7 Plus (阿里云百炼)', en: 'Qwen3.7 Plus (Alibaba Cloud)' }, baseUrl: DASHSCOPE_COMPAT_BASE_URL },
   { model: 'MiniMax-M3', label: { zh: 'MiniMax-M3 (国内)', en: 'MiniMax-M3 (China)' }, baseUrl: 'https://api.minimaxi.com/v1' },
   { model: 'MiniMax-M3', label: { zh: 'MiniMax-M3 (海外)', en: 'MiniMax-M3 (Global)' }, baseUrl: 'https://api.minimax.io/v1' },
   // 福利预设：通过第三方中转站提供，key 留空由作者私下分发（小红书等渠道），

@@ -8,7 +8,7 @@ import { fileURLToPath } from 'node:url'
 import { Script } from 'node:vm'
 import { buildSkillScript } from './build-skill.mjs'
 import { buildDshCoreBundle } from './build-dsh.mjs'
-import { DEFAULT_VISION_BASE_URL, getConfigFilePath, getInboxDir, getSkillStateFilePath, getDefaultBaseUrlForModel, loadVisionConfig, markSkillConfigNeedsSetup, markSkillConfigVerified, normalizeBaseUrl, normalizeConfigObject, preserveUnknownConfigKeys, resolveModelCapabilities, saveVisionConfig, VISION_MODEL_PRESETS, resolveWelfareBaseUrl, maskWelfareBaseUrl } from '../src/config.js'
+import { DEFAULT_VISION_BASE_URL, DEFAULT_VISION_MODEL, getConfigFilePath, getInboxDir, getSkillStateFilePath, getDefaultBaseUrlForModel, loadVisionConfig, markSkillConfigNeedsSetup, markSkillConfigVerified, normalizeBaseUrl, normalizeConfigObject, preserveUnknownConfigKeys, resolveModelCapabilities, saveVisionConfig, VISION_MODEL_PRESETS, resolveWelfareBaseUrl, maskWelfareBaseUrl } from '../src/config.js'
 import { toolInputSchema } from '../src/schema.js'
 import { describeImage, fetchFromVerifiedAddresses, normalizeBase64Image, parseRetryAfterMs, renderChallengePng, resolvePublicImageUrl, testModelConnection } from '../src/vision-core.js'
 import { probeWebuiServer, startOrReuseWebuiServer, startWebuiServer } from '../src/webui/server.js'
@@ -2792,7 +2792,9 @@ try {
   assert.equal(getDefaultBaseUrlForModel('gpt-4o-mini'), 'https://api.openai.com/v1')
   assert.equal(getDefaultBaseUrlForModel('gpt-5.6'), 'https://api.openai.com/v1')
   assert.equal(getDefaultBaseUrlForModel('doubao-seed-2-1-turbo-260628'), 'https://ark.cn-beijing.volces.com/api/v3')
-  assert.equal(getDefaultBaseUrlForModel('qwen3.7-flash'), DEFAULT_VISION_BASE_URL)
+  assert.equal(getDefaultBaseUrlForModel('qwen3.7-flash'), 'https://dashscope.aliyuncs.com/compatible-mode/v1')
+  assert.equal(getDefaultBaseUrlForModel('deepseek-v4-flash-vision-exp'), 'https://api.deepseek.com')
+  assert.equal(getDefaultBaseUrlForModel(DEFAULT_VISION_MODEL), DEFAULT_VISION_BASE_URL)
   assertThrowsMessage(() => getDefaultBaseUrlForModel('MiniMax-M3'), /BASE_URL is required.*multiple configured endpoints/i)
   assertThrowsMessage(() => getDefaultBaseUrlForModel('kimi-k2.6'), /BASE_URL is required.*multiple configured endpoints/i)
   assertThrowsMessage(() => getDefaultBaseUrlForModel('kimi-k3'), /BASE_URL is required.*multiple configured endpoints/i)

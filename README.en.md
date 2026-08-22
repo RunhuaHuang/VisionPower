@@ -134,8 +134,8 @@ Create `~/.visionpower/config.json`:
 ```json
 {
   "apiKey": "YOUR_API_KEY",
-  "model": "qwen3-vl-flash",
-  "baseUrl": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+  "model": "deepseek-v4-flash-vision-exp",
+  "baseUrl": "https://api.deepseek.com",
   "protocol": "openai",
   "allowedDirs": [
     "/Users/me/Desktop",
@@ -266,7 +266,7 @@ Precedence is **environment variables > `~/.visionpower/config.json` > defaults*
 | Config key | Environment variable | Default | Description |
 | --- | --- | --- | --- |
 | `apiKey` | `VISIONPOWER_API_KEY` | none | Required; also falls back to `OPENAI_API_KEY`. |
-| `model` | `VISIONPOWER_MODEL` | `qwen3-vl-flash` | Upstream model ID. |
+| `model` | `VISIONPOWER_MODEL` | `deepseek-v4-flash-vision-exp` | Upstream model ID. |
 | `baseUrl` | `VISIONPOWER_BASE_URL` | DashScope compatible `/v1` | Base URL without `/chat/completions` or `/messages`. |
 | `protocol` | `VISIONPOWER_PROTOCOL` | capability registry / `openai` | `openai` or `anthropic`. |
 | `dshEnabled` | `VISIONPOWER_DSH_ENABLED` | `true` | Controls only dsh rule injection and dsh `describe_image`; MCP, Skill, and WebUI are unaffected. |

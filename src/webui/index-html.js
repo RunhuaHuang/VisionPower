@@ -537,9 +537,9 @@ function consoleApp() {
     presets: [],
     config: {
       dshEnabled: true,
-      presetId: 'qwen3-vl-flash|https://dashscope.aliyuncs.com/compatible-mode/v1',
-      model: 'qwen3-vl-flash',
-      baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+      presetId: 'deepseek-v4-flash-vision-exp|https://api.deepseek.com',
+      model: 'deepseek-v4-flash-vision-exp',
+      baseUrl: 'https://api.deepseek.com',
       protocol: 'openai',
       apiKey: '',
       apiKeyConfigured: false,
@@ -854,7 +854,7 @@ function consoleApp() {
         // presets. Model alone is not unique (MiniMax/Kimi have China + global
         // entries with the same model ID), so a composite "model|baseUrl" key is
         // used. Falls back to 'custom' when the pair isn't a known preset.
-        const storedModel = data.model || 'qwen3-vl-flash';
+        const storedModel = data.model || 'deepseek-v4-flash-vision-exp';
         const storedBaseUrl = data.baseUrl || '';
         const matched = this.presets.find(p => p.model === storedModel && p.baseUrl === storedBaseUrl);
         const resolvedPresetId = matched ? (matched.model + '|' + matched.baseUrl) : 'custom';
@@ -1302,6 +1302,7 @@ function consoleApp() {
       if (model.startsWith('doubao-')) return 'https://console.volcengine.com/ark/region:ark+cn-beijing/apiKey';
       if (model.startsWith('gemini-')) return 'https://aistudio.google.com/app/apikey';
       if (model.startsWith('kimi-')) return 'https://platform.moonshot.cn/console/api-keys';
+      if (model.startsWith('deepseek-')) return 'https://platform.deepseek.com/api_keys';
       return 'https://bailian.console.aliyun.com/cn-beijing';
     },
 
@@ -1315,6 +1316,7 @@ function consoleApp() {
       if (model.startsWith('doubao-')) return zh ? '获取火山方舟 API Key ↗' : 'Get Volcengine Ark API Key ↗';
       if (model.startsWith('gemini-')) return zh ? '获取 Google AI API Key ↗' : 'Get Google AI API Key ↗';
       if (model.startsWith('kimi-')) return zh ? '获取月之暗面 API Key ↗' : 'Get Moonshot API Key ↗';
+      if (model.startsWith('deepseek-')) return zh ? '获取 DeepSeek API Key ↗' : 'Get DeepSeek API Key ↗';
       return zh ? '获取阿里云百炼 API Key ↗' : 'Get Aliyun Bailian API Key ↗';
     },
 

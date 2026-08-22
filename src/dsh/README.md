@@ -60,7 +60,7 @@ dsh plugin --profile web add file:/path/to/VisionPower
 | 字段 | 默认 | 说明 |
 |---|---|---|
 | `dshEnabled` | true | dsh 专用开关；关闭后 dsh 不注入规则，dsh 识图请求会被拒绝；MCP/Skill/WebUI 不受影响 |
-| `model` | 配置文件/环境 | 视觉模型名（如 `qwen3-vl-flash`、`MiniMax-M3`、`gpt-5.6`） |
+| `model` | 配置文件/环境 | 视觉模型名（如 `deepseek-v4-flash-vision-exp`、`MiniMax-M3`、`gpt-5.6`） |
 | `baseUrl` | 配置文件/环境 | OpenAI 兼容端点，覆盖 `VISIONPOWER_BASE_URL` |
 | `protocol` | 按模型/端点推断 | `openai` 或 `anthropic`；覆盖 `baseUrl` 时建议显式指定 |
 | `apiKeyEnv` | 无 | 从指定环境变量读取 API Key（如 `VISIONPOWER_API_KEY`） |

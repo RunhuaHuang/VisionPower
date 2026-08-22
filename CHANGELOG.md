@@ -2,6 +2,26 @@
 
 ## Unreleased
 
+## 3.2.4 - 2026-08-22
+
+- Added DeepSeek as a vision provider: a `deepseek-v4-flash-vision-exp`
+  preset on `https://api.deepseek.com` (OpenAI-compatible) now sits at the
+  top of the model preset list in the WebUI and dsh console, with a
+  "Get DeepSeek API Key" link to platform.deepseek.com and a `deepseek` entry
+  in the provider capability table (bearer auth, `max_tokens`, system role).
+  Verified with a live end-to-end vision request (generated-image OCR
+  round-trip, ~1.7 s).
+- First-install defaults switched to DeepSeek: with no env vars and no
+  `~/.visionpower/config.json`, VisionPower now resolves to
+  `deepseek-v4-flash-vision-exp` / `https://api.deepseek.com` instead of
+  `qwen3-vl-flash` / DashScope. Existing installations are unaffected — a
+  saved config or env override always wins. The Qwen presets keep their
+  DashScope base URL through a dedicated constant instead of sharing the
+  default-URL constant.
+- Documentation examples now use `visionpower@latest` instead of pinning
+  `3.2.1`, and the manual-config snippet / env-table default column show the
+  new DeepSeek defaults.
+
 ## 3.2.3 - 2026-08-22
 
 - Added DeepSeek Harness `0.1.1-rc.2` support. The pi-ai `stream()` image
