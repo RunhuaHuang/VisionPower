@@ -84,7 +84,7 @@ MCP 与 Skill 可以并存，但一般只需要一种运行入口；WebUI 可与
 ### 2. 打开本地配置台
 
 ```bash
-npx -y --package visionpower@3.2.1 visionpower --webui
+npx -y --package visionpower@latest visionpower --webui
 ```
 
 浏览器会打开 `http://127.0.0.1:17900`。在 **CONFIG** 页填写模型、API Key、Base URL 与协议；在 **PLAYGROUND** 页用一张小图先完成真实视觉测试。
@@ -92,7 +92,7 @@ npx -y --package visionpower@3.2.1 visionpower --webui
 ![VisionPower CONFIG 配置页](docs/images/webui-config.png)
 
 > [!TIP]
-> 文档示例固定到 `3.1.1`，便于复现。升级时请先查看 [CHANGELOG](./CHANGELOG.md)，再显式修改版本号；不建议在长期宿主配置中无条件使用 `@latest`。
+> 文档示例统一使用 `visionpower@latest`，始终获取最新修复。需要严格可复现的环境（CI、共享宿主）可把 `latest` 固定为精确版本号，升级前先查看 [CHANGELOG](./CHANGELOG.md)。
 
 ### 3. 注册 MCP
 
@@ -103,7 +103,7 @@ Claude Desktop、Cursor、Cline 等使用 JSON 的宿主可写入：
   "mcpServers": {
     "visionpower": {
       "command": "npx",
-      "args": ["-y", "--package", "visionpower@3.2.1", "visionpower"],
+      "args": ["-y", "--package", "visionpower@latest", "visionpower"],
       "timeoutMs": 120000
     }
   }
@@ -116,7 +116,7 @@ Codex TOML：
 [mcp_servers.visionpower]
 type = "stdio"
 command = "npx"
-args = ["-y", "--package", "visionpower@3.2.1", "visionpower"]
+args = ["-y", "--package", "visionpower@latest", "visionpower"]
 ```
 
 WebUI 的 **PATCH BAY** 也可以直接生成常见宿主的配置片段：
@@ -152,7 +152,7 @@ chmod 600 ~/.visionpower/config.json
 ```
 
 > [!WARNING]
-> 在当前 3.2.1 行为中，`allowedDirs` 为空表示**不限制绝对路径**。只要 Agent 能构造路径，VisionPower 就可能读取当前系统用户可读的任意受支持图片。生产或共享环境必须显式配置最小目录白名单。
+> 在当前版本中，`allowedDirs` 为空表示**不限制绝对路径**。只要 Agent 能构造路径，VisionPower 就可能读取当前系统用户可读的任意受支持图片。生产或共享环境必须显式配置最小目录白名单。
 
 ---
 
@@ -383,7 +383,7 @@ cat request.json | node ~/.claude/skills/visionpower/describe_image.mjs
 启动：
 
 ```bash
-npx -y --package visionpower@3.2.1 visionpower --webui --port 17900
+npx -y --package visionpower@latest visionpower --webui --port 17900
 ```
 
 WebUI 默认只监听 `127.0.0.1`，包含：
@@ -417,10 +417,10 @@ dsh 集成位于 `src/dsh/`，安装器与补丁脚本位于 `scripts/setup-dsh.
 一键安装并启动（幂等，可随时重跑）：
 
 ```bash
-npx -y visionpower@3.2.1 setup-dsh --launch
+npx -y visionpower@latest setup-dsh --launch
 ```
 
-安装器默认使用精确来源 `visionpower@3.2.1`；`pnpm` 缺失时会停止并提示，不会自动修改全局包管理器。高权限的 `setup_visionpower` 管理工具默认不注册，只有运维人员显式设置 `enableAdminTool: true` 时才会暴露。dsh 规则只让工具读取当前会话中最近一条带图用户消息的附件，不扫描近期文件，也不做跨会话附件猜测。
+安装器会把 dsh 插件固定到安装器自身的精确版本（即 `npx visionpower@latest` 本次实际解析到的版本），不会在 dsh 内部再跟随 `latest` 漂移；`pnpm` 缺失时会停止并提示，不会自动修改全局包管理器。高权限的 `setup_visionpower` 管理工具默认不注册，只有运维人员显式设置 `enableAdminTool: true` 时才会暴露。dsh 规则只让工具读取当前会话中最近一条带图用户消息的附件，不扫描近期文件，也不做跨会话附件猜测。
 
 完整说明见 [`src/dsh/README.md`](./src/dsh/README.md)。dsh 升级（rc.6 → rc.7 → rc.8 …）后应重新运行安装器检查并重打补丁，不要假设旧补丁仍然安全适用。
 
