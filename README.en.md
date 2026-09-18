@@ -2,8 +2,8 @@
 
 # 👁️ VisionPower
 
-**A safe, portable visual-input channel for text-first AI agents.**
-A shared core accepts local images, web images, Base64, short-lived Inbox references, or ordered multi-image requests, then exposes them through MCP, a standalone Skill, a Kimi Code plugin, a local WebUI, and a dsh plugin.
+**An image-understanding tool for non-multimodal (text-only) models.**
+It sends local images, web images, Base64 payloads, short-lived Inbox references, or ordered multi-image requests to an external vision model, then exposes the result through MCP, a standalone Skill, a Kimi Code plugin, a local WebUI, and a dsh plugin. Models that can understand images directly must not call this tool; use their own vision capability instead.
 
 [中文](./README.md) · [Quick Start](#5-minute-quick-start) · [Choose an Integration](#choose-an-integration) · [Configuration](#configuration) · [Security & Privacy](#security--privacy) · [Development](#local-development)
 
@@ -65,7 +65,7 @@ flowchart LR
 
 | Scenario | Recommended form | Best for | Notes |
 | --- | --- | --- | --- |
-| **Kimi Code** | **Kimi Code plugin** | Kimi Code users | Preferred. One-command `/plugins install`; declares both the Skill and the MCP server, no manual setup. |
+| **Kimi Code** | **Kimi Code plugin** | Kimi Code users | Preferred. One-command `/plugins install`; declares both the Skill and the MCP server. The first use still requires a vision-provider API key. |
 | Standard agent tool calls | **MCP** | Claude Desktop, Cursor, Cline, Cherry Studio, Codex, and others | Preferred. The tool schema is explicit and the host does not need to assemble shell commands. |
 | Agent has a shell but no MCP connection | **Standalone Skill** | Claude Code, Codex CLI, and similar tools | Self-contained script; no install inside the Skill directory. |
 | Initial setup, model testing, attachment relay | **WebUI + Inbox** | All local users | Useful for configuration and compatibility diagnostics. |
@@ -137,7 +137,7 @@ Create `~/.visionpower/config.json`:
 ```json
 {
   "apiKey": "YOUR_API_KEY",
-  "model": "deepseek-v4-flash-vision-exp",
+  "model": "deepseek-flash",
   "baseUrl": "https://api.deepseek.com",
   "protocol": "openai",
   "allowedDirs": [
@@ -269,8 +269,8 @@ Precedence is **environment variables > `~/.visionpower/config.json` > defaults*
 | Config key | Environment variable | Default | Description |
 | --- | --- | --- | --- |
 | `apiKey` | `VISIONPOWER_API_KEY` | none | Required; also falls back to `OPENAI_API_KEY`. |
-| `model` | `VISIONPOWER_MODEL` | `deepseek-v4-flash-vision-exp` | Upstream model ID. |
-| `baseUrl` | `VISIONPOWER_BASE_URL` | DashScope compatible `/v1` | Base URL without `/chat/completions` or `/messages`. |
+| `model` | `VISIONPOWER_MODEL` | `deepseek-flash` | Upstream model ID. |
+| `baseUrl` | `VISIONPOWER_BASE_URL` | `https://api.deepseek.com` | Base URL without `/chat/completions` or `/messages`. |
 | `protocol` | `VISIONPOWER_PROTOCOL` | capability registry / `openai` | `openai` or `anthropic`. |
 | `dshEnabled` | `VISIONPOWER_DSH_ENABLED` | `true` | Controls only dsh rule injection and dsh `describe_image`; MCP, Skill, and WebUI are unaffected. |
 | `allowInsecureHttp` | `VISIONPOWER_ALLOW_INSECURE_HTTP` | `false` | Non-loopback endpoints require HTTPS by default. Enable only on a trusted development network; loopback endpoints may use HTTP. |
@@ -335,11 +335,13 @@ The official Anthropic host may be written without a version path as above; Visi
 
 Model IDs, regions, account permissions, and provider compatibility can change. WebUI presets are convenient starting points, not permanent compatibility guarantees. Before release, run one real-image test with the target account.
 
+The preset list puts the provider's currently recommended vision models first. Older models remain available when the provider still supports them, so existing configurations keep working; text-only models are excluded from the image-understanding presets. Models explicitly retired by a provider remain compatibility-only and are not used in new examples.
+
 ---
 
 ## Kimi Code Plugin
 
-VisionPower ships a `kimi.plugin.json` manifest and can be installed as a Kimi Code plugin in one command — the plugin declares both the Skill (`VisionPower-Skill/`) and the MCP server, so both are available after installation with no manual setup.
+VisionPower ships a `kimi.plugin.json` manifest and can be installed as a Kimi Code plugin in one command — the plugin declares both the Skill (`VisionPower-Skill/`) and the MCP server. Installation and registration are automatic; the first use still requires a vision-provider API key in the shared configuration.
 
 In the Kimi Code TUI:
 
@@ -358,7 +360,7 @@ The plugin mechanism pulls the whole repository from GitHub; for local developme
 /plugins install /path/to/local/VisionPower
 ```
 
-All other configuration (API key, `~/.visionpower/config.json`) is shared with the MCP and Skill forms — see [Configuration](#configuration) below.
+All other configuration (API key, `~/.visionpower/config.json`) is shared with the MCP and Skill forms — see [Configuration](#configuration) above. When installing from a local development directory, reinstall the plugin and run `/reload` after changing source files.
 
 ---
 
@@ -437,7 +439,7 @@ Do not expose the current WebUI to a LAN or the public internet through port for
 
 The dsh integration lives in `src/dsh/`. The installer and patcher are `scripts/setup-dsh.mjs` and `scripts/patch-dsh.mjs`.
 
-The current baseline is **DeepSeek Harness `0.1.1-rc.1`**, with compatibility back to `0.1.0-rc.6`: the installer detects the installed dsh version and applies the matching patch set (patches self-select by code shape; version detection reports which set is active and makes rc.8-only patches skip cleanly on older versions). Since rc.7, images are read through the host `AttachmentStore`: VisionPower does not parse attachment IDs, read session logs, or construct paths below `~/.dsh/attachments`. As of rc.8, dsh natively forwards images to models that declare `inputModalities: [text, image]` (`0.1.1-rc.1` ships `deepseek-v4-flash-vision-exp` in the official catalog, which uses this route) — the patch keeps that native route untouched while continuing to admit image messages for text-only models (dropped on the wire, recognized by `describe_image`). After `dsh web` starts, open **Settings → Plugins → VisionPower** to enable or disable the **dsh plugin**, choose a vision model, enter an API key, and test connectivity. The dsh switch saves and takes effect immediately; model, API-key, and other fields still use **Save and apply configuration**. Users do not need to edit the configuration file manually. This switch only stops dsh rule injection and makes dsh `describe_image` reject new requests; MCP, Skill, and the standalone WebUI remain available. MCP Node processes are owned by hosts such as Claude Desktop, Cursor, or Codex, so the configuration page neither can nor should terminate them. Disable/remove the MCP server in its host, or exit the host, to stop that process.
+The current baseline is **DeepSeek Harness `0.1.1-rc.2`**, with compatibility back to `0.1.0-rc.6` – `rc.8` and `0.1.1-rc.1` – `rc.2`: the installer detects the installed dsh version and applies the matching patch set (patches self-select by code shape; version detection reports which set is active and makes rc.8-only patches skip cleanly on older versions). Since rc.7, images are read through the host `AttachmentStore`: VisionPower does not parse attachment IDs, read session logs, or construct paths below `~/.dsh/attachments`. As of rc.8, dsh natively forwards images to models that declare `inputModalities: [text, image]` — the patch keeps that native route untouched while continuing to admit image messages for text-only models (dropped on the wire, recognized by `describe_image`). After `dsh web` starts, open **Settings → Plugins → VisionPower** to enable or disable the **dsh plugin**, choose a vision model, enter an API key, and test connectivity. The dsh switch saves and takes effect immediately; model, API-key, and other fields still use **Save and apply configuration**. Users do not need to edit the configuration file manually. This switch only stops dsh rule injection and makes dsh `describe_image` reject new requests; MCP, Skill, and the standalone WebUI remain available. MCP Node processes are owned by hosts such as Claude Desktop, Cursor, or Codex, so the configuration page neither can nor should terminate them. Disable/remove the MCP server in its host, or exit the host, to stop that process.
 
 > [!CAUTION]
 > This is an experimental, invasive integration. It may install or update a plugin, rewrite Cordis configuration, patch third-party dsh files, and start background processes. Back up the dsh profile, test in a non-critical environment, and pin both VisionPower and dsh versions. Never let a conversational model execute an untrusted `--plugin-source`.
@@ -550,6 +552,7 @@ npm test
 │   ├── image-inbox.js        # short-lived image Inbox
 │   ├── webui/                # local admin interface and HTTP routes
 │   └── dsh/                  # DeepSeek Harness / Cordis plugin
+├── kimi.plugin.json          # Kimi Code plugin manifest
 ├── VisionPower-Skill/        # generated standalone Skill
 ├── scripts/
 │   ├── build-skill.mjs

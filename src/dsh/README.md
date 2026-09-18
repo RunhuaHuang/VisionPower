@@ -4,7 +4,7 @@
 
 本插件**随主包 `visionpower` 一起发布**（子路径 `visionpower/dsh`），与 MCP（`src/index.js`）和 Skill（`VisionPower-Skill/`）三形态共存于同一个包，共享同一份内核，不需要任何单独的 npm 包。
 
-当前兼容基线为 **dsh `0.1.0-rc.8`**（补丁兼容 `rc.6` – `rc.8`，`scripts/patch-dsh.mjs` 按代码形状自动匹配所装版本）。rc.7 起图片作为持久化、不透明附件管理；插件通过宿主 `AttachmentStore.readImage()` 读取并校验字节，绝不解析附件 ID 或推导宿主的落盘路径。rc.8 起 dsh 官方支持给声明了 `inputModalities: [text, image]` 的模型原生直发图片，补丁保留该路由；纯文本模型的图片消息仍由补丁放行（线上丢弃），由本插件的 `describe_image` 识图。
+当前兼容基线为 **dsh `0.1.1-rc.2`**（补丁兼容 `0.1.0-rc.6` – `rc.8` 与 `0.1.1-rc.1` – `rc.2`，`scripts/patch-dsh.mjs` 按代码形状自动匹配所装版本）。rc.7 起图片作为持久化、不透明附件管理；插件通过宿主 `AttachmentStore.readImage()` 读取并校验字节，绝不解析附件 ID 或推导宿主的落盘路径。rc.8 起 dsh 官方支持给声明了 `inputModalities: [text, image]` 的模型原生直发图片，补丁保留该路由；纯文本模型的图片消息仍由补丁放行（线上丢弃），由本插件的 `describe_image` 识图。
 
 ## 安装与挂载
 
@@ -60,7 +60,7 @@ dsh plugin --profile web add file:/path/to/VisionPower
 | 字段 | 默认 | 说明 |
 |---|---|---|
 | `dshEnabled` | true | dsh 专用开关；关闭后 dsh 不注入规则，dsh 识图请求会被拒绝；MCP/Skill/WebUI 不受影响 |
-| `model` | 配置文件/环境 | 视觉模型名（如 `deepseek-v4-flash-vision-exp`、`MiniMax-M3`、`gpt-5.6`） |
+| `model` | 配置文件/环境 | 视觉模型名（如 `deepseek-flash`、`MiniMax-M3`、`gpt-5.6`） |
 | `baseUrl` | 配置文件/环境 | OpenAI 兼容端点，覆盖 `VISIONPOWER_BASE_URL` |
 | `protocol` | 按模型/端点推断 | `openai` 或 `anthropic`；覆盖 `baseUrl` 时建议显式指定 |
 | `apiKeyEnv` | 无 | 从指定环境变量读取 API Key（如 `VISIONPOWER_API_KEY`） |

@@ -131,7 +131,7 @@ async function safeReadFile(filePath, options) {
 
 const DEFAULT_PROTOCOL = 'openai'
 const DEFAULT_VISION_BASE_URL = 'https://api.deepseek.com'
-const DEFAULT_VISION_MODEL = 'deepseek-v4-flash-vision-exp'
+const DEFAULT_VISION_MODEL = 'deepseek-flash'
 const DEFAULT_MAX_IMAGE_BYTES = 20 * 1024 * 1024
 const DEFAULT_MAX_TOTAL_IMAGE_BYTES = 64 * 1024 * 1024
 const DEFAULT_REQUEST_TIMEOUT_MS = 60_000
@@ -370,12 +370,13 @@ const DASHSCOPE_COMPAT_BASE_URL = 'https://dashscope.aliyuncs.com/compatible-mod
 
 const VISION_MODEL_PRESETS = [
   // —— 国内（China）端点 ——
-  { model: 'deepseek-v4-flash-vision-exp', label: { zh: 'DeepSeek V4 Flash Vision Exp (DeepSeek 开放平台)', en: 'DeepSeek V4 Flash Vision Exp (DeepSeek Platform)' }, baseUrl: DEFAULT_VISION_BASE_URL },
+  { model: 'deepseek-flash', label: { zh: 'DeepSeek Flash (DeepSeek 开放平台)', en: 'DeepSeek Flash (DeepSeek Platform)' }, baseUrl: DEFAULT_VISION_BASE_URL },
   { model: 'qwen3-vl-flash', label: { zh: 'Qwen3-VL Flash (阿里云百炼)', en: 'Qwen3-VL Flash (Alibaba Cloud)' }, baseUrl: DASHSCOPE_COMPAT_BASE_URL },
   { model: 'qwen3-vl-plus', label: { zh: 'Qwen3-VL Plus (阿里云百炼)', en: 'Qwen3-VL Plus (Alibaba Cloud)' }, baseUrl: DASHSCOPE_COMPAT_BASE_URL },
   { model: 'qwen3.6-flash', label: { zh: 'Qwen3.6 Flash (阿里云百炼)', en: 'Qwen3.6 Flash (Alibaba Cloud)' }, baseUrl: DASHSCOPE_COMPAT_BASE_URL },
   { model: 'qwen3.7-flash', label: { zh: 'Qwen3.7 Flash (阿里云百炼)', en: 'Qwen3.7 Flash (Alibaba Cloud)' }, baseUrl: DASHSCOPE_COMPAT_BASE_URL },
   { model: 'qwen3.7-plus', label: { zh: 'Qwen3.7 Plus (阿里云百炼)', en: 'Qwen3.7 Plus (Alibaba Cloud)' }, baseUrl: DASHSCOPE_COMPAT_BASE_URL },
+  { model: 'qwen3.8-flash', label: { zh: 'Qwen3.8 Flash (阿里云百炼)', en: 'Qwen3.8 Flash (Alibaba Cloud)' }, baseUrl: DASHSCOPE_COMPAT_BASE_URL },
   { model: 'MiniMax-M3', label: { zh: 'MiniMax-M3 (国内)', en: 'MiniMax-M3 (China)' }, baseUrl: 'https://api.minimaxi.com/v1' },
   { model: 'MiniMax-M3', label: { zh: 'MiniMax-M3 (海外)', en: 'MiniMax-M3 (Global)' }, baseUrl: 'https://api.minimax.io/v1' },
   // 福利预设：通过第三方中转站提供，key 留空由作者私下分发（小红书等渠道），
@@ -383,10 +384,10 @@ const VISION_MODEL_PRESETS = [
   // 注意保持官方大小写 MiniMax-M3：该中转站的「福利」分组同样大小写敏感，
   // 写成全小写会 503「无可用渠道」。
   { model: 'MiniMax-M3', label: { zh: 'MiniMax-M3 (福利)', en: 'MiniMax-M3 (Welfare)' }, baseUrl: decodeWelfareBaseUrl(), welfare: true },
+  { model: 'glm-5.3-flash', label: { zh: 'GLM-5.3-Flash (智谱 BigModel 国内)', en: 'GLM-5.3-Flash (Zhipu China)' }, baseUrl: 'https://open.bigmodel.cn/api/paas/v4' },
+  { model: 'glm-5.3-flash', label: { zh: 'GLM-5.3-Flash (智谱 Z.AI 海外)', en: 'GLM-5.3-Flash (Zhipu Global)' }, baseUrl: 'https://api.z.ai/api/paas/v4' },
   { model: 'glm-4.6v', label: { zh: 'GLM-4.6V (智谱 BigModel 国内)', en: 'GLM-4.6V (Zhipu China)' }, baseUrl: 'https://open.bigmodel.cn/api/paas/v4' },
   { model: 'glm-4.6v', label: { zh: 'GLM-4.6V (智谱 Z.AI 海外)', en: 'GLM-4.6V (Zhipu Global)' }, baseUrl: 'https://api.z.ai/api/paas/v4' },
-  { model: 'glm-5v-turbo', label: { zh: 'GLM-5V-Turbo (智谱 BigModel 国内)', en: 'GLM-5V-Turbo (Zhipu China)' }, baseUrl: 'https://open.bigmodel.cn/api/paas/v4' },
-  { model: 'glm-5v-turbo', label: { zh: 'GLM-5V-Turbo (智谱 Z.AI 海外)', en: 'GLM-5V-Turbo (Zhipu Global)' }, baseUrl: 'https://api.z.ai/api/paas/v4' },
   { model: 'doubao-seed-2-1-turbo-260628', label: { zh: 'Doubao Seed 2.1 Turbo (火山方舟)', en: 'Doubao Seed 2.1 Turbo (Volcengine Ark)' }, baseUrl: 'https://ark.cn-beijing.volces.com/api/v3' },
   { model: 'doubao-seed-2-0-lite-260428', label: { zh: 'Doubao Seed 2.0 Lite (火山方舟)', en: 'Doubao Seed 2.0 Lite (Volcengine Ark)' }, baseUrl: 'https://ark.cn-beijing.volces.com/api/v3' },
   { model: 'kimi-k2.6', label: { zh: 'Kimi K2.6 (月之暗面 国内)', en: 'Kimi K2.6 (Moonshot China)' }, baseUrl: 'https://api.moonshot.cn/v1', recommendedMaxTokens: 32_768 },
@@ -396,12 +397,21 @@ const VISION_MODEL_PRESETS = [
   { model: 'kimi-k3', label: { zh: 'Kimi K3 (月之暗面 国内)', en: 'Kimi K3 (Moonshot China)' }, baseUrl: 'https://api.moonshot.cn/v1', recommendedMaxTokens: 32_768 },
   { model: 'kimi-k3', label: { zh: 'Kimi K3 (月之暗面 海外)', en: 'Kimi K3 (Moonshot Global)' }, baseUrl: 'https://api.moonshot.ai/v1', recommendedMaxTokens: 32_768 },
   // —— 国际（International）端点 ——
+  { model: 'gemini-3.8-flash', label: { zh: 'Gemini 3.8 Flash (Google)', en: 'Gemini 3.8 Flash (Google)' }, baseUrl: 'https://generativelanguage.googleapis.com/v1beta/openai' },
+  { model: 'gemini-3.7-flash', label: { zh: 'Gemini 3.7 Flash (Google)', en: 'Gemini 3.7 Flash (Google)' }, baseUrl: 'https://generativelanguage.googleapis.com/v1beta/openai' },
   { model: 'gemini-3.6-flash', label: { zh: 'Gemini 3.6 Flash (Google)', en: 'Gemini 3.6 Flash (Google)' }, baseUrl: 'https://generativelanguage.googleapis.com/v1beta/openai' },
   { model: 'gpt-5.6', label: { zh: 'GPT-5.6 (OpenAI)', en: 'GPT-5.6 (OpenAI)' }, baseUrl: 'https://api.openai.com/v1' },
   { model: 'gpt-5.6-luna', label: { zh: 'GPT-5.6 Luna (OpenAI)', en: 'GPT-5.6 Luna (OpenAI)' }, baseUrl: 'https://api.openai.com/v1' },
   { model: 'gpt-4o', label: { zh: 'GPT-4o (OpenAI)', en: 'GPT-4o (OpenAI)' }, baseUrl: 'https://api.openai.com/v1' },
   { model: 'gpt-4o-mini', label: { zh: 'GPT-4o mini (OpenAI)', en: 'GPT-4o mini (OpenAI)' }, baseUrl: 'https://api.openai.com/v1' },
 ]
+
+// DeepSeek still accepts these retired IDs as compatibility aliases, but new
+// configurations should use the canonical `deepseek-flash` model name.
+const LEGACY_MODEL_BASE_URLS = new Map([
+  ['deepseek-v4-flash', DEFAULT_VISION_BASE_URL],
+  ['deepseek-v4-flash-vision-exp', DEFAULT_VISION_BASE_URL],
+])
 
 function getDefaultBaseUrlForModel(model) {
   const matches = VISION_MODEL_PRESETS.filter((preset) => preset.model === model)
@@ -412,6 +422,7 @@ function getDefaultBaseUrlForModel(model) {
   // configs/env setups that forgot VISIONPOWER_BASE_URL.
   if (matches.length === 1) return matches[0].baseUrl
   if (model === DEFAULT_VISION_MODEL) return DEFAULT_VISION_BASE_URL
+  if (LEGACY_MODEL_BASE_URLS.has(model)) return LEGACY_MODEL_BASE_URLS.get(model)
 
   const reason = matches.length > 1
     ? 'it is available through multiple configured endpoints'

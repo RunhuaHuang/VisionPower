@@ -2,6 +2,21 @@
 
 ## Unreleased
 
+## 3.2.5 - 2026-09-18
+
+- Updated the default DeepSeek model to the canonical `deepseek-flash` ID.
+  The retired `deepseek-v4-flash` and `deepseek-v4-flash-vision-exp` IDs remain
+  accepted for existing configurations, but new WebUI and documentation examples
+  use `deepseek-flash`.
+- Added current vision-capable presets for Zhipu `glm-5.3-flash`, Google
+  `gemini-3.8-flash` / `gemini-3.7-flash`, and Alibaba Cloud
+  `qwen3.8-flash`. Existing older presets remain available where the provider
+  still lists them as supported.
+- Retired `qwen3.8-max`, `qwen3.8-omni-flash`, and `glm-5v-turbo` from new
+  WebUI and Skill selections. Existing configurations with an explicit
+  `baseUrl` continue to be preserved.
+- Updated patched transitive dependencies (`fast-uri`, `hono`, and `qs`);
+  `npm audit --omit=dev` now reports no vulnerabilities.
 - Added a Kimi Code plugin form: the repository now ships a `kimi.plugin.json`
   manifest that declares both the Skill (`VisionPower-Skill/`) and the MCP
   server, so Kimi Code users can install VisionPower in one command —

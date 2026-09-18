@@ -63,15 +63,22 @@ do not read or print the API key.
 1. **Confirm Node 18.14.1+** (only here, not on normal calls): `node --version`.
 
 2. **Ask the user which vision model to use**, and offer the default:
-   - `qwen3-vl-flash` — **default**, Alibaba Cloud Model Studio / DashScope, fast & low-cost.
+   - `deepseek-flash` — **default**, DeepSeek API, fast and supports vision input.
+     Get a key: https://platform.deepseek.com/api_keys
+   - `qwen3-vl-flash` — Alibaba Cloud Model Studio / DashScope, fast & low-cost.
      Get a key: https://bailian.console.aliyun.com/?tab=model#/api-key
    - `qwen3-vl-plus` — DashScope, higher quality.
    - `qwen3.7-flash` — DashScope, newer generation with vision input.
+   - `qwen3.8-flash` — DashScope, current multimodal Flash model with image input.
+   - `glm-5.3-flash` — Zhipu (set `baseUrl` to `https://open.bigmodel.cn/api/paas/v4`
+     or `https://api.z.ai/api/paas/v4`).
+   - `gemini-3.8-flash` — Google (set `baseUrl` to
+     `https://generativelanguage.googleapis.com/v1beta/openai`).
    - `kimi-k3` — Moonshot (set `baseUrl` to `https://api.moonshot.cn/v1` or the global `.ai` endpoint).
    - `gpt-5.6` — OpenAI (set `baseUrl` to `https://api.openai.com/v1`).
      Get a key: https://platform.openai.com/api-keys
 
-   If the user has no preference, use `qwen3-vl-flash`.
+   If the user has no preference, use `deepseek-flash`.
 
 3. **Ask the user for their API key, then save it** to the persistent config file. Create
    `~/.visionpower/config.json` (mode 600). Only include `model`/`baseUrl` if not the default:
@@ -81,7 +88,7 @@ do not read or print the API key.
    cat > ~/.visionpower/config.json <<'JSON'
    {
      "apiKey": "PASTE_THE_KEY_HERE",
-     "model": "qwen3-vl-flash"
+     "model": "deepseek-flash"
    }
    JSON
    chmod 600 ~/.visionpower/config.json
@@ -201,8 +208,8 @@ Matching `VISIONPOWER_*` environment variables override the file.
 | config.json key | env override | Default | Purpose |
 | --- | --- | --- | --- |
 | `apiKey` | `VISIONPOWER_API_KEY` | — | API key for the vision provider |
-| `model` | `VISIONPOWER_MODEL` | `qwen3-vl-flash` | Vision model name |
-| `baseUrl` | `VISIONPOWER_BASE_URL` | DashScope `/compatible-mode/v1` | OpenAI-compatible base URL |
+| `model` | `VISIONPOWER_MODEL` | `deepseek-flash` | Vision model name |
+| `baseUrl` | `VISIONPOWER_BASE_URL` | `https://api.deepseek.com` | OpenAI-compatible base URL |
 | `maxImageBytes` | `VISIONPOWER_MAX_IMAGE_BYTES` | `20971520` | Per-image local/Base64 byte limit |
 | `maxTotalImageBytes` | `VISIONPOWER_MAX_TOTAL_IMAGE_BYTES` | `67108864` | Total local/Base64 bytes per call |
 | `maxImages` | `VISIONPOWER_MAX_IMAGES` | `8` | Max images per call |

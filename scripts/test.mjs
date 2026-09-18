@@ -771,6 +771,14 @@ try {
     'max_completion_tokens',
   )
   assert.equal(
+    resolveModelCapabilities('glm-5.3-flash', 'https://open.bigmodel.cn/api/paas/v4').provider,
+    'zhipu',
+  )
+  assert.equal(
+    resolveModelCapabilities('gemini-3.8-flash', 'https://generativelanguage.googleapis.com/v1beta/openai').provider,
+    'google',
+  )
+  assert.equal(
     resolveModelCapabilities('MiniMax-M3', 'https://api.minimaxi.com/v1').tokenParameter,
     'max_completion_tokens',
   )
@@ -2793,12 +2801,19 @@ try {
   assert.equal(getDefaultBaseUrlForModel('gpt-5.6'), 'https://api.openai.com/v1')
   assert.equal(getDefaultBaseUrlForModel('doubao-seed-2-1-turbo-260628'), 'https://ark.cn-beijing.volces.com/api/v3')
   assert.equal(getDefaultBaseUrlForModel('qwen3.7-flash'), 'https://dashscope.aliyuncs.com/compatible-mode/v1')
+  assert.equal(getDefaultBaseUrlForModel('qwen3.8-flash'), 'https://dashscope.aliyuncs.com/compatible-mode/v1')
   assert.equal(getDefaultBaseUrlForModel('deepseek-v4-flash-vision-exp'), 'https://api.deepseek.com')
+  assert.equal(getDefaultBaseUrlForModel('deepseek-flash'), 'https://api.deepseek.com')
+  assert.equal(getDefaultBaseUrlForModel('gemini-3.8-flash'), 'https://generativelanguage.googleapis.com/v1beta/openai')
   assert.equal(getDefaultBaseUrlForModel(DEFAULT_VISION_MODEL), DEFAULT_VISION_BASE_URL)
   assertThrowsMessage(() => getDefaultBaseUrlForModel('MiniMax-M3'), /BASE_URL is required.*multiple configured endpoints/i)
   assertThrowsMessage(() => getDefaultBaseUrlForModel('kimi-k2.6'), /BASE_URL is required.*multiple configured endpoints/i)
   assertThrowsMessage(() => getDefaultBaseUrlForModel('kimi-k3'), /BASE_URL is required.*multiple configured endpoints/i)
   assertThrowsMessage(() => getDefaultBaseUrlForModel('glm-4.6v'), /BASE_URL is required.*multiple configured endpoints/i)
+  assertThrowsMessage(() => getDefaultBaseUrlForModel('glm-5v-turbo'), /BASE_URL is required.*cannot be inferred safely/i)
+  assertThrowsMessage(() => getDefaultBaseUrlForModel('qwen3.8-max'), /BASE_URL is required.*cannot be inferred safely/i)
+  assertThrowsMessage(() => getDefaultBaseUrlForModel('qwen3.8-omni-flash'), /BASE_URL is required.*cannot be inferred safely/i)
+  assertThrowsMessage(() => getDefaultBaseUrlForModel('glm-5.3-flash'), /BASE_URL is required.*multiple configured endpoints/i)
   assertThrowsMessage(() => getDefaultBaseUrlForModel('totally-unknown-model'), /BASE_URL is required.*cannot be inferred safely/i)
 
   assertThrowsMessage(

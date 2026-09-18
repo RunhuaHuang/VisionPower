@@ -537,8 +537,8 @@ function consoleApp() {
     presets: [],
     config: {
       dshEnabled: true,
-      presetId: 'deepseek-v4-flash-vision-exp|https://api.deepseek.com',
-      model: 'deepseek-v4-flash-vision-exp',
+      presetId: 'deepseek-flash|https://api.deepseek.com',
+      model: 'deepseek-flash',
       baseUrl: 'https://api.deepseek.com',
       protocol: 'openai',
       apiKey: '',
@@ -854,7 +854,7 @@ function consoleApp() {
         // presets. Model alone is not unique (MiniMax/Kimi have China + global
         // entries with the same model ID), so a composite "model|baseUrl" key is
         // used. Falls back to 'custom' when the pair isn't a known preset.
-        const storedModel = data.model || 'deepseek-v4-flash-vision-exp';
+        const storedModel = data.model || 'deepseek-flash';
         const storedBaseUrl = data.baseUrl || '';
         const matched = this.presets.find(p => p.model === storedModel && p.baseUrl === storedBaseUrl);
         const resolvedPresetId = matched ? (matched.model + '|' + matched.baseUrl) : 'custom';
