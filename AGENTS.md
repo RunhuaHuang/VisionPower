@@ -1,4 +1,16 @@
-# VisionPower — Agent 快速通道（dsh）
+# VisionPower — Agent 快速通道
+
+## 如果你正在 Kimi Code 中访问本仓库
+
+本仓库自带 `kimi.plugin.json` 插件清单，**首选用 Kimi Code 插件方式安装**，不要走 MCP 手动配置或 Skill 拷贝的路：
+
+```text
+/plugins install https://github.com/RunhuaHuang/VisionPower
+```
+
+然后 `/reload`（或开新会话）激活。插件同时声明 Skill 与 MCP server，两种方式都可用。本机调试时也可 `/plugins install /path/to/local/VisionPower`。
+
+## dsh（DeepSeek Harness）
 
 当任务是在 dsh（DeepSeek Harness）上**安装 / 配置 / 修复 / 验证** VisionPower（拖图识图插件）时，不要手动拼装安装步骤，直接运行一键安装器（幂等，可反复执行）：
 

@@ -1,0 +1,31 @@
+{
+  "$schema": "https://kimi.com/schemas/kimi.plugin.schema.json",
+  "name": "visionpower",
+  "version": "3.2.4",
+  "description": "Image-understanding tool for non-multimodal (text-only) models. Uses an external vision model to analyze local images, URLs, Base64, inbox refs, or multiple images and return the results as text. Models that can understand images directly must not call this tool; use their own vision capability instead.",
+  "keywords": [
+    "vision",
+    "ocr",
+    "image-understanding",
+    "mcp",
+    "skill"
+  ],
+  "author": "Runhua",
+  "license": "MIT",
+  "homepage": "https://github.com/RunhuaHuang/VisionPower",
+  "interface": {
+    "displayName": "VisionPower",
+    "shortDescription": "Image understanding for non-multimodal models. Models that can see images directly must not call.",
+    "longDescription": "VisionPower is an image-understanding tool for non-multimodal (text-only) models. It uses an external vision-model API for OCR, scene description, chart interpretation, and image comparison. It accepts image paths, URLs, Base64, inbox refs, or ordered multi-image requests, validates them (path allowlist, magic bytes, size limits, URL/SSRF guards), and returns text or structured results marked as untrusted image content. Models that can understand images directly must not call this tool; use their own vision capability instead. Configure your vision model API key in ~/.visionpower/config.json or via the local WebUI (npx visionpower --webui).",
+    "developerName": "Runhua",
+    "websiteURL": "https://github.com/RunhuaHuang/VisionPower"
+  },
+  "skills": "./VisionPower-Skill/",
+  "mcpServers": {
+    "visionpower": {
+      "command": "npx",
+      "args": ["-y", "--package", "visionpower@latest", "visionpower"],
+      "toolTimeoutMs": 120000
+    }
+  }
+}

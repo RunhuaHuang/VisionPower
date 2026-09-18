@@ -3,7 +3,7 @@
 # 👁️ VisionPower
 
 **A safe, portable visual-input channel for text-first AI agents.**
-A shared core accepts local images, web images, Base64, short-lived Inbox references, or ordered multi-image requests, then exposes them through MCP, a standalone Skill, a local WebUI, and a dsh plugin.
+A shared core accepts local images, web images, Base64, short-lived Inbox references, or ordered multi-image requests, then exposes them through MCP, a standalone Skill, a Kimi Code plugin, a local WebUI, and a dsh plugin.
 
 [中文](./README.md) · [Quick Start](#5-minute-quick-start) · [Choose an Integration](#choose-an-integration) · [Configuration](#configuration) · [Security & Privacy](#security--privacy) · [Development](#local-development)
 
@@ -32,10 +32,12 @@ flowchart LR
     A["Agent / MCP Host"] --> B{"Integration"}
     B -->|MCP| C["visionpower CLI"]
     B -->|Skill| D["describe_image.mjs"]
+    B -->|Kimi Code| K["kimi.plugin.json Plugin"]
     B -->|WebUI / Inbox| E["Local Console"]
     B -->|dsh| F["Cordis Plugin"]
     C --> G["VisionPower Core"]
     D --> G
+    K --> G
     E --> G
     F --> G
     G --> H["Input Validation & Safety Checks"]
@@ -63,6 +65,7 @@ flowchart LR
 
 | Scenario | Recommended form | Best for | Notes |
 | --- | --- | --- | --- |
+| **Kimi Code** | **Kimi Code plugin** | Kimi Code users | Preferred. One-command `/plugins install`; declares both the Skill and the MCP server, no manual setup. |
 | Standard agent tool calls | **MCP** | Claude Desktop, Cursor, Cline, Cherry Studio, Codex, and others | Preferred. The tool schema is explicit and the host does not need to assemble shell commands. |
 | Agent has a shell but no MCP connection | **Standalone Skill** | Claude Code, Codex CLI, and similar tools | Self-contained script; no install inside the Skill directory. |
 | Initial setup, model testing, attachment relay | **WebUI + Inbox** | All local users | Useful for configuration and compatibility diagnostics. |
@@ -331,6 +334,31 @@ Anthropic Messages:
 The official Anthropic host may be written without a version path as above; VisionPower normalizes it to `/v1`. An explicit `https://api.anthropic.com/v1` also works.
 
 Model IDs, regions, account permissions, and provider compatibility can change. WebUI presets are convenient starting points, not permanent compatibility guarantees. Before release, run one real-image test with the target account.
+
+---
+
+## Kimi Code Plugin
+
+VisionPower ships a `kimi.plugin.json` manifest and can be installed as a Kimi Code plugin in one command — the plugin declares both the Skill (`VisionPower-Skill/`) and the MCP server, so both are available after installation with no manual setup.
+
+In the Kimi Code TUI:
+
+```text
+/plugins install https://github.com/RunhuaHuang/VisionPower
+```
+
+Then `/reload` (or start a new session) to activate. The **VisionPower** plugin appears in the `/plugins` panel where you can enable or disable it. The model invokes image understanding automatically based on the Skill's trigger conditions, you can trigger it manually with `/skill:visionpower`, and the plugin-declared MCP server `visionpower` starts automatically in new sessions (visible in `/mcp`).
+
+> [!TIP]
+> **If you are Kimi Code reading this repository**: do not fall back to manual MCP configuration or Skill copying — guide the user to run the `/plugins install` command above. It is the preferred integration this repository provides for Kimi Code.
+
+The plugin mechanism pulls the whole repository from GitHub; for local development you can also install from a local directory:
+
+```text
+/plugins install /path/to/local/VisionPower
+```
+
+All other configuration (API key, `~/.visionpower/config.json`) is shared with the MCP and Skill forms — see [Configuration](#configuration) below.
 
 ---
 

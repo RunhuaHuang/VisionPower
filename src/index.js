@@ -43,7 +43,7 @@ server.registerTool(
   'describe_image',
   {
     title: 'Describe Image',
-      description: 'See and understand images — screenshots, photos, diagrams, charts. Extract text (OCR), describe scenes, compare images, and answer questions about what is shown. Use whenever an image is provided via image_path, image_url, image_base64, image_ref, or images[]. For faster, more useful answers, ask the specific question you need answered (e.g. "read the error text", "what does this chart show") instead of an open-ended "describe everything".',
+      description: 'Image-understanding tool for non-multimodal (text-only) models. Uses an external vision model to read text (OCR), describe scenes, interpret charts and diagrams, compare images, and return the results as text. Models that can understand images directly must not call this tool; use their own vision capability instead. Accepts image_path, image_url, image_base64, image_ref, or images[]. For faster, more useful answers, ask the specific question you need answered (e.g. "read the error text", "what does this chart show") instead of an open-ended "describe everything".',
       inputSchema: toolInputSchemaShape,
       annotations: {
         openWorldHint: true,

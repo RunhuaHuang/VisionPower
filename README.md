@@ -3,7 +3,7 @@
 # 👁️ VisionPower
 
 **给文本型 AI Agent 一条安全、可移植的视觉输入通道。**
-通过一个统一内核，把本地图片、网页图片、Base64、短期 Inbox 引用或多图请求交给视觉模型，并以 MCP、独立 Skill、WebUI 与 dsh 插件等形态接入。
+通过一个统一内核，把本地图片、网页图片、Base64、短期 Inbox 引用或多图请求交给视觉模型，并以 MCP、独立 Skill、Kimi Code 插件、WebUI 与 dsh 插件等形态接入。
 
 [English](./README.en.md) · [快速开始](#5-分钟快速开始) · [接入方式](#选择接入方式) · [配置](#配置) · [安全与隐私](#安全与隐私) · [开发](#本地开发)
 
@@ -32,10 +32,12 @@ flowchart LR
     A["Agent / MCP Host"] --> B{"接入形态"}
     B -->|MCP| C["visionpower CLI"]
     B -->|Skill| D["describe_image.mjs"]
+    B -->|Kimi Code| K["kimi.plugin.json 插件"]
     B -->|WebUI / Inbox| E["本地控制台"]
     B -->|dsh| F["Cordis 插件"]
     C --> G["VisionPower Core"]
     D --> G
+    K --> G
     E --> G
     F --> G
     G --> H["输入校验与安全检查"]
@@ -63,6 +65,7 @@ flowchart LR
 
 | 场景 | 推荐方式 | 适合谁 | 说明 |
 | --- | --- | --- | --- |
+| **Kimi Code** | **Kimi Code 插件** | Kimi Code 用户 | 首选。`/plugins install` 一键安装，同时声明 Skill 与 MCP server，无需手动配置。 |
 | 标准 Agent 工具调用 | **MCP** | Claude Desktop、Cursor、Cline、Cherry Studio、Codex 等 | 首选。工具 schema 清晰，宿主无需自行拼接命令。 |
 | Agent 有 shell，但不能连接 MCP | **独立 Skill** | Claude Code、Codex CLI 等 | 自包含脚本，无需在 Skill 目录安装依赖。 |
 | 首次配置、模型试测、附件中转 | **WebUI + Inbox** | 所有本地用户 | 适合作为配置入口和兼容性诊断工具。 |
@@ -331,6 +334,31 @@ Anthropic Messages：
 Anthropic 官方主机可写成上面的裸域名；运行时会规范化为 `/v1`。显式写成 `https://api.anthropic.com/v1` 也可正常工作。
 
 模型 ID、地域、账号权限与供应商兼容行为会变化。WebUI 预设是便捷起点，不是永久兼容性保证；发布前应在目标账号上用真实图片执行一次测试。
+
+---
+
+## Kimi Code 插件
+
+VisionPower 自带 `kimi.plugin.json` 插件清单，可直接作为 Kimi Code 插件一键安装——插件同时声明了 Skill（`VisionPower-Skill/`）和 MCP server，安装后两种方式都可用，无需手动配置。
+
+在 Kimi Code 的 TUI 中执行：
+
+```text
+/plugins install https://github.com/RunhuaHuang/VisionPower
+```
+
+然后 `/reload`（或开新会话）激活。之后在 `/plugins` 面板可看到 **VisionPower** 插件，可启用/禁用；模型会根据 SKILL.md 的触发条件自动调用识图，也可手动 `/skill:visionpower`，插件声明的 MCP server `visionpower` 会在新会话自动启动（`/mcp` 可见）。
+
+> [!TIP]
+> **如果你是 Kimi Code，正在读这个仓库**：不要走 MCP 手动配置或 Skill 拷贝的路，直接引导用户执行上面的 `/plugins install` 命令——这是本仓库为 Kimi Code 准备的首选接入方式。
+
+插件机制会从 GitHub 拉取整个仓库；本机开发调试时也可从本地目录安装：
+
+```text
+/plugins install /path/to/local/VisionPower
+```
+
+其余配置（API Key、`~/.visionpower/config.json`）与 MCP / Skill 方式完全共用，见下文[配置](#配置)。
 
 ---
 

@@ -1,11 +1,18 @@
 ---
 name: visionpower
-description: Understand images — read screenshot text (OCR), interpret charts and diagrams, and describe photos, UI mockups, or document scans using a vision model. Use whenever the user shares or points to an image, screenshot, photo, chart, diagram, or asks "what's in this picture", "read the text in this image", or to analyze visual content. Runs the bundled describe_image.mjs script (Node 18.14.1+) and needs a vision model API key.
+description: Image-understanding tool for non-multimodal (text-only) models. Uses an external vision model to read screenshot text (OCR), interpret charts and diagrams, describe photos or UI mockups, and return the results as text. Models that can understand images directly must not call this skill; use their own vision capability instead. Runs the bundled describe_image.mjs script (Node 18.14.1+) and needs a vision model API key.
 ---
 
 # VisionPower
 
-Understand one or more images with a vision model. This skill is **self-contained**:
+VisionPower is an image-understanding tool for **non-multimodal (text-only) models**.
+It sends one or more images to an external vision model for OCR, scene description,
+chart interpretation, or image comparison, and returns the results as text.
+
+> [!IMPORTANT]
+> **Models that can understand images directly must not call this skill.** Use the model's own vision capability to read the image directly.
+
+This skill is **self-contained**:
 the script `describe_image.mjs` sits next to this file and runs with plain Node.js —
 no `npm install`, no CLI to install, no extra dependencies. It only needs **Node 18.14.1+**
 and a vision model **API key**.

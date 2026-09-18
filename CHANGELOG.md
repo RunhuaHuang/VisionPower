@@ -2,6 +2,19 @@
 
 ## Unreleased
 
+- Added a Kimi Code plugin form: the repository now ships a `kimi.plugin.json`
+  manifest that declares both the Skill (`VisionPower-Skill/`) and the MCP
+  server, so Kimi Code users can install VisionPower in one command —
+  `/plugins install https://github.com/RunhuaHuang/VisionPower` — with no
+  manual MCP or Skill setup. The README (zh/en) gains a "Kimi Code Plugin"
+  section and a row in the integration table; `AGENTS.md` now steers
+  Kimi Code agents visiting the repository to the plugin path first.
+- Updated all three surfaces (`kimi.plugin.json` descriptions, Skill
+  `SKILL.md`, and MCP `describe_image` tool description) to introduce
+  VisionPower as an image-understanding tool for **non-multimodal / text-only
+  models** first, followed by the restriction that models with direct image
+  understanding must use their own vision capability instead of this tool.
+
 ## 3.2.4 - 2026-08-22
 
 - Added DeepSeek as a vision provider: a `deepseek-v4-flash-vision-exp`
